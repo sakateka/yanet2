@@ -4,9 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <endian.h>
-
-#include "radix.h"
 
 #include "registry.h"
 #include "value.h"
@@ -16,281 +13,40 @@
 #include <stdio.h>
 
 
-static inline uint64_t
-net6_next(uint64_t value)
-{
-	return htobe64(be64toh(value) + 1);
-}
-
-static inline uint64_t
-net6_prev(uint64_t value)
-{
-	return htobe64(be64toh(value) - 1);
-}
-
-struct net6_collector {
-	struct radix64 radix64;
-	uint64_t *masks;
-	uint32_t mask_count;
-	uint32_t count;
-};
-
-static int
-net6_collector_init(struct net6_collector *collector)
-{
-	if (radix64_init(&collector->radix64))
-		return -1;
-	collector->masks = NULL;
-	collector->mask_count = 0;
-	return 0;
-}
-
-static int
-net6_collector_add_mask(struct net6_collector *collector, uint32_t *mask_index)
-{
-	if (!(collector->mask_count & (collector->mask_count + 1))) {
-		uint64_t *masks =
-			(uint64_t *)realloc(collector->masks,
-					      sizeof(uint64_t) *
-					      (collector->mask_count + 1) * 2);
-		if (masks == NULL)
-			return -1;
-		collector->masks = masks;
-	}
-
-	memset(collector->masks + collector->mask_count, 0, sizeof(uint64_t));
-	*mask_index = collector->mask_count++;
-	return 0;
-}
-
-static int
-net6_collector_add(
-	struct net6_collector *collector,
-	uint64_t value,
-	uint64_t mask)
-{
-	if (!mask)
-		return 0;
-
-	uint32_t mask_index = radix64_lookup(&collector->radix64, value);
-	if (mask_index == RADIX_VALUE_INVALID) {
-		if (net6_collector_add_mask(collector, &mask_index)) {
-			return -1;
-		}
-
-		if (radix64_insert(&collector->radix64, value, mask_index)) {
-			// FIXME: one mask item leaked here but well
-			return -1;
-		}
-	}
-
-	uint8_t prefix = __builtin_popcountll(mask);
-	collector->masks[mask_index] |= 1 << (prefix - 1);
-
-	return 0;
-}
-
-struct net6_stack {
-	uint64_t from;
-	uint64_t to;
-};
-
-struct net6_collect_ctx {
-	struct net6_collector *collector;
-
-	struct net6_stack stack[64];
-	uint32_t values[64];
-	uint32_t stack_depth;
-
-	uint32_t max_value;
-	uint64_t last_to;
-
-	struct lpm64 lpm64;
-};
-
-static inline uint32_t
-net6_collect_ctx_top_value(struct net6_collect_ctx *ctx)
-{
-	if (ctx->values[ctx->stack_depth - 1] == LPM_VALUE_INVALID) {
-		ctx->values[ctx->stack_depth - 1]  = ctx->max_value++;
-	}
-	return ctx->values[ctx->stack_depth - 1];
-}
-
-static inline uint64_t
-one_if_zero(uint64_t value)
-{
-	// endian ignorant
-	return (value - 1) / 0xffffffffffffffff;
-}
-
-static inline uint64_t
-trailing_z_mask(uint64_t value)
-{
-	return (value ^ (value - 1)) >> (1 - one_if_zero(value));
-}
-
-static int
-net6_collector_emit_range(
-	uint64_t from,
-	uint64_t to,
-	uint32_t value,
-	struct net6_collect_ctx *ctx)
-{
-	if (from == net6_next(to)) {
-		// /0 prefix
-		return lpm64_insert(&ctx->lpm64, from, to, value);
-	}
-
-	from = be64toh(from);
-	to = be64toh(to);
-
-	while (from != to + 1) {
-		uint64_t delta = to - from + 1;
-		delta >>= 1;
-		delta |= delta >> 1;
-		delta |= delta >> 2;
-		delta |= delta >> 4;
-		delta |= delta >> 8;
-		delta |= delta >> 16;
-		delta |= delta >> 32;
-
-		uint64_t mask = trailing_z_mask(from);
-		mask &= delta & mask;
-
-		if (lpm64_insert(&ctx->lpm64, htobe64(from), htobe64(from | mask), value))
-			return -1;
-
-		from = (from | mask) + 1;
-	}
-	return 0;
-}
-
-static void
-net6_collector_add_network(
-	uint64_t from,
-	uint64_t to,
-	struct net6_collect_ctx *ctx)
-{
-		while (ctx->stack_depth > 0) {
-			uint64_t upper_mask =
-				~(ctx->stack[ctx->stack_depth - 1].to ^
-				  ctx->stack[ctx->stack_depth - 1].from);
-			if (!((from ^ ctx->stack[ctx->stack_depth - 1].from) & upper_mask)) {
-				break;
-			}
-			if (!(ctx->last_to == ctx->stack[ctx->stack_depth - 1].to)) {
-				net6_collector_emit_range(
-					net6_next(ctx->last_to),
-					ctx->stack[ctx->stack_depth - 1].to,
-					net6_collect_ctx_top_value(ctx),
-					ctx);
-				ctx->last_to = ctx->stack[ctx->stack_depth - 1].to;
-			}
-			--ctx->stack_depth;
-		}
-
-		if (ctx->stack_depth > 0 &&
-		    !(net6_next(ctx->last_to) == from)) {
-			net6_collector_emit_range(
-					net6_next(ctx->last_to),
-					net6_prev(ctx->stack[ctx->stack_depth - 1].from),
-					net6_collect_ctx_top_value(ctx),
-					ctx);
-				ctx->last_to = net6_prev(ctx->stack[ctx->stack_depth - 1].from);
-		}
-
-		ctx->last_to = net6_prev(from);
-
-		ctx->stack[ctx->stack_depth] = (struct net6_stack){from, to};
-		ctx->values[ctx->stack_depth] = LPM_VALUE_INVALID;
-		ctx->stack_depth++;
-}
-
-static void
-net6_collector_iterate(
-	uint64_t key,
-	uint32_t value,
-	void *data)
-{
-	struct net6_collect_ctx *ctx = (struct net6_collect_ctx *)data;
-	uint64_t mask = ctx->collector->masks[value];
-
-	while (mask) {
-		uint64_t shift = __builtin_ctzll(mask);
-		uint64_t from = key;
-		uint64_t to = from | be64toh(0x7fffffffffffffff >> shift); // big endian
-		net6_collector_add_network(from, to, ctx);
-		mask ^= 0x01 << shift;
-	}
-}
-
-static struct lpm64
-net6_collector_collect(
-	struct net6_collector *collector)
-{
-	struct net6_collect_ctx ctx;
-	ctx.collector = collector;
-	ctx.max_value = 0;
-	lpm64_init(&ctx.lpm64);
-
-	ctx.stack[0] = (struct net6_stack){0, -1};
-	ctx.values[0] = LPM_VALUE_INVALID;
-	ctx.stack_depth = 1;
-	ctx.last_to = -1;
-
-	radix64_iterate(&collector->radix64, net6_collector_iterate, &ctx);
-
-	while (ctx.stack_depth > 0) {
-		if (!(ctx.last_to == ctx.stack[ctx.stack_depth - 1].to)
-		    || ctx.max_value == 0) {
-			net6_collector_emit_range(
-				net6_next(ctx.last_to),
-				ctx.stack[ctx.stack_depth - 1].to,
-				net6_collect_ctx_top_value(&ctx),
-				&ctx);
-			ctx.last_to = ctx.stack[ctx.stack_depth - 1].to;
-		}
-		--ctx.stack_depth;
-	}
-
-	collector->count = ctx.max_value;
-
-	return ctx.lpm64;
-}
+#include "filter/net6_collector.h"
 
 typedef void (*action_get_net6_func)(
-	struct ipfw_filter_action *action,
-	struct ipfw_net6 **net,
+	struct filter_action *action,
+	struct net6 **net,
 	uint32_t *count);
 
 static void
 action_get_net6_src(
-	struct ipfw_filter_action *action,
-	struct ipfw_net6 **net,
+	struct filter_action *action,
+	struct net6 **net,
 	uint32_t *count)
 {
-	*net = action->filter.net6.srcs;
-	*count = action->filter.net6.src_count;
+	*net = action->net6.srcs;
+	*count = action->net6.src_count;
 }
 
 static void
 action_get_net6_dst(
-	struct ipfw_filter_action *action,
-	struct ipfw_net6 **net,
+	struct filter_action *action,
+	struct net6 **net,
 	uint32_t *count)
 {
-	*net = action->filter.net6.dsts;
-	*count = action->filter.net6.dst_count;
+	*net = action->net6.dsts;
+	*count = action->net6.dst_count;
 }
 
 typedef void (*net6_get_part_func)(
-	struct ipfw_net6 *net,
+	struct net6 *net,
 	uint64_t *addr,
 	uint64_t *mask);
 
 static void
-net6_get_hi_part(struct ipfw_net6 *net,
+net6_get_hi_part(struct net6 *net,
 	uint64_t *addr,
 	uint64_t *mask)
 {
@@ -299,7 +55,7 @@ net6_get_hi_part(struct ipfw_net6 *net,
 }
 
 static void
-net6_get_lo_part(struct ipfw_net6 *net,
+net6_get_lo_part(struct net6 *net,
 	uint64_t *addr,
 	uint64_t *mask)
 {
@@ -308,28 +64,26 @@ net6_get_lo_part(struct ipfw_net6 *net,
 }
 
 
-static void
-lpm64_value_iterator(uint64_t key, uint32_t value, void *data)
+static int
+lpm64_value_iterator(uint32_t value, void *data)
 {
-	(void) key;
-
 	struct value_table *table = (struct value_table *)data;
-	value_table_touch(table, 0, value);
+	return value_table_touch(table, 0, value);
 }
 
 static void
 net6_collect_values(
-	struct ipfw_net6 *start,
+	struct net6 *start,
 	uint32_t count,
 	net6_get_part_func get_part,
 	struct lpm64 *lpm,
 	struct value_table *table)
 {
-	for (struct ipfw_net6 *net6 = start; net6 < start + count; ++net6) {
+	for (struct net6 *net6 = start; net6 < start + count; ++net6) {
 		uint64_t addr;
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
-		lpm64_walk(
+		lpm64_collect_values(
 			lpm,
 			addr,
 			addr | ~mask,
@@ -343,28 +97,26 @@ struct net_collect_cxt {
 	struct value_registry *registry;
 };
 
-static void
-lpm64_registry_iterator(uint64_t key, uint32_t value, void *data)
+static int
+lpm64_registry_iterator(uint32_t value, void *data)
 {
-	(void) key;
-
 	struct value_registry *registry = (struct value_registry *)data;
-	value_registry_collect(registry, value);
+	return value_registry_collect(registry, value);
 }
 
 static void
 net6_collect_registry(
-	struct ipfw_net6 *start,
+	struct net6 *start,
 	uint32_t count,
 	net6_get_part_func get_part,
 	struct lpm64 *lpm,
 	struct value_registry *registry)
 {
-	for (struct ipfw_net6 *net6 = start; net6 < start + count; ++net6) {
+	for (struct net6 *net6 = start; net6 < start + count; ++net6) {
 		uint64_t addr;
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
-		lpm64_walk(
+		lpm64_collect_values(
 			lpm,
 			addr,
 			addr | ~mask,
@@ -568,48 +320,51 @@ set_registry_values(
 }
 
 static int
-collect_network_values(
-	struct ipfw_filter_action *actions,
+collect_net6_values(
+	struct filter_action *actions,
 	uint32_t count,
 	action_get_net6_func get_net6,
 	net6_get_part_func get_part,
 	struct lpm64 *lpm,
 	struct value_registry *registry)
 {
-	struct value_table table;
 
 	struct net6_collector collector;
 	if (net6_collector_init(&collector))
 		goto error;
 
-	for (struct ipfw_filter_action *action = actions;
+	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
-		struct ipfw_net6 *nets;
+		struct net6 *nets;
 		uint32_t net_count;
 		get_net6(action, &nets, &net_count);
 
-		for (struct ipfw_net6 *net6 = nets;
+		for (struct net6 *net6 = nets;
 		     net6 < nets + net_count;
 		     ++net6) {
 			uint64_t addr;
 			uint64_t mask;
 			get_part(net6, &addr, &mask);
 
-			net6_collector_add(&collector, addr, mask);
+			if (net6_collector_add(&collector, addr, mask))
+				goto error_collector;
 		}
 	}
-	*lpm = net6_collector_collect(&collector);
+	if (net6_collector_collect(&collector, lpm)) {
+		//TODO
+	}
 
+	struct value_table table;
 	if (value_table_init(&table, 1, collector.count))
 		goto error_vtab;
 
-	for (struct ipfw_filter_action *action = actions;
+	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
 		value_table_new_gen(&table);
 
-		struct ipfw_net6 *nets;
+		struct net6 *nets;
 		uint32_t net_count;
 		get_net6(action, &nets, &net_count);
 
@@ -622,17 +377,18 @@ collect_network_values(
 	}
 
 	value_table_compact(&table);
-	lpm64_compact(lpm, &table);
+	lpm64_remap(lpm, &table);
+	lpm64_compact(lpm);
 
 	if (value_registry_init(registry))
 		goto error_reg;
 
-	for (struct ipfw_filter_action *action = actions;
+	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
 		value_registry_start(registry);
 
-		struct ipfw_net6 *nets;
+		struct net6 *nets;
 		uint32_t net_count;
 		get_net6(action, &nets, &net_count);
 
@@ -647,10 +403,11 @@ collect_network_values(
 	value_table_free(&table);
 	return 0;
 
+error_collector:
+	net6_collector_free(&collector);
 
 error_reg:
 	value_table_free(&table);
-
 error_vtab:
 
 error:
@@ -658,33 +415,33 @@ error:
 }
 
 typedef void (*action_get_port_range_func)(
-	struct ipfw_filter_action *action,
-	struct ipfw_port_range **ranges,
+	struct filter_action *action,
+	struct filter_port_range **ranges,
 	uint32_t *count);
 
 static void
 get_port_range_src(
-	struct ipfw_filter_action *action,
-	struct ipfw_port_range **ranges,
+	struct filter_action *action,
+	struct filter_port_range **ranges,
 	uint32_t *count)
 {
-	*ranges = action->filter.transport.srcs;
-	*count = action->filter.transport.src_count;
+	*ranges = action->transport.srcs;
+	*count = action->transport.src_count;
 }
 
 static void
 get_port_range_dst(
-	struct ipfw_filter_action *action,
-	struct ipfw_port_range **ranges,
+	struct filter_action *action,
+	struct filter_port_range **ranges,
 	uint32_t *count)
 {
-	*ranges = action->filter.transport.dsts;
-	*count = action->filter.transport.dst_count;
+	*ranges = action->transport.dsts;
+	*count = action->transport.dst_count;
 }
 
 static int
 collect_port_values(
-	struct ipfw_filter_action *actions,
+	struct filter_action *actions,
 	uint32_t count,
 	action_get_port_range_func get_port_range,
 	struct value_registry *registry)
@@ -693,15 +450,15 @@ collect_port_values(
 	if (value_table_init(&table, 1, 65536))
 		return -1;
 
-	for (struct ipfw_filter_action *action = actions;
+	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
 		value_table_new_gen(&table);
 
-		struct ipfw_port_range *port_ranges;
+		struct filter_port_range *port_ranges;
 		uint32_t port_range_count;
 		get_port_range(action, &port_ranges, &port_range_count);
-		for (struct ipfw_port_range *ports = port_ranges;
+		for (struct filter_port_range *ports = port_ranges;
 		     ports < port_ranges + port_range_count;
 		     ++ports) {
 			if (ports->to - ports->from == 65535)
@@ -719,15 +476,15 @@ collect_port_values(
 	if (value_registry_init(registry))
 		goto error_reg;
 
-	for (struct ipfw_filter_action *action = actions;
+	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
 		value_registry_start(registry);
 
-		struct ipfw_port_range *port_ranges;
+		struct filter_port_range *port_ranges;
 		uint32_t port_range_count;
 		get_port_range(action, &port_ranges, &port_range_count);
-		for (struct ipfw_port_range *ports = port_ranges;
+		for (struct filter_port_range *ports = port_ranges;
 		     ports < port_ranges + port_range_count;
 		     ++ports) {
 			for (uint32_t port = ports->from;
@@ -748,6 +505,7 @@ error_reg:
 	return -1;
 }
 
+/*
 static int
 filter_table_copy(
 	struct filter_table *ftab,
@@ -759,21 +517,23 @@ filter_table_copy(
 	memcpy(ftab->values, vtab->values, sizeof(uint32_t) * vtab->h_dim * vtab->v_dim);
 	return 0;
 }
+*/
 
 int
-ipfw_packet_filter_create(
-	struct ipfw_filter_action *actions,
-	uint32_t count,
-	struct ipfw_packet_filter *filter)
+filter_compiler_init(
+	struct filter_compiler *filter,
+	struct filter_action *actions,
+	uint32_t count)
 {
-	struct value_registry src_net6_hi_registry;
 	struct value_registry src_net6_lo_registry;
 	struct value_registry dst_net6_hi_registry;
 	struct value_registry dst_net6_lo_registry;
 	struct value_registry src_port_registry;
 	struct value_registry dst_port_registry;
 
-	collect_network_values(
+
+	struct value_registry src_net6_hi_registry;
+	collect_net6_values(
 		actions,
 		count,
 		action_get_net6_src,
@@ -781,7 +541,7 @@ ipfw_packet_filter_create(
 		&filter->src_net6_hi,
 		&src_net6_hi_registry);
 
-	collect_network_values(
+	collect_net6_values(
 		actions,
 		count,
 		action_get_net6_src,
@@ -789,7 +549,7 @@ ipfw_packet_filter_create(
 		&filter->src_net6_lo,
 		&src_net6_lo_registry);
 
-	collect_network_values(
+	collect_net6_values(
 		actions,
 		count,
 		action_get_net6_dst,
@@ -797,7 +557,7 @@ ipfw_packet_filter_create(
 		&filter->dst_net6_hi,
 		&dst_net6_hi_registry);
 
-	collect_network_values(
+	collect_net6_values(
 		actions,
 		count,
 		action_get_net6_dst,
@@ -816,6 +576,8 @@ ipfw_packet_filter_create(
 		count,
 		get_port_range_dst,
 		&dst_port_registry);
+
+
 
 	struct value_table vtab1;
 	struct value_registry vtab1_registry;
@@ -849,6 +611,7 @@ ipfw_packet_filter_create(
 		&vtab12,
 		&vtab12_registry);
 
+/*
 	struct value_table vtab123;
 	struct value_registry vtab123_registry;
 	merge_and_collect_registry(
@@ -857,17 +620,8 @@ ipfw_packet_filter_create(
 		&vtab123,
 		&vtab123_registry);
 
-	for (uint32_t action_idx = 0; idx < count; ++idx) {
-		struct value_range *range = vtab123_registry.ranges + action_idx;
-		for (uint32_t v_idx = range->from; v_idx < range->to; ++v_idx) {
-			
 
-		}
-	}
-
-
-
-
+*/
 
 
 	struct value_table vtab123;
@@ -876,9 +630,9 @@ ipfw_packet_filter_create(
 		&vtab12_registry,
 		&vtab3_registry,
 		&vtab123,
-		&filter->vtab123_registry);
+		&filter->v6_lookups.result_registry);
 
-
+/*
 	filter->classify[0] = filter_classify_src_net_hi;
 	filter->classify[1] = filter_classify_dst_net_hi;
 	filter->classify[2] = filter_classify_src_net_lo;
@@ -933,6 +687,6 @@ ipfw_packet_filter_create(
 	filter->actions = (uint32_t *)malloc(sizeof(uint32_t) * count);
 	for (uint32_t idx = 0; idx < count; ++idx)
 		filter->actions[idx] = actions[idx].action;
-
+*/
 	return 0;
 }

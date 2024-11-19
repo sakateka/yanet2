@@ -48,6 +48,17 @@ lpm64_init(struct lpm64 *lpm64)
 	return 0;
 }
 
+static inline void
+lpm64_free(struct lpm64 *lpm64)
+{
+	for (size_t chunk_idx = 0;
+	     chunk_idx < lpm64->page_count / 16;
+	     ++chunk_idx)
+		free(lpm64->pages[chunk_idx]);
+
+	free(lpm64->pages);
+}
+
 static inline int
 lpm64_new_page(struct lpm64 *lpm64, uint32_t *page_idx)
 {
@@ -121,11 +132,9 @@ lpm64_lookup(const struct lpm64 *lpm64, uint64_t key)
 }
 
 /*
- * LPM iteration callback called for each valid value. Key is big-endian
- * encoded.
+ * LPM iteration callback called for each valid value.
  */
-typedef void (*lpm64_iterate_func)(
-	uint64_t key,
+typedef int (*lpm64_collect_values_func)(
 	uint32_t value,
 	void *data
 );
@@ -133,14 +142,14 @@ typedef void (*lpm64_iterate_func)(
 /*
  * Collect all valid values for [from..to] key range. Keys are big-endian.
  * The routine does not invoke callback if the previous one value is equal the
- * next one so the function return only valid values but not key:value pairs.
+ * next one.
  */
-static inline void
-lpm64_walk(
+static inline int
+lpm64_collect_values(
 	const struct lpm64 *lpm,
 	uint64_t from, uint64_t to,
-	lpm64_iterate_func iterate_func,
-	void *iterate_func_data)
+	lpm64_collect_values_func collect_func,
+	void *collect_func_data)
 {
 	uint8_t *from_bytes = (uint8_t *)&from;
 	uint8_t *to_bytes = (uint8_t *)&to;
@@ -156,14 +165,13 @@ lpm64_walk(
 	while (1) {
 		uint32_t value = (*pages[hop])[keys[hop]];
 		if (value == LPM_VALUE_INVALID) {
-
-
+			// TODO: handle unintialized value: should we call cb?
 		} else if (value & LPM_VALUE_FLAG) {
 			if (value != prev_value) {
-				iterate_func(
-					*(uint64_t *)keys,
+				if (collect_func(
 					value & LPM_VALUE_MASK,
-					iterate_func_data);
+					collect_func_data))
+					return -1;
 				prev_value = value;
 			}
 		} else {
@@ -183,16 +191,18 @@ lpm64_walk(
 				break;
 		}
 	}
+
+	return 0;
 }
 
 /*
  * The routine combine LPM and value table mapping.
  * This means that some value from the LPM could map into one value from
  * the mapping. Compactification assumes rewrite LPM stored values into mapped
- * ones and make LPM as small as possible.
+ * ones.
  */
 static inline void
-lpm64_compact(
+lpm64_remap(
 	struct lpm64 *lpm,
 	struct value_table *table)
 {
@@ -206,7 +216,6 @@ lpm64_compact(
 	while (1) {
 		uint32_t value = (*pages[hop])[keys[hop]];
 		if (value == LPM_VALUE_INVALID) {
-
 
 		} else if (value & LPM_VALUE_FLAG) {
 			(*pages[hop])[keys[hop]] = value_table_get(
@@ -244,5 +253,52 @@ lpm64_compact(
 		}
 	}
 }
+
+static inline void
+lpm64_compact(struct lpm64 *lpm)
+{
+	uint8_t keys[8];
+	lpm64_page_t *pages[8];
+
+	int8_t hop = 0;
+	keys[hop] = 0;
+	pages[hop] = lpm64_page(lpm, 0);
+
+	while (1) {
+		uint32_t value = (*pages[hop])[keys[hop]];
+		if (value == LPM_VALUE_INVALID ||
+		    value & LPM_VALUE_FLAG) {
+		} else {
+			++hop;
+			keys[hop] = 0;
+			pages[hop] = lpm64_page(lpm, value);
+			continue;
+		}
+
+		keys[hop]++;
+		if (keys[hop] == 0) {
+			if (hop == 0)
+				break;
+			bool is_monolite = 1;
+			uint32_t first_value = (*pages[hop])[0];
+			for (uint8_t idx = 255; idx > 0; --idx)
+				is_monolite &= first_value == (*pages[hop])[idx];
+
+			--hop;
+			if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
+				(*pages[hop])[keys[hop]] = first_value;
+			}
+
+			keys[hop]++;
+			if (keys[0] == 0)
+				break;
+		}
+	}
+
+}
+
+struct lpm32 {
+
+};
 
 #endif

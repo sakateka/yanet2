@@ -12,18 +12,18 @@
 #include "lpm.h"
 #include "registry.h"
 
-struct filter_network6 {
+struct filter_net6 {
 	uint32_t src_count;
 	uint32_t dst_count;
-	struct ipfw_net6 *srcs;
-	struct ipfw_net6 *dsts;
+	struct net6 *srcs;
+	struct net6 *dsts;
 };
 
-struct filter_network4 {
+struct filter_net4 {
 	uint32_t src_count;
 	uint32_t dst_count;
-	struct ipfw_net4 *srcs;
-	struct ipfw_net4 *dsts;
+	struct net4 *srcs;
+	struct net4 *dsts;
 };
 
 struct filter_port_range {
@@ -39,30 +39,14 @@ struct filter_transport {
 	struct filter_port_range *dsts;
 };
 
-struct filter {
-};
-
-struct ipfw_filter_action {
-	struct filter_net6_filter net6;
-	struct ipfw_net4_filter net4;
-	struct ipfw_transport_filter transport;
+struct filter_action {
+	struct filter_net6 net6;
+	struct filter_net4 net4;
+	struct filter_transport transport;
 	uint32_t action;
 };
 
-struct fw_filter;
-
-
-typedef int (*collect_filter_values)(
-	actions *ipfw_filter_action,
-	uint32_t count,
-	struct fw_filter *filter
-);
-
-
-
-struct ipfw_packet_filter {
-	struct filter filter;
-
+struct filter_compiler {
 	struct lpm32 src_net4;
 	struct lpm32 dst_net4;
 
@@ -75,21 +59,27 @@ struct ipfw_packet_filter {
 	uint32_t dst_port[65536];
 	uint16_t proto_flag[65536];
 
+	struct {
+		struct value_table network;
+		struct value_table transport_port;
+		struct value_table result;
+		struct value_registry result_registry;
+	} v4_lookups;
 
-
-	filter_classify classify[6];
-	struct filter_lookup lookups[5];
-	struct filter_table tables[5];
-
-
-	struct value_registry vtab123_registry;
-	uint32_t *actions;
+	struct {
+		struct value_table network_hi;
+		struct value_table network_lo;
+		struct value_table network;
+		struct value_table transport_port;
+		struct value_table result;
+		struct value_registry result_registry;
+	} v6_lookups;
 };
 
 int
-ipfw_packet_filter_create(
-	struct ipfw_filter_action *actions,
-	uint32_t count,
-	struct ipfw_packet_filter *filter);
+filter_compiler_init(
+	struct filter_compiler *compiler,
+	struct filter_action *actions,
+	uint32_t count);
 
 #endif
