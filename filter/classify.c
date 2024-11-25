@@ -41,7 +41,7 @@ filter_classify_src_net_hi(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->src_net6_hi, *(uint64_t *)ipv6Header->src_addr);
+	return lpm64_lookup(&ipfw_filter->src_net6_hi, (uint8_t *)ipv6Header->src_addr);
 }
 
 
@@ -72,7 +72,7 @@ filter_classify_src_net_lo(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->src_net6_lo, *(uint64_t *)(ipv6Header->src_addr + 8));
+	return lpm64_lookup(&ipfw_filter->src_net6_lo, (uint8_t *)(ipv6Header->src_addr + 8));
 
 }
 
@@ -103,7 +103,7 @@ filter_classify_dst_net_hi(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->dst_net6_hi, *(uint64_t *)ipv6Header->dst_addr);
+	return lpm64_lookup(&ipfw_filter->dst_net6_hi, (uint8_t *)ipv6Header->dst_addr);
 }
 
 
@@ -134,7 +134,7 @@ filter_classify_dst_net_lo(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->dst_net6_lo, *(uint64_t *)(ipv6Header->dst_addr + 8));
+	return lpm64_lookup(&ipfw_filter->dst_net6_lo, (uint8_t *)(ipv6Header->dst_addr + 8));
 
 }
 

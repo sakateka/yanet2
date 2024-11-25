@@ -10,115 +10,120 @@
 #define RADIX_CHUNK_SIZE 16
 
 /*
- * RADIX64 tree maps 8-byte values into one unsigned one. The tree organized
- * into 8-level page tree whre first 7 lookups denotes next page and the last
+ * RADIX tree maps a n-byte array value into one unsigned one. The tree organized
+ * into n-page tree where first n-1 lookups denotes next page and the last
  * one return the stored value.
  *
  * Each page is 256 items-wide with each item is 4-byte unsigned integer.
  * Any uninitialized value is marked with the special flag.
  */
 
-typedef uint32_t radix64_page_t[256];
+typedef uint32_t radix_page_t[256];
 
 //TODO: chunked storage
-struct radix64 {
-	radix64_page_t **pages;
+struct radix {
+	radix_page_t **pages;
 	size_t page_count;
 };
 
-static inline radix64_page_t *
-radix64_page(const struct radix64 *radix64, uint32_t page_idx)
+static inline radix_page_t *
+radix_page(const struct radix *radix, uint32_t page_idx)
 {
-	return radix64->pages[page_idx / RADIX_CHUNK_SIZE] +
+	return radix->pages[page_idx / RADIX_CHUNK_SIZE] +
 		page_idx % RADIX_CHUNK_SIZE;
 }
 
-static int
-radix64_init(struct radix64 *radix64)
+static inline int
+radix_init(struct radix *radix)
 {
-	radix64->pages = (radix64_page_t **)malloc(sizeof(radix64_page_t *) * 1);
-	if (radix64->pages == NULL)
+	radix->pages = (radix_page_t **)malloc(sizeof(radix_page_t *) * 1);
+	if (radix->pages == NULL)
 		return -1;
-	radix64->pages[0] = (radix64_page_t *)malloc(sizeof(radix64_page_t) * 16);
-	if (radix64->pages[0] == NULL)
+	radix->pages[0] = (radix_page_t *)malloc(sizeof(radix_page_t) * 16);
+	if (radix->pages[0] == NULL)
 		return -1;
-	radix64->page_count = 1;
-	memset(radix64_page(radix64, 0), 0xff, sizeof(radix64_page_t));
+	radix->page_count = 1;
+	memset(radix_page(radix, 0), 0xff, sizeof(radix_page_t));
 	return 0;
 }
 
 static inline void
-radix64_free(struct radix64 *radix64)
+radix_free(struct radix *radix)
 {
 	for (uint32_t chunk_idx = 0;
-	     chunk_idx < radix64->page_count / RADIX_CHUNK_SIZE;
+	     chunk_idx < radix->page_count / RADIX_CHUNK_SIZE;
 	     ++chunk_idx) {
-		free(radix64->pages[chunk_idx]);
+		free(radix->pages[chunk_idx]);
 	}
-	free(radix64->pages);
+	free(radix->pages);
 }
 
-static uint32_t
-radix64_new_page(struct radix64 *radix64, uint32_t *page_idx)
+static inline uint32_t
+radix_new_page(struct radix *radix, uint32_t *page_idx)
 {
-	if (!(radix64->page_count % RADIX_CHUNK_SIZE)) {
+	if (!(radix->page_count % RADIX_CHUNK_SIZE)) {
 		uint32_t new_chunk_count =
-			radix64->page_count / RADIX_CHUNK_SIZE + 1;
-		radix64_page_t **pages =
-			(radix64_page_t **)realloc(radix64->pages,
-						   sizeof(radix64_page_t *) *
+			radix->page_count / RADIX_CHUNK_SIZE + 1;
+		radix_page_t **pages =
+			(radix_page_t **)realloc(radix->pages,
+						   sizeof(radix_page_t *) *
 					           new_chunk_count);
 		if (pages == NULL) {
 			return -1;
 		}
-		radix64->pages = pages;
-		radix64->pages[new_chunk_count - 1] =
-			(radix64_page_t *)malloc(
-				sizeof(radix64_page_t) * RADIX_CHUNK_SIZE);
-		if (radix64->pages[new_chunk_count - 1] == NULL)
+		radix->pages = pages;
+		radix->pages[new_chunk_count - 1] =
+			(radix_page_t *)malloc(
+				sizeof(radix_page_t) * RADIX_CHUNK_SIZE);
+		if (radix->pages[new_chunk_count - 1] == NULL)
 			return -1;
 	}
-	*page_idx = radix64->page_count;
-	memset(radix64_page(radix64, radix64->page_count),
+	*page_idx = radix->page_count;
+	memset(radix_page(radix, radix->page_count),
 		0xff,
-		sizeof(radix64_page_t));
-	++(radix64->page_count);
+		sizeof(radix_page_t));
+	++(radix->page_count);
 	return 0;
 }
 
-static int
-radix64_insert(struct radix64 *radix64, uint64_t key, uint32_t value)
+static inline int
+radix_insert(
+	struct radix *radix,
+	uint8_t key_size,
+	const uint8_t *key,
+	uint32_t value)
 {
-	const uint8_t *key_bytes = (uint8_t *)&key;
-	radix64_page_t *page = radix64_page(radix64, 0);
+	radix_page_t *page = radix_page(radix, 0);
 
-	for (uint32_t iter = 0; iter < 7; ++iter) {
-		uint32_t *stored_value = (*page) + key_bytes[iter];
+	for (uint8_t iter = 0; iter < key_size - 1; ++iter) {
+		uint32_t *stored_value = (*page) + key[iter];
 		if (*stored_value == RADIX_VALUE_INVALID &&
-		    radix64_new_page(radix64, stored_value))
+		    radix_new_page(radix, stored_value))
 			return -1;
-		page = radix64_page(radix64, *stored_value);
+		page = radix_page(radix, *stored_value);
 	}
 
-	(*page)[key_bytes[7]] = value;
+	(*page)[key[key_size - 1]] = value;
 	return 0;
 }
 
-static uint32_t
-radix64_lookup(const struct radix64 *radix64, uint64_t key)
+static inline uint32_t
+radix_lookup(
+	const struct radix *radix,
+	uint8_t key_size,
+	const uint8_t *key)
 {
-	const uint8_t *key_bytes = (uint8_t *)&key;
 	uint32_t value;
 	// Do three page lookups and then retrieve the value
-	radix64_page_t *page = radix64_page(radix64, 0);
-	for (uint32_t iter = 0; iter < 7; ++iter) {
-		value = (*page)[key_bytes[iter]];
+	radix_page_t *page = radix_page(radix, 0);
+	for (uint8_t iter = 0; iter < key_size - 1; ++iter) {
+		value = (*page)[key[iter]];
 		if (value == RADIX_VALUE_INVALID)
 			return RADIX_VALUE_INVALID;
 
-		page = radix64_page(radix64, value);
+		page = radix_page(radix, value);
 	}
-	value = (*page)[key_bytes[7]];
+	value = (*page)[key[key_size - 1]];
 	return value;
 }
 
@@ -126,8 +131,9 @@ radix64_lookup(const struct radix64 *radix64, uint64_t key)
  * RADIX iterate callback invoked for each valid value. The key is encoded
  * using big-endian.
  */
-typedef int (*radix64_iterate_func)(
-	uint64_t key,
+typedef int (*radix_iterate_func)(
+	uint8_t key_size,
+	const uint8_t *key,
 	uint32_t value,
 	void *data
 );
@@ -136,47 +142,100 @@ typedef int (*radix64_iterate_func)(
  * The routine iterates through whole RADIX and invokes a callback for
  * each valid key/value pair.
  */
-static int
-radix64_iterate(
-	const struct radix64 *radix64,
-	radix64_iterate_func iterate_func,
+static inline int
+radix_walk(
+	const struct radix *radix,
+	uint8_t key_size,
+	radix_iterate_func iterate_func,
 	void *iterate_func_data)
 {
-	uint8_t keys[8];
-	radix64_page_t *pages[8];
+	uint8_t key[key_size];
+	radix_page_t *pages[key_size];
 
 	uint8_t depth = 0;
-	keys[depth] = 0;
-	pages[depth] = radix64_page(radix64, 0);
+	key[depth] = 0;
+	pages[depth] = radix_page(radix, 0);
 
 	while (1) {
-		uint32_t value = (*pages[depth])[keys[depth]];
+		uint32_t value = (*pages[depth])[key[depth]];
 
 		if (value != RADIX_VALUE_INVALID) {
-			if (depth == 7) {
-				uint64_t key = *(uint64_t *)keys;
+			if (depth == key_size - 1) {
 				if (iterate_func(
+					key_size,
 					key,
 					value,
 					iterate_func_data))
 					return -1;
 			} else {
-				pages[depth + 1] = radix64_page(radix64, value);
-				keys[depth + 1] = 0;
+				pages[depth + 1] = radix_page(radix, value);
+				key[depth + 1] = 0;
 				++depth;
 				continue;
 			}
 		}
 
-		keys[depth]++;
-		if (keys[depth] == 0) {
+		key[depth]++;
+		if (key[depth] == 0) {
 			if (depth == 0)
 				break;
 			--depth;
-			keys[depth]++;
+			key[depth]++;
 		}
 	}
 	return 0;
+}
+
+static inline int
+radix64_insert(
+	struct radix *radix64,
+	const uint8_t *key,
+	uint32_t value)
+{
+	return radix_insert(radix64, 8, key, value);
+}
+
+static inline uint32_t
+radix64_lookup(
+	const struct radix *radix64,
+	const uint8_t *key)
+{
+	return radix_lookup(radix64, 8, key);
+}
+
+static inline int
+radix64_walk(
+	const struct radix *radix64,
+	radix_iterate_func iterate_func,
+	void *iterate_func_data)
+{
+	return radix_walk(radix64, 8, iterate_func, iterate_func_data);
+}
+
+static inline int
+radix32_insert(
+	struct radix *radix32,
+	const uint8_t *key,
+	uint32_t value)
+{
+	return radix_insert(radix32, 4, key, value);
+}
+
+static inline uint32_t
+radix32_lookup(
+	const struct radix *radix32,
+	const uint8_t *key)
+{
+	return radix_lookup(radix32, 4, key);
+}
+
+static inline int
+radix32_walk(
+	const struct radix *radix32,
+	radix_iterate_func iterate_func,
+	void *iterate_func_data)
+{
+	return radix_walk(radix32, 4, iterate_func, iterate_func_data);
 }
 
 #endif

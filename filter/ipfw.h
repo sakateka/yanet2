@@ -47,13 +47,13 @@ struct filter_action {
 };
 
 struct filter_compiler {
-	struct lpm32 src_net4;
-	struct lpm32 dst_net4;
+	struct lpm src_net4;
+	struct lpm dst_net4;
 
-	struct lpm64 src_net6_hi;
-	struct lpm64 src_net6_lo;
-	struct lpm64 dst_net6_hi;
-	struct lpm64 dst_net6_lo;
+	struct lpm src_net6_hi;
+	struct lpm src_net6_lo;
+	struct lpm dst_net6_hi;
+	struct lpm dst_net6_lo;
 
 	uint32_t src_port[65536];
 	uint32_t dst_port[65536];

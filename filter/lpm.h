@@ -2,11 +2,11 @@
 #define LPM_H
 
 /*
- * Longest Prefix Match (LPM) tree used to map a range of 8-byte values into
+ * Longest Prefix Match (LPM) tree used to map a range of n-byte values into
  * 4-byte unsigned one. The tree organized into variable-length page tree
  * where values marked with the special flag.
  *
- * The tree does not allow to reassign key-ranges or delete them.
+ * The tree does not allow to rewrite key-ranges or delete them.
  */
 
 #include <stdint.h>
@@ -20,66 +20,105 @@
 #define LPM_VALUE_INVALID 0xffffffff
 #define LPM_VALUE_MASK 0x7fffffff
 #define LPM_VALUE_FLAG 0x80000000
-typedef uint32_t lpm64_page_t[256];
+
+#define LPM_CHUNK_SIZE 16
+
+typedef uint32_t lpm_page_t[256];
 
 //TODO chunked storage
-struct lpm64 {
-	lpm64_page_t **pages;
+struct lpm {
+	lpm_page_t **pages;
 	size_t page_count;
 };
 
-static inline lpm64_page_t *
-lpm64_page(const struct lpm64 *lpm64, uint32_t page_idx)
+static inline lpm_page_t *
+lpm_page(const struct lpm *lpm, uint32_t page_idx)
 {
-	return lpm64->pages[page_idx / 16] + page_idx % 16;
+	return lpm->pages[page_idx / LPM_CHUNK_SIZE] +
+		page_idx % LPM_CHUNK_SIZE;
 }
 
 static inline int
-lpm64_init(struct lpm64 *lpm64)
+lpm_init(struct lpm *lpm)
 {
-	lpm64->pages = (lpm64_page_t **)malloc(sizeof(lpm64_page_t *) * 1);
-	if (lpm64->pages == NULL)
+	lpm->pages = (lpm_page_t **)malloc(sizeof(lpm_page_t *) * 1);
+	if (lpm->pages == NULL)
 		return -1;
-	lpm64->pages[0] = (lpm64_page_t *)malloc(sizeof(lpm64_page_t) * 16);
-	if (lpm64->pages[0] == NULL)
+	lpm->pages[0] = (lpm_page_t *)malloc(sizeof(lpm_page_t) * 16);
+	if (lpm->pages[0] == NULL)
 		return -1;
-	lpm64->page_count = 1;
-	memset(lpm64_page(lpm64, 0), 0xff, sizeof(lpm64_page_t));
+	lpm->page_count = 1;
+	memset(lpm_page(lpm, 0), 0xff, sizeof(lpm_page_t));
 	return 0;
 }
 
 static inline void
-lpm64_free(struct lpm64 *lpm64)
+lpm_free(struct lpm *lpm)
 {
 	for (size_t chunk_idx = 0;
-	     chunk_idx < lpm64->page_count / 16;
+	     chunk_idx < lpm->page_count / LPM_CHUNK_SIZE;
 	     ++chunk_idx)
-		free(lpm64->pages[chunk_idx]);
+		free(lpm->pages[chunk_idx]);
 
-	free(lpm64->pages);
+	free(lpm->pages);
 }
 
 static inline int
-lpm64_new_page(struct lpm64 *lpm64, uint32_t *page_idx)
+lpm_new_page(struct lpm *lpm, uint32_t *page_idx)
 {
-	if (!(lpm64->page_count % 16)) {
-		uint32_t new_chunk_count = lpm64->page_count / 16 + 1;
-		lpm64_page_t **pages =
-			(lpm64_page_t **)realloc(lpm64->pages,
-						 sizeof(lpm64_page_t *) *
+	if (!(lpm->page_count % LPM_CHUNK_SIZE)) {
+		uint32_t new_chunk_count = lpm->page_count / LPM_CHUNK_SIZE + 1;
+		lpm_page_t **pages =
+			(lpm_page_t **)realloc(lpm->pages,
+						 sizeof(lpm_page_t *) *
 						 new_chunk_count);
 		if (pages == NULL) {
 			return -1;
 		}
-		lpm64->pages = pages;
-		lpm64->pages[new_chunk_count - 1] =
-			(lpm64_page_t *)malloc(sizeof(lpm64_page_t) * 16);
-		if (lpm64->pages[new_chunk_count - 1])
+		lpm->pages = pages;
+		lpm->pages[new_chunk_count - 1] =
+			(lpm_page_t *)malloc(
+				sizeof(lpm_page_t) * LPM_CHUNK_SIZE);
+		if (lpm->pages[new_chunk_count - 1])
 			return -1;
 	}
-	*page_idx = lpm64->page_count;
-	memset(lpm64_page(lpm64, lpm64->page_count), 0xff, sizeof(lpm64_page_t));
-	++(lpm64->page_count);
+	*page_idx = lpm->page_count;
+	memset(lpm_page(lpm, lpm->page_count), 0xff, sizeof(lpm_page_t));
+	++(lpm->page_count);
+	return 0;
+}
+
+static inline int
+lpm_check_range_lo(
+	uint8_t key_size,
+	const uint8_t *key,
+	const uint8_t *from,
+	uint8_t hop)
+{
+	uint8_t check[key_size];
+	memcpy(check, key, hop + 1);
+
+	memset(check + hop + 1, 0x00, key_size - hop - 1);
+	if (memcmp(check, from, key_size) < 0)
+		return -1;
+
+	return 0;
+}
+
+static inline int
+lpm_check_range_hi(
+	uint8_t key_size,
+	const uint8_t *key,
+	const uint8_t *to,
+	uint8_t hop)
+{
+	uint8_t check[key_size];
+	memcpy(check, key, hop + 1);
+
+	memset(check + hop + 1, 0xff, key_size - hop - 1);
+	if (memcmp(check, to, key_size) > 0)
+		return -1;
+
 	return 0;
 }
 
@@ -88,40 +127,88 @@ lpm64_new_page(struct lpm64 *lpm64, uint32_t *page_idx)
  * Keys are big-endian encoded.
  */
 static inline int
-lpm64_insert(struct lpm64 *lpm64, uint64_t from, uint64_t to, uint32_t value)
+lpm_insert(
+	struct lpm *lpm,
+	uint8_t key_size,
+	const uint8_t *from,
+	const uint8_t *to,
+	uint32_t value)
 {
-	uint8_t *from_bytes = (uint8_t *)&from;
-	uint8_t *to_bytes = (uint8_t *)&to;
+	uint8_t key[key_size];
+	lpm_page_t *pages[key_size];
 
-	lpm64_page_t *page = lpm64_page(lpm64, 0);
-	uint8_t hop = 0;
-	do {
-		if (from_bytes[hop] != to_bytes[hop])
-			break;
+	int8_t hop = 0;
+	key[hop] = from[hop];
+	pages[hop] = lpm_page(lpm, 0);
+	int8_t max_hop = 0;
 
-		// go down - use existing page or allocate a new one
-		uint32_t *stored_value = (*page) + from_bytes[hop];
-		if (*stored_value == LPM_VALUE_INVALID &&
-		    lpm64_new_page(lpm64, stored_value))
-			return -1;
-		page = lpm64_page(lpm64, *stored_value);
-	} while (++hop < 7);
+	while (1) {
+	/*
+		for (int idx = 0; idx < hop + 1; ++idx)
+			fprintf(stdout, "%02x ", key[idx]);
+		fprintf(stdout, " === %d\n", hop);
+*/
+		uint32_t *stored_value = (*pages[hop]) + key[hop];
+		if (*stored_value == LPM_VALUE_INVALID) {
+			if (hop < key_size - 1 &&
+			    (lpm_check_range_lo(key_size, key, from, hop) ||
+			     lpm_check_range_hi(key_size, key, to, hop))) {
+				if (lpm_new_page(lpm, stored_value))
+					return -1;
+				++hop;
+				if (hop > max_hop) {
+					key[hop] = from[hop];
+					max_hop = hop;
+				} else {
+					key[hop] = 0;
+				}
+				pages[hop] = lpm_page(lpm, *stored_value);
+				continue;
+			} else {
+				*stored_value = value | LPM_VALUE_FLAG;
+			}
+		} else if (*stored_value & LPM_VALUE_FLAG) {
+			// TODO
+		} else {
+			++hop;
+			if (hop > max_hop) {
+				key[hop] = from[hop];
+				max_hop = hop;
+			} else {
+				key[hop] = 0;
+			}
+			pages[hop] = lpm_page(lpm, *stored_value);
+			continue;
+		}
 
-	for (uint16_t idx = from_bytes[hop]; idx <= to_bytes[hop]; ++idx)
-		(*page)[idx] = value | LPM_VALUE_FLAG;
+		do {
+			key[hop]++;
+			uint8_t upper_bound = 0xff;
+			if (lpm_check_range_hi(key_size, key, to, hop))
+				upper_bound = to[hop];
+			if (key[hop] == (uint8_t)(upper_bound + 1)) {
+				if (hop == 0)
+					return 0;
+				--hop;
+			} else
+				break;
+		} while (1);
+	}
+
 	return 0;
 }
 
 static inline uint32_t
-lpm64_lookup(const struct lpm64 *lpm64, uint64_t key)
+lpm_lookup(
+	const struct lpm *lpm,
+	uint8_t key_size,
+	const uint8_t *key)
 {
-	uint8_t *key_bytes = (uint8_t *)&key;
-
 	uint32_t value = 0;
 
-	for (uint8_t hop = 0; hop < 8; ++hop) {
-		lpm64_page_t *page = lpm64_page(lpm64, value);
-		value = (*page)[key_bytes[hop]];
+	for (uint8_t hop = 0; hop < key_size; ++hop) {
+		lpm_page_t *page = lpm_page(lpm, value);
+		value = (*page)[key[hop]];
 		if (value == LPM_VALUE_INVALID)
 			return value;
 		if (value & LPM_VALUE_FLAG)
@@ -131,63 +218,153 @@ lpm64_lookup(const struct lpm64 *lpm64, uint64_t key)
 	return LPM_VALUE_INVALID;
 }
 
+typedef int (*lpm_walk_func)(
+	uint8_t key_size,
+	const uint8_t *from,
+	const uint8_t *to,
+	uint32_t value,
+	void *data
+);
+
+static inline int
+lpm_walk(
+	const struct lpm *lpm,
+	uint8_t key_size,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_walk_func walk_func,
+	void *walk_func_data)
+{
+	uint8_t key[key_size];
+	memset(key, 0, key_size);
+	lpm_page_t *pages[key_size];
+
+	int8_t hop = 0;
+	key[hop] = from[hop];
+	pages[hop] = lpm_page(lpm, 0);
+	int8_t max_hop = 0;
+
+	uint32_t prev_value = LPM_VALUE_INVALID;
+	uint8_t prev_from[key_size];
+	memcpy(prev_from, from, key_size);
+	uint8_t prev_to[key_size];
+
+	while (1) {
+		uint32_t value = (*pages[hop])[key[hop]];
+		if (value == LPM_VALUE_INVALID) {
+			// TODO: handle unintialized value
+		} else if (value & LPM_VALUE_FLAG) {
+			if (prev_value != value) {
+				if (prev_value != LPM_VALUE_INVALID) {
+					if (walk_func(
+						key_size,
+						prev_from,
+						prev_to,
+						prev_value & LPM_VALUE_MASK,
+						walk_func_data)) {
+						return -1;
+					}
+				}
+
+				prev_value = value;
+				memcpy(prev_from, key, key_size);
+				memset(prev_from + hop + 1, 0x00, key_size - hop - 1);
+			}
+			memcpy(prev_to, key, key_size);
+			memset(prev_to + hop + 1, 0xff, key_size - hop - 1);
+		} else {
+			++hop;
+			if (hop > max_hop) {
+				key[hop] = from[hop];
+				max_hop = hop;
+			} else {
+				key[hop] = 0;
+			}
+			pages[hop] = lpm_page(lpm, value);
+			continue;
+		}
+
+		do {
+			key[hop]++;
+			uint8_t upper_bound = 0xff;
+			if (lpm_check_range_hi(key_size, key, to, hop))
+				upper_bound = to[hop];
+			if (key[hop] == (uint8_t)(upper_bound + 1)) {
+				if (hop == 0)
+					goto out;
+				--hop;
+			} else
+				break;
+		} while (1);
+	}
+
+out:
+
+	if (prev_value != LPM_VALUE_INVALID) {
+		if (walk_func(
+			key_size,
+			prev_from,
+			prev_to,
+			prev_value & LPM_VALUE_MASK,
+			walk_func_data)) {
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
 /*
  * LPM iteration callback called for each valid value.
  */
-typedef int (*lpm64_collect_values_func)(
+typedef int (*lpm_collect_values_func)(
 	uint32_t value,
 	void *data
 );
 
 /*
- * Collect all valid values for [from..to] key range. Keys are big-endian.
- * The routine does not invoke callback if the previous one value is equal the
- * next one.
+ * Collect all valid values for [from..to] key range.
  */
 static inline int
-lpm64_collect_values(
-	const struct lpm64 *lpm,
-	uint64_t from, uint64_t to,
-	lpm64_collect_values_func collect_func,
+lpm_collect_values(
+	const struct lpm *lpm,
+	uint8_t key_size,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_collect_values_func collect_func,
 	void *collect_func_data)
 {
-	uint8_t *from_bytes = (uint8_t *)&from;
-	uint8_t *to_bytes = (uint8_t *)&to;
-
-	uint8_t keys[8];
-	lpm64_page_t *pages[8];
+	uint8_t key[key_size];
+	lpm_page_t *pages[key_size];
 
 	int8_t hop = 0;
-	keys[hop] = from_bytes[hop];
-	pages[hop] = lpm64_page(lpm, 0);
-	uint32_t prev_value = LPM_VALUE_INVALID;
+	key[hop] = from[hop];
+	pages[hop] = lpm_page(lpm, 0);
 
 	while (1) {
-		uint32_t value = (*pages[hop])[keys[hop]];
+		uint32_t value = (*pages[hop])[key[hop]];
 		if (value == LPM_VALUE_INVALID) {
 			// TODO: handle unintialized value: should we call cb?
 		} else if (value & LPM_VALUE_FLAG) {
-			if (value != prev_value) {
-				if (collect_func(
-					value & LPM_VALUE_MASK,
-					collect_func_data))
-					return -1;
-				prev_value = value;
+			if (collect_func(
+				value & LPM_VALUE_MASK,
+				collect_func_data)) {
+				return -1;
 			}
 		} else {
 			++hop;
-			keys[hop] = from_bytes[hop];
-			pages[hop] = lpm64_page(lpm, value);
+			key[hop] = from[hop];
+			pages[hop] = lpm_page(lpm, value);
 			continue;
 		}
 
-		keys[hop]++;
-		if (keys[hop] == (uint8_t)(to_bytes[hop] + 1)) {
+		key[hop]++;
+		if (key[hop] == (uint8_t)(to[hop] + 1)) {
 			if (hop == 0)
 				break;
 			--hop;
-			keys[hop]++;
-			if (keys[0] == (uint8_t)(to_bytes[hop] + 1))
+			key[hop]++;
+			if (key[0] == (uint8_t)(to[hop] + 1))
 				break;
 		}
 	}
@@ -202,81 +379,71 @@ lpm64_collect_values(
  * ones.
  */
 static inline void
-lpm64_remap(
-	struct lpm64 *lpm,
+lpm_remap(
+	struct lpm *lpm,
+	uint8_t key_size,
 	struct value_table *table)
 {
-	uint8_t keys[8];
-	lpm64_page_t *pages[8];
+	uint8_t key[key_size];
+	lpm_page_t *pages[key_size];
 
 	int8_t hop = 0;
-	keys[hop] = 0;
-	pages[hop] = lpm64_page(lpm, 0);
+	key[hop] = 0;
+	pages[hop] = lpm_page(lpm, 0);
 
 	while (1) {
-		uint32_t value = (*pages[hop])[keys[hop]];
+		uint32_t value = (*pages[hop])[key[hop]];
 		if (value == LPM_VALUE_INVALID) {
 
 		} else if (value & LPM_VALUE_FLAG) {
-			(*pages[hop])[keys[hop]] = value_table_get(
+			(*pages[hop])[key[hop]] = value_table_get(
 				table,
 				0,
 				value & LPM_VALUE_MASK) | LPM_VALUE_FLAG;
 		} else {
 			++hop;
-			keys[hop] = 0;
-			pages[hop] = lpm64_page(lpm, value);
+			key[hop] = 0;
+			pages[hop] = lpm_page(lpm, value);
 			continue;
 		}
 
-		keys[hop]++;
-		if (keys[hop] == 0) {
+		key[hop]++;
+		if (key[hop] == 0) {
 			if (hop == 0)
 				break;
-			/*
-			 * The code bellow squash page if there is only
-			 * one value set decreasing the tree branch length.
-			 */
-			bool is_monolite = 1;
-			uint32_t first_value = (*pages[hop])[0];
-			for (uint8_t idx = 255; idx > 0; --idx)
-				is_monolite &= first_value == (*pages[hop])[idx];
 
-			--hop;
-			if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
-				(*pages[hop])[keys[hop]] = first_value;
-			}
-
-			keys[hop]++;
-			if (keys[0] == 0)
+			key[hop]++;
+			if (key[0] == 0)
 				break;
 		}
 	}
 }
 
 static inline void
-lpm64_compact(struct lpm64 *lpm)
+lpm_compact(
+	struct lpm *lpm,
+	uint8_t key_size)
 {
-	uint8_t keys[8];
-	lpm64_page_t *pages[8];
+	uint8_t key[key_size];
+	lpm_page_t *pages[key_size];
 
 	int8_t hop = 0;
-	keys[hop] = 0;
-	pages[hop] = lpm64_page(lpm, 0);
+	key[hop] = 0;
+	pages[hop] = lpm_page(lpm, 0);
 
 	while (1) {
-		uint32_t value = (*pages[hop])[keys[hop]];
+		uint32_t value = (*pages[hop])[key[hop]];
 		if (value == LPM_VALUE_INVALID ||
 		    value & LPM_VALUE_FLAG) {
 		} else {
 			++hop;
-			keys[hop] = 0;
-			pages[hop] = lpm64_page(lpm, value);
+			key[hop] = 0;
+			pages[hop] = lpm_page(lpm, value);
 			continue;
 		}
 
-		keys[hop]++;
-		if (keys[hop] == 0) {
+		key[hop]++;
+		if (key[hop] == 0) {
 			if (hop == 0)
 				break;
 			bool is_monolite = 1;
@@ -286,19 +453,76 @@ lpm64_compact(struct lpm64 *lpm)
 
 			--hop;
 			if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
-				(*pages[hop])[keys[hop]] = first_value;
+				(*pages[hop])[key[hop]] = first_value;
 			}
 
-			keys[hop]++;
-			if (keys[0] == 0)
+			key[hop]++;
+			if (key[0] == 0)
 				break;
 		}
 	}
-
 }
 
-struct lpm32 {
+static inline int
+lpm64_insert(
+	struct lpm *lpm64,
+	const uint8_t *from,
+	const uint8_t *to,
+	uint32_t value)
+{
+	return lpm_insert(lpm64, 8, from, to, value);
+}
 
-};
+static inline uint32_t
+lpm64_lookup(
+	const struct lpm *lpm64,
+	const uint8_t *key)
+{
+	return lpm_lookup(lpm64, 8, key);
+}
+
+static inline int
+lpm64_collect_values(
+	const struct lpm *lpm64,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_collect_values_func collect_func,
+	void *collect_func_data)
+{
+	return lpm_collect_values(
+		lpm64,
+		8,
+		from,
+		to,
+		collect_func,
+		collect_func_data);
+}
+
+static inline int
+lpm64_walk(
+	const struct lpm *lpm64,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_walk_func walk_func,
+	void *walk_func_data)
+{
+	return lpm_walk(lpm64, 8, from, to, walk_func, walk_func_data);
+}
+
+static inline void
+lpm64_remap(
+	struct lpm *lpm64,
+	struct value_table *table)
+{
+	return lpm_remap(lpm64, 8, table);
+}
+
+static inline void
+lpm64_compact(
+	struct lpm *lpm64)
+{
+	return lpm_compact(lpm64, 8);
+}
+
 
 #endif

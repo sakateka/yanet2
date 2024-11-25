@@ -76,17 +76,18 @@ net6_collect_values(
 	struct net6 *start,
 	uint32_t count,
 	net6_get_part_func get_part,
-	struct lpm64 *lpm,
+	struct lpm *lpm,
 	struct value_table *table)
 {
 	for (struct net6 *net6 = start; net6 < start + count; ++net6) {
 		uint64_t addr;
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
+		uint64_t to = addr | ~mask;
 		lpm64_collect_values(
 			lpm,
-			addr,
-			addr | ~mask,
+			(uint8_t *)&addr,
+			(uint8_t *)&to,
 			lpm64_value_iterator,
 			table);
 	}
@@ -109,17 +110,18 @@ net6_collect_registry(
 	struct net6 *start,
 	uint32_t count,
 	net6_get_part_func get_part,
-	struct lpm64 *lpm,
+	struct lpm *lpm,
 	struct value_registry *registry)
 {
 	for (struct net6 *net6 = start; net6 < start + count; ++net6) {
 		uint64_t addr;
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
+		uint64_t to = addr | ~mask;
 		lpm64_collect_values(
 			lpm,
-			addr,
-			addr | ~mask,
+			(uint8_t *)&addr,
+			(uint8_t *)&to,
 			lpm64_registry_iterator,
 			registry);
 	}
@@ -325,12 +327,12 @@ collect_net6_values(
 	uint32_t count,
 	action_get_net6_func get_net6,
 	net6_get_part_func get_part,
-	struct lpm64 *lpm,
+	struct lpm *lpm,
 	struct value_registry *registry)
 {
 
-	struct net6_collector collector;
-	if (net6_collector_init(&collector))
+	struct net6_part_collector collector;
+	if (net6_part_collector_init(&collector, 8))
 		goto error;
 
 	for (struct filter_action *action = actions;
@@ -346,13 +348,17 @@ collect_net6_values(
 			uint64_t addr;
 			uint64_t mask;
 			get_part(net6, &addr, &mask);
+			uint64_t to = addr | ~mask;
 
-			if (net6_collector_add(&collector, addr, mask))
+			if (range8_collector_add(
+				&collector,
+				(uint8_t *)&addr,
+				(uint8_t *)&to))
 				goto error_collector;
 		}
 	}
-	if (net6_collector_collect(&collector, lpm)) {
-		//TODO
+	if (net6_part_collector_collect(&collector, 8, lpm)) {
+		goto error_collector;
 	}
 
 	struct value_table table;
@@ -403,11 +409,11 @@ collect_net6_values(
 	value_table_free(&table);
 	return 0;
 
-error_collector:
-	net6_collector_free(&collector);
-
 error_reg:
 	value_table_free(&table);
+error_collector:
+	range_collector_free(&collector);
+
 error_vtab:
 
 error:
