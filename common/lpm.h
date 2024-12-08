@@ -358,16 +358,21 @@ lpm_collect_values(
 			continue;
 		}
 
-		key[hop]++;
-		if (key[hop] == (uint8_t)(to[hop] + 1)) {
-			if (hop == 0)
-				break;
-			--hop;
+		do {
 			key[hop]++;
-			if (key[0] == (uint8_t)(to[hop] + 1))
+			uint8_t upper_bound = 0xff;
+			if (lpm_check_range_hi(key_size, key, to, hop))
+				upper_bound = to[hop];
+			if (key[hop] == (uint8_t)(upper_bound + 1)) {
+				if (hop == 0)
+					goto out;
+				--hop;
+			} else
 				break;
-		}
+		} while (1);
 	}
+
+out:
 
 	return 0;
 }
@@ -407,16 +412,19 @@ lpm_remap(
 			continue;
 		}
 
-		key[hop]++;
-		if (key[hop] == 0) {
-			if (hop == 0)
-				break;
-
+		do {
 			key[hop]++;
-			if (key[0] == 0)
+			if (key[hop] == 0) {
+				if (hop == 0)
+					goto out;
+				--hop;
+			} else
 				break;
-		}
+		} while (1);
 	}
+
+out:
+	return;
 }
 
 static inline void
@@ -442,55 +450,59 @@ lpm_compact(
 			continue;
 		}
 
-		key[hop]++;
-		if (key[hop] == 0) {
-			if (hop == 0)
-				break;
-			bool is_monolite = 1;
-			uint32_t first_value = (*pages[hop])[0];
-			for (uint8_t idx = 255; idx > 0; --idx)
-				is_monolite &= first_value == (*pages[hop])[idx];
-
-			--hop;
-			if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
-				(*pages[hop])[key[hop]] = first_value;
-			}
-
+		do {
 			key[hop]++;
-			if (key[0] == 0)
+			if (key[hop] == 0) {
+				if (hop == 0)
+					goto out;
+
+				bool is_monolite = 1;
+				uint32_t first_value = (*pages[hop])[0];
+				for (uint8_t idx = 255; idx > 0; --idx)
+					is_monolite &= first_value == (*pages[hop])[idx];
+
+				--hop;
+				if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
+					(*pages[hop])[key[hop]] = first_value;
+				}
+			} else {
 				break;
-		}
+			}
+		} while (1);
 	}
+
+out:
+	return;
 }
 
 static inline int
-lpm64_insert(
-	struct lpm *lpm64,
+lpm8_insert(
+	struct lpm *lpm8,
 	const uint8_t *from,
 	const uint8_t *to,
 	uint32_t value)
 {
-	return lpm_insert(lpm64, 8, from, to, value);
+	return lpm_insert(lpm8, 8, from, to, value);
 }
 
 static inline uint32_t
-lpm64_lookup(
-	const struct lpm *lpm64,
+lpm8_lookup(
+	const struct lpm *lpm8,
 	const uint8_t *key)
 {
-	return lpm_lookup(lpm64, 8, key);
+	return lpm_lookup(lpm8, 8, key);
 }
 
 static inline int
-lpm64_collect_values(
-	const struct lpm *lpm64,
+lpm8_collect_values(
+	const struct lpm *lpm8,
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_collect_values_func collect_func,
 	void *collect_func_data)
 {
 	return lpm_collect_values(
-		lpm64,
+		lpm8,
 		8,
 		from,
 		to,
@@ -499,29 +511,91 @@ lpm64_collect_values(
 }
 
 static inline int
-lpm64_walk(
-	const struct lpm *lpm64,
+lpm8_walk(
+	const struct lpm *lpm8,
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_walk_func walk_func,
 	void *walk_func_data)
 {
-	return lpm_walk(lpm64, 8, from, to, walk_func, walk_func_data);
+	return lpm_walk(lpm8, 8, from, to, walk_func, walk_func_data);
 }
 
 static inline void
-lpm64_remap(
-	struct lpm *lpm64,
+lpm8_remap(
+	struct lpm *lpm8,
 	struct value_table *table)
 {
-	return lpm_remap(lpm64, 8, table);
+	return lpm_remap(lpm8, 8, table);
 }
 
 static inline void
-lpm64_compact(
-	struct lpm *lpm64)
+lpm8_compact(
+	struct lpm *lpm8)
 {
-	return lpm_compact(lpm64, 8);
+	return lpm_compact(lpm8, 8);
+}
+
+
+static inline int
+lpm4_insert(
+	struct lpm *lpm4,
+	const uint8_t *from,
+	const uint8_t *to,
+	uint32_t value)
+{
+	return lpm_insert(lpm4, 4, from, to, value);
+}
+
+static inline uint32_t
+lpm4_lookup(
+	const struct lpm *lpm4,
+	const uint8_t *key)
+{
+	return lpm_lookup(lpm4, 4, key);
+}
+
+static inline int
+lpm4_collect_values(
+	const struct lpm *lpm4,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_collect_values_func collect_func,
+	void *collect_func_data)
+{
+	return lpm_collect_values(
+		lpm4,
+		4,
+		from,
+		to,
+		collect_func,
+		collect_func_data);
+}
+
+static inline int
+lpm4_walk(
+	const struct lpm *lpm4,
+	const uint8_t *from,
+	const uint8_t *to,
+	lpm_walk_func walk_func,
+	void *walk_func_data)
+{
+	return lpm_walk(lpm4, 4, from, to, walk_func, walk_func_data);
+}
+
+static inline void
+lpm4_remap(
+	struct lpm *lpm4,
+	struct value_table *table)
+{
+	return lpm_remap(lpm4, 4, table);
+}
+
+static inline void
+lpm4_compact(
+	struct lpm *lpm4)
+{
+	return lpm_compact(lpm4, 4);
 }
 
 

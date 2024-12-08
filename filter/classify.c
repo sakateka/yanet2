@@ -1,5 +1,6 @@
 #include "classify.h"
 
+#include "common/lpm.h"
 #include "dataplane/packet/packet.h"
 
 #include "rte_mbuf.h"
@@ -8,10 +9,8 @@
 #include "rte_tcp.h"
 #include "rte_udp.h"
 
+
 #include "ipfw.h"
-
-#include "lpm.h"
-
 
 
 uint32_t
@@ -41,7 +40,7 @@ filter_classify_src_net_hi(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->src_net6_hi, (uint8_t *)ipv6Header->src_addr);
+	return lpm8_lookup(&ipfw_filter->src_net6_hi, (uint8_t *)ipv6Header->src_addr);
 }
 
 
@@ -72,7 +71,7 @@ filter_classify_src_net_lo(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->src_net6_lo, (uint8_t *)(ipv6Header->src_addr + 8));
+	return lpm8_lookup(&ipfw_filter->src_net6_lo, (uint8_t *)(ipv6Header->src_addr + 8));
 
 }
 
@@ -103,7 +102,7 @@ filter_classify_dst_net_hi(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->dst_net6_hi, (uint8_t *)ipv6Header->dst_addr);
+	return lpm8_lookup(&ipfw_filter->dst_net6_hi, (uint8_t *)ipv6Header->dst_addr);
 }
 
 
@@ -134,7 +133,7 @@ filter_classify_dst_net_lo(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return lpm64_lookup(&ipfw_filter->dst_net6_lo, (uint8_t *)(ipv6Header->dst_addr + 8));
+	return lpm8_lookup(&ipfw_filter->dst_net6_lo, (uint8_t *)(ipv6Header->dst_addr + 8));
 
 }
 
@@ -168,7 +167,9 @@ filter_classify_src_port(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return ipfw_filter->src_port[src_port];
+	(void) ipfw_filter;
+	(void) src_port;
+	return 0;// ipfw_filter->src_port[src_port];
 }
 
 uint32_t
@@ -201,7 +202,9 @@ filter_classify_dst_port(
 	const struct filter_compiler *ipfw_filter =
 		(const struct filter_compiler *)filter;
 
-	return ipfw_filter->dst_port[dst_port];
+	(void) dst_port;
+	(void) ipfw_filter;
+	return 0;//ipfw_filter->dst_port[dst_port];
 }
 
 

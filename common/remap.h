@@ -101,7 +101,7 @@ remap_table_item(struct remap_table *table, uint32_t key) {
 static inline int
 remap_table_new_key(struct remap_table *table, uint32_t *key)
 {
-	if (table->free_list != REMAP_TABLE_INVALID) {
+	if (false && table->free_list != REMAP_TABLE_INVALID) {
 		*key = table->free_list;
 		struct remap_item *free_item = remap_table_item(table, *key);
 		table->free_list = free_item->value;
@@ -169,7 +169,7 @@ remap_table_touch(struct remap_table *table, uint32_t key, uint32_t *value)
  * there could be cases when remap table contains gaps. So the routine rebuilds
  * the remap table to eliminate all gaps.
  *
- * NOTE: Touching keys is not legal after compation.
+ * NOTE: Touching keys is not legal after compaction.
  */
 static inline void
 remap_table_compact(struct remap_table *table)

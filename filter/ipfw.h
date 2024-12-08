@@ -4,13 +4,12 @@
 #include <stdint.h>
 
 #include "common/network.h"
+#include "common/lpm.h"
+#include "common/registry.h"
 
 
 #define ACTION_NON_TERMINATE 0x80000000
 
-
-#include "lpm.h"
-#include "registry.h"
 
 struct filter_net6 {
 	uint32_t src_count;
@@ -49,15 +48,15 @@ struct filter_action {
 struct filter_compiler {
 	struct lpm src_net4;
 	struct lpm dst_net4;
+	struct value_table src_port4;
+	struct value_table dst_port4;
 
 	struct lpm src_net6_hi;
 	struct lpm src_net6_lo;
 	struct lpm dst_net6_hi;
 	struct lpm dst_net6_lo;
-
-	uint32_t src_port[65536];
-	uint32_t dst_port[65536];
-	uint16_t proto_flag[65536];
+	struct value_table src_port6;
+	struct value_table dst_port6;
 
 	struct {
 		struct value_table network;

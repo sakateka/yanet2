@@ -33,6 +33,10 @@ value_collector_init(struct value_collector *collector)
 static inline void
 value_collector_free(struct value_collector *collector)
 {
+	for (uint32_t chunk_idx = 0;
+	     chunk_idx < collector->chunk_count;
+	     ++chunk_idx)
+		free(collector->use_map[chunk_idx]);
 	free(collector->use_map);
 }
 
@@ -214,6 +218,48 @@ value_registry_join_range(
 		}
 	}
 	return 0;
+}
+
+/*
+ * FIXME: the function is tricky and should be refactored.
+ */
+static inline int
+value_registry_compact(
+	struct value_registry *src_registry,
+	struct value_table *values,
+	struct value_registry *dst_registry)
+{
+	if (value_registry_init(dst_registry)) {
+		return -1;
+	}
+
+	for (uint32_t r_idx = 0; r_idx < values->remap_table.count; ++r_idx) {
+		struct remap_item *item =
+			remap_table_item(&values->remap_table, r_idx);
+		if (!item->count) {
+			continue;
+		}
+
+		if (value_registry_start(dst_registry))
+			goto error;
+
+		struct value_range *range = src_registry->ranges + r_idx;
+		for (uint32_t v_idx = range->from;
+		     v_idx < range->from + range->count;
+		     ++v_idx) {
+			value_registry_collect(
+				dst_registry,
+				src_registry->values[v_idx]);
+		}
+	}
+
+	value_table_compact(values);
+
+	return 0;
+
+error:
+	value_registry_free(dst_registry);
+	return -1;
 }
 
 #endif

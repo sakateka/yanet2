@@ -5,15 +5,55 @@
 #include <string.h>
 
 
-#include "registry.h"
-#include "value.h"
+#include "common/registry.h"
+#include "common/value.h"
+#include "common/range_collector.h"
 
-#include "classify.h"
+typedef int (*action_check_collect)(
+	struct filter_action *action);
 
-#include <stdio.h>
+static inline int
+action_check_has_v4(struct filter_action *action)
+{
+	return action->net4.src_count && action->net4.dst_count;
+}
+
+static inline int
+action_check_has_v6(struct filter_action *action)
+{
+	return action->net6.src_count && action->net6.dst_count;
+}
 
 
-#include "filter/net6_collector.h"
+
+
+typedef void (*action_get_net4_func)(
+	struct filter_action *action,
+	struct net4 **net,
+	uint32_t *count);
+
+static void
+action_get_net4_src(
+	struct filter_action *action,
+	struct net4 **net,
+	uint32_t *count)
+{
+	*net = action->net4.srcs;
+	*count = action->net4.src_count;
+}
+
+static void
+action_get_net4_dst(
+	struct filter_action *action,
+	struct net4 **net,
+	uint32_t *count)
+{
+	*net = action->net4.dsts;
+	*count = action->net4.dst_count;
+}
+
+
+
 
 typedef void (*action_get_net6_func)(
 	struct filter_action *action,
@@ -40,6 +80,8 @@ action_get_net6_dst(
 	*count = action->net6.dst_count;
 }
 
+
+
 typedef void (*net6_get_part_func)(
 	struct net6 *net,
 	uint64_t *addr,
@@ -64,14 +106,34 @@ net6_get_lo_part(struct net6 *net,
 }
 
 
-static int
-lpm64_value_iterator(uint32_t value, void *data)
+
+static inline int
+lpm_collect_value_iterator(uint32_t value, void *data)
 {
 	struct value_table *table = (struct value_table *)data;
 	return value_table_touch(table, 0, value);
 }
 
-static void
+
+static inline void
+net4_collect_values(
+	struct net4 *start,
+	uint32_t count,
+	struct lpm *lpm,
+	struct value_table *table)
+{
+	for (struct net4 *net4 = start; net4 < start + count; ++net4) {
+		uint32_t to = net4->addr | ~net4->mask;
+		lpm4_collect_values(
+			lpm,
+			(uint8_t *)&net4->addr,
+			(uint8_t *)&to,
+			lpm_collect_value_iterator,
+			table);
+	}
+}
+
+static inline void
 net6_collect_values(
 	struct net6 *start,
 	uint32_t count,
@@ -84,11 +146,11 @@ net6_collect_values(
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
 		uint64_t to = addr | ~mask;
-		lpm64_collect_values(
+		lpm8_collect_values(
 			lpm,
 			(uint8_t *)&addr,
 			(uint8_t *)&to,
-			lpm64_value_iterator,
+			lpm_collect_value_iterator,
 			table);
 	}
 }
@@ -98,14 +160,32 @@ struct net_collect_cxt {
 	struct value_registry *registry;
 };
 
-static int
-lpm64_registry_iterator(uint32_t value, void *data)
+static inline int
+lpm_collect_registry_iterator(uint32_t value, void *data)
 {
 	struct value_registry *registry = (struct value_registry *)data;
 	return value_registry_collect(registry, value);
 }
 
-static void
+static inline void
+net4_collect_registry(
+	struct net4 *start,
+	uint32_t count,
+	struct lpm *lpm,
+	struct value_registry *registry)
+{
+	for (struct net4 *net4 = start; net4 < start + count; ++net4) {
+		uint32_t to = net4->addr | ~net4->mask;
+		lpm4_collect_values(
+			lpm,
+			(uint8_t *)&net4->addr,
+			(uint8_t *)&to,
+			lpm_collect_registry_iterator,
+			registry);
+	}
+}
+
+static inline void
 net6_collect_registry(
 	struct net6 *start,
 	uint32_t count,
@@ -118,11 +198,11 @@ net6_collect_registry(
 		uint64_t mask;
 		get_part(net6, &addr, &mask);
 		uint64_t to = addr | ~mask;
-		lpm64_collect_values(
+		lpm8_collect_values(
 			lpm,
 			(uint8_t *)&addr,
 			(uint8_t *)&to,
-			lpm64_registry_iterator,
+			lpm_collect_registry_iterator,
 			registry);
 	}
 }
@@ -233,6 +313,7 @@ merge_and_collect_registry(
 }
 
 struct value_set_ctx {
+	struct filter_action *actions;
 	struct value_table *table;
 	struct value_registry *registry;
 };
@@ -248,19 +329,29 @@ action_list_is_term(struct value_registry *registry, uint32_t range_idx)
 	return !(action_id & ACTION_NON_TERMINATE);
 }
 
+
 static int
-value_table_set_action(uint32_t v1, uint32_t v2, uint32_t idx, void *data)
+value_table_set_action(
+	uint32_t v1,
+	uint32_t v2,
+	uint32_t idx,
+	void *data)
 {
 	struct value_set_ctx *set_ctx = (struct value_set_ctx *)data;
 	uint32_t prev_value = value_table_get(set_ctx->table, v1, v2);
 
 	if (!action_list_is_term(set_ctx->registry, prev_value)) {
+		/*
+		 * FIXME: we assume value table produces increasing sequence
+		 * of values - this is important for value registry handling.
+		 */
 		int res = value_table_touch(set_ctx->table, v1, v2);
 
 		if (res <= 0)
 			return res;
 
-		value_registry_start(set_ctx->registry);
+		if (value_registry_start(set_ctx->registry))
+			return -1;
 
 		struct value_range *copy_range =
 			set_ctx->registry->ranges + prev_value;
@@ -273,14 +364,16 @@ value_table_set_action(uint32_t v1, uint32_t v2, uint32_t idx, void *data)
 				set_ctx->registry->values[ridx]);
 		}
 
-		value_registry_collect(set_ctx->registry, idx);
+		value_registry_collect(set_ctx->registry, set_ctx->actions[idx].action);
 	}
 
 	return 0;
 }
 
+
 static int
 set_registry_values(
+	struct filter_action *actions,
 	struct value_registry *registry1,
 	struct value_registry *registry2,
 	struct value_table *table,
@@ -294,70 +387,76 @@ set_registry_values(
 	}
 
 	if (value_registry_init(registry)) {
-		value_table_free(table);
-		return -1;
-	}
-	// Empty action list
-	if (value_registry_start(registry)) {
-		value_registry_free(registry);
-		value_table_free(table);
+		goto error_registry;
 	}
 
+	if (value_registry_start(registry))
+		return -1;
+
 	struct value_set_ctx set_ctx;
+	set_ctx.actions = actions;
 	set_ctx.table = table;
 	set_ctx.registry = registry;
 
 	for (uint32_t range_idx = 0;
 	     range_idx < registry1->range_count; ++range_idx) {
 		value_table_new_gen(table);
-		value_registry_join_range(
+		if (value_registry_join_range(
 			registry1,
 			registry2,
 			range_idx,
 			value_table_set_action,
-			&set_ctx);
+			&set_ctx))
+			goto error_merge;
 	}
+
+	return 0;
+
+error_merge:
+	value_registry_free(registry);
+
+error_registry:
+	value_table_free(table);
 
 	return 0;
 }
 
-static int
-collect_net6_values(
+static inline int
+collect_net4_values(
 	struct filter_action *actions,
 	uint32_t count,
-	action_get_net6_func get_net6,
-	net6_get_part_func get_part,
+	action_check_collect check_collect,
+	action_get_net4_func get_net4,
 	struct lpm *lpm,
 	struct value_registry *registry)
 {
 
-	struct net6_part_collector collector;
-	if (net6_part_collector_init(&collector, 8))
+	struct range_collector collector;
+	if (range_collector_init(&collector))
 		goto error;
 
 	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
-		struct net6 *nets;
+
+		if (!check_collect(action))
+			continue;
+
+		struct net4 *nets;
 		uint32_t net_count;
-		get_net6(action, &nets, &net_count);
+		get_net4(action, &nets, &net_count);
 
-		for (struct net6 *net6 = nets;
-		     net6 < nets + net_count;
-		     ++net6) {
-			uint64_t addr;
-			uint64_t mask;
-			get_part(net6, &addr, &mask);
-			uint64_t to = addr | ~mask;
-
-			if (range8_collector_add(
+		for (struct net4 *net4 = nets;
+		     net4 < nets + net_count;
+		     ++net4) {
+			if (range4_collector_add(
 				&collector,
-				(uint8_t *)&addr,
-				(uint8_t *)&to))
+				(uint8_t *)&net4->addr,
+				__builtin_popcountll(net4->mask)))
 				goto error_collector;
 		}
 	}
-	if (net6_part_collector_collect(&collector, 8, lpm)) {
+	if (range_collector_collect(&collector, 4, lpm)) {
 		goto error_collector;
 	}
 
@@ -368,6 +467,118 @@ collect_net6_values(
 	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
+
+		if (!check_collect(action))
+			continue;
+
+		value_table_new_gen(&table);
+
+		struct net4 *nets;
+		uint32_t net_count;
+		get_net4(action, &nets, &net_count);
+
+		net4_collect_values(
+			nets,
+			net_count,
+			lpm,
+			&table);
+	}
+
+	value_table_compact(&table);
+	lpm4_remap(lpm, &table);
+	lpm4_compact(lpm);
+
+	if (value_registry_init(registry))
+		goto error_reg;
+
+	for (struct filter_action *action = actions;
+	       action < actions + count;
+	       ++action) {
+		value_registry_start(registry);
+
+		if (!check_collect(action))
+			continue;
+
+		struct net4 *nets;
+		uint32_t net_count;
+		get_net4(action, &nets, &net_count);
+
+		net4_collect_registry(
+			nets,
+			net_count,
+			lpm,
+			registry);
+	}
+
+	value_table_free(&table);
+	return 0;
+
+error_reg:
+	value_table_free(&table);
+error_collector:
+	range_collector_free(&collector);
+
+error_vtab:
+
+error:
+	return -1;
+}
+
+static int
+collect_net6_values(
+	struct filter_action *actions,
+	uint32_t count,
+	action_check_collect check_collect,
+	action_get_net6_func get_net6,
+	net6_get_part_func get_part,
+	struct lpm *lpm,
+	struct value_registry *registry)
+{
+
+	struct range_collector collector;
+	if (range_collector_init(&collector))
+		goto error;
+
+	for (struct filter_action *action = actions;
+	       action < actions + count;
+	       ++action) {
+
+		if (!check_collect(action))
+			continue;
+
+		struct net6 *nets;
+		uint32_t net_count;
+		get_net6(action, &nets, &net_count);
+
+		for (struct net6 *net6 = nets;
+		     net6 < nets + net_count;
+		     ++net6) {
+			uint64_t addr;
+			uint64_t mask;
+			get_part(net6, &addr, &mask);
+
+			if (range8_collector_add(
+				&collector,
+				(uint8_t *)&addr,
+				__builtin_popcountll(mask)))
+				goto error_collector;
+		}
+	}
+	if (range_collector_collect(&collector, 8, lpm)) {
+		goto error_collector;
+	}
+
+	struct value_table table;
+	if (value_table_init(&table, 1, collector.count))
+		goto error_vtab;
+
+	for (struct filter_action *action = actions;
+	       action < actions + count;
+	       ++action) {
+
+		if (!check_collect(action))
+			continue;
+
 		value_table_new_gen(&table);
 
 		struct net6 *nets;
@@ -383,8 +594,8 @@ collect_net6_values(
 	}
 
 	value_table_compact(&table);
-	lpm64_remap(lpm, &table);
-	lpm64_compact(lpm);
+	lpm8_remap(lpm, &table);
+	lpm8_compact(lpm);
 
 	if (value_registry_init(registry))
 		goto error_reg;
@@ -393,6 +604,9 @@ collect_net6_values(
 	       action < actions + count;
 	       ++action) {
 		value_registry_start(registry);
+
+		if (!check_collect(action))
+			continue;
 
 		struct net6 *nets;
 		uint32_t net_count;
@@ -425,7 +639,7 @@ typedef void (*action_get_port_range_func)(
 	struct filter_port_range **ranges,
 	uint32_t *count);
 
-static void
+static inline void
 get_port_range_src(
 	struct filter_action *action,
 	struct filter_port_range **ranges,
@@ -435,7 +649,7 @@ get_port_range_src(
 	*count = action->transport.src_count;
 }
 
-static void
+static inline void
 get_port_range_dst(
 	struct filter_action *action,
 	struct filter_port_range **ranges,
@@ -445,21 +659,25 @@ get_port_range_dst(
 	*count = action->transport.dst_count;
 }
 
-static int
+static inline int
 collect_port_values(
 	struct filter_action *actions,
 	uint32_t count,
+	action_check_collect check_collect,
 	action_get_port_range_func get_port_range,
+	struct value_table *table,
 	struct value_registry *registry)
 {
-	struct value_table table;
-	if (value_table_init(&table, 1, 65536))
+	if (value_table_init(table, 1, 65536))
 		return -1;
 
 	for (struct filter_action *action = actions;
 	       action < actions + count;
 	       ++action) {
-		value_table_new_gen(&table);
+		if (!check_collect(action))
+			continue;
+
+		value_table_new_gen(table);
 
 		struct filter_port_range *port_ranges;
 		uint32_t port_range_count;
@@ -469,15 +687,15 @@ collect_port_values(
 		     ++ports) {
 			if (ports->to - ports->from == 65535)
 				continue;
-			for (uint32_t port = ports->from;
-			     port <= ports->to;
+			for (uint32_t port = be16toh(ports->from);
+			     port <= be16toh(ports->to);
 			     ++port) {
-				value_table_touch(&table, 0, port);
+				value_table_touch(table, 0, htobe16(port));
 			}
 		}
 	}
 
-	value_table_compact(&table);
+	value_table_compact(table);
 
 	if (value_registry_init(registry))
 		goto error_reg;
@@ -486,6 +704,9 @@ collect_port_values(
 	       action < actions + count;
 	       ++action) {
 		value_registry_start(registry);
+
+		if (!check_collect(action))
+			continue;
 
 		struct filter_port_range *port_ranges;
 		uint32_t port_range_count;
@@ -498,32 +719,17 @@ collect_port_values(
 			     ++port) {
 				value_registry_collect(
 					registry,
-					value_table_get(&table, 0, port));
+					value_table_get(table, 0, port));
 			}
 		}
 	}
 
-	value_table_free(&table);
 	return 0;
 
 error_reg:
-	value_table_free(&table);
+	value_table_free(table);
 	return -1;
 }
-
-/*
-static int
-filter_table_copy(
-	struct filter_table *ftab,
-	struct value_table *vtab)
-{
-	if (filter_table_init(ftab, vtab->h_dim, vtab->v_dim))
-		return -1;
-
-	memcpy(ftab->values, vtab->values, sizeof(uint32_t) * vtab->h_dim * vtab->v_dim);
-	return 0;
-}
-*/
 
 int
 filter_compiler_init(
@@ -531,112 +737,179 @@ filter_compiler_init(
 	struct filter_action *actions,
 	uint32_t count)
 {
-	struct value_registry src_net6_lo_registry;
-	struct value_registry dst_net6_hi_registry;
-	struct value_registry dst_net6_lo_registry;
-	struct value_registry src_port_registry;
-	struct value_registry dst_port_registry;
+	struct value_registry src_net4_registry;
+	collect_net4_values(
+		actions,
+		count,
+		action_check_has_v4,
+		action_get_net4_src,
+		&filter->src_net4,
+		&src_net4_registry);
+
+	struct value_registry dst_net4_registry;
+	collect_net4_values(
+		actions,
+		count,
+		action_check_has_v4,
+		action_get_net4_dst,
+		&filter->dst_net4,
+		&dst_net4_registry);
+
+	struct value_registry src_port4_registry;
+	collect_port_values(
+		actions,
+		count,
+		action_check_has_v4,
+		get_port_range_src,
+		&filter->src_port4,
+		&src_port4_registry);
+
+	struct value_registry dst_port4_registry;
+	collect_port_values(
+		actions,
+		count,
+		action_check_has_v4,
+		get_port_range_dst,
+		&filter->dst_port4,
+		&dst_port4_registry);
+
+
+	struct value_registry transport_port4_registry;
+	merge_and_collect_registry(
+		&src_port4_registry,
+		&dst_port4_registry,
+		&filter->v4_lookups.transport_port,
+		&transport_port4_registry);
+
+	struct value_registry net4_registry;
+	merge_and_collect_registry(
+		&src_net4_registry,
+		&dst_net4_registry,
+		&filter->v4_lookups.network,
+		&net4_registry);
+
+	set_registry_values(
+		actions,
+		&net4_registry,
+		&transport_port4_registry,
+		&filter->v4_lookups.result,
+		&filter->v4_lookups.result_registry);
+
+
+
+
+
+
+
 
 
 	struct value_registry src_net6_hi_registry;
 	collect_net6_values(
 		actions,
 		count,
+		action_check_has_v6,
 		action_get_net6_src,
 		net6_get_hi_part,
 		&filter->src_net6_hi,
 		&src_net6_hi_registry);
 
+	struct value_registry src_net6_lo_registry;
 	collect_net6_values(
 		actions,
 		count,
+		action_check_has_v6,
 		action_get_net6_src,
 		net6_get_lo_part,
 		&filter->src_net6_lo,
 		&src_net6_lo_registry);
 
+	struct value_registry dst_net6_hi_registry;
 	collect_net6_values(
 		actions,
 		count,
+		action_check_has_v6,
 		action_get_net6_dst,
 		net6_get_hi_part,
 		&filter->dst_net6_hi,
 		&dst_net6_hi_registry);
 
+	struct value_registry dst_net6_lo_registry;
 	collect_net6_values(
 		actions,
 		count,
+		action_check_has_v6,
 		action_get_net6_dst,
 		net6_get_lo_part,
 		&filter->dst_net6_lo,
 		&dst_net6_lo_registry);
 
+	struct value_registry src_port6_registry;
 	collect_port_values(
 		actions,
 		count,
+		action_check_has_v6,
 		get_port_range_src,
-		&src_port_registry);
+		&filter->src_port6,
+		&src_port6_registry);
 
+	struct value_registry dst_port6_registry;
 	collect_port_values(
 		actions,
 		count,
+		action_check_has_v6,
 		get_port_range_dst,
-		&dst_port_registry);
+		&filter->dst_port6,
+		&dst_port6_registry);
 
 
-
-	struct value_table vtab1;
-	struct value_registry vtab1_registry;
+	struct value_registry net6_hi_registry;
 	merge_and_collect_registry(
 		&src_net6_hi_registry,
 		&dst_net6_hi_registry,
-		&vtab1,
-		&vtab1_registry);
+		&filter->v6_lookups.network_hi,
+		&net6_hi_registry);
 
-	struct value_table vtab2;
-	struct value_registry vtab2_registry;
+	struct value_registry net6_lo_registry;
 	merge_and_collect_registry(
 		&src_net6_lo_registry,
 		&dst_net6_lo_registry,
-		&vtab2,
-		&vtab2_registry);
+		&filter->v6_lookups.network_lo,
+		&net6_lo_registry);
 
-	struct value_table vtab3;
-	struct value_registry vtab3_registry;
+	struct value_registry transport_port6_registry;
 	merge_and_collect_registry(
-		&src_port_registry,
-		&dst_port_registry,
-		&vtab3,
-		&vtab3_registry);
+		&src_port6_registry,
+		&dst_port6_registry,
+		&filter->v6_lookups.transport_port,
+		&transport_port6_registry);
 
-	struct value_table vtab12;
-	struct value_registry vtab12_registry;
+	struct value_registry net6_registry;
 	merge_and_collect_registry(
-		&vtab1_registry,
-		&vtab2_registry,
-		&vtab12,
-		&vtab12_registry);
+		&net6_hi_registry,
+		&net6_lo_registry,
+		&filter->v6_lookups.network,
+		&net6_registry);
 
-/*
-	struct value_table vtab123;
-	struct value_registry vtab123_registry;
-	merge_and_collect_registry(
-		&vtab12_registry,
-		&vtab3_registry,
-		&vtab123,
-		&vtab123_registry);
-
-
-*/
-
-
-	struct value_table vtab123;
-//	struct value_registry vtab123_registry;
 	set_registry_values(
-		&vtab12_registry,
-		&vtab3_registry,
-		&vtab123,
+		actions,
+		&net6_registry,
+		&transport_port6_registry,
+		&filter->v6_lookups.result,
 		&filter->v6_lookups.result_registry);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
 	filter->classify[0] = filter_classify_src_net_hi;
