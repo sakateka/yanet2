@@ -6,8 +6,7 @@
 #include <endian.h>
 
 static inline void
-filter_key_inc(uint8_t key_size, uint8_t *key)
-{
+filter_key_inc(uint8_t key_size, uint8_t *key) {
 	for (int16_t idx = key_size - 1; idx >= 0; --idx) {
 		if (key[idx]++ != 0xff)
 			break;
@@ -15,8 +14,7 @@ filter_key_inc(uint8_t key_size, uint8_t *key)
 }
 
 static inline void
-filter_key_dec(uint8_t key_size, uint8_t *key)
-{
+filter_key_dec(uint8_t key_size, uint8_t *key) {
 	for (int16_t idx = key_size - 1; idx >= 0; --idx) {
 		if (key[idx]-- != 0x00)
 			break;
@@ -25,11 +23,8 @@ filter_key_dec(uint8_t key_size, uint8_t *key)
 
 static inline void
 filter_key_apply_prefix(
-	uint8_t key_size,
-	const uint8_t *from,
-	uint8_t *to,
-	uint8_t prefix)
-{
+	uint8_t key_size, const uint8_t *from, uint8_t *to, uint8_t prefix
+) {
 	memcpy(to, from, key_size);
 	to[prefix / 8] |= ((uint16_t)1 << (8 - prefix % 8)) - 1;
 	for (uint8_t idx = (prefix + 7) / 8; idx < key_size; ++idx)
@@ -37,11 +32,7 @@ filter_key_apply_prefix(
 }
 
 static inline int
-filter_key_cmp(
-	uint8_t key_size,
-	const uint8_t *l,
-	const uint8_t *r)
-{
+filter_key_cmp(uint8_t key_size, const uint8_t *l, const uint8_t *r) {
 	while (key_size >= 8) {
 		uint64_t lv = be64toh(*(uint64_t *)l);
 		uint64_t rv = be64toh(*(uint64_t *)r);
@@ -90,6 +81,5 @@ filter_key_cmp(
 
 	return 0;
 }
-
 
 #endif

@@ -14,10 +14,7 @@ struct data_pipe {
 
 // FIXME: provide w_pos, r_pos, f_pos
 static inline int
-data_pipe_init(
-	struct data_pipe *pipe,
-	size_t size)
-{
+data_pipe_init(struct data_pipe *pipe, size_t size) {
 	pipe->size = size;
 
 	pipe->data = (void **)malloc(sizeof(void *) * size);
@@ -39,16 +36,12 @@ data_pipe_init(
 }
 
 static inline void
-data_pipe_free(struct data_pipe *pipe)
-{
+data_pipe_free(struct data_pipe *pipe) {
 	free(pipe->data);
 	free((void *)pipe->w_pos);
 }
 
-typedef size_t (*data_pipe_handle_func)(
-	void **item,
-	size_t count,
-	void *data);
+typedef size_t (*data_pipe_handle_func)(void **item, size_t count, void *data);
 
 // FIXME: check if we have to use memory barriers here
 static inline size_t
@@ -59,8 +52,8 @@ data_pipe_ring_handle(
 	size_t size,
 	size_t space,
 	data_pipe_handle_func handle_func,
-	void *handle_func_data)
-{
+	void *handle_func_data
+) {
 	size_t from = *from_pos;
 	size_t to = *to_pos;
 
@@ -71,32 +64,26 @@ data_pipe_ring_handle(
 	 * around the ring size whereas the second part is size of the ring
 	 * overflow.
 	 */
-	available -=
-		(from + available) / size *
-		(from + available - size);
+	available -= (from + available) / size * (from + available - size);
 
 	if (!available)
 		return 0;
 
-	size_t handled = handle_func(
-		data + from,
-		available,
-		handle_func_data);
+	size_t handled = handle_func(data + from, available, handle_func_data);
 
-	//FIXME write fence
+	// FIXME write fence
 
 	*from_pos += handled;
 
 	return handled;
 }
 
-
 static inline size_t
 data_pipe_item_push(
 	struct data_pipe *data_pipe,
 	data_pipe_handle_func push_func,
-	void *push_func_data)
-{
+	void *push_func_data
+) {
 	return data_pipe_ring_handle(
 		data_pipe->w_pos,
 		data_pipe->f_pos,
@@ -104,15 +91,16 @@ data_pipe_item_push(
 		data_pipe->size,
 		data_pipe->size,
 		push_func,
-		push_func_data);
+		push_func_data
+	);
 }
 
 static inline size_t
 data_pipe_item_pop(
 	struct data_pipe *data_pipe,
 	data_pipe_handle_func pop_func,
-	void *pop_func_data)
-{
+	void *pop_func_data
+) {
 	return data_pipe_ring_handle(
 		data_pipe->r_pos,
 		data_pipe->w_pos,
@@ -120,15 +108,16 @@ data_pipe_item_pop(
 		data_pipe->size,
 		0,
 		pop_func,
-		pop_func_data);
+		pop_func_data
+	);
 }
 
 static inline size_t
 data_pipe_item_free(
 	struct data_pipe *data_pipe,
 	data_pipe_handle_func free_func,
-	void *free_func_data)
-{
+	void *free_func_data
+) {
 	return data_pipe_ring_handle(
 		data_pipe->f_pos,
 		data_pipe->r_pos,
@@ -136,7 +125,8 @@ data_pipe_item_free(
 		data_pipe->size,
 		0,
 		free_func,
-		free_func_data);
+		free_func_data
+	);
 }
 
 #endif

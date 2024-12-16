@@ -42,24 +42,18 @@
 #include "common/data_pipe.h"
 #include <rte_ethdev.h>
 
-
 static void
-worker_read(struct dataplane_worker *worker, struct packet_list *packets)
-{
+worker_read(struct dataplane_worker *worker, struct packet_list *packets) {
 	struct worker_read_ctx *ctx = &worker->read_ctx;
 	struct rte_mbuf *mbufs[ctx->read_size];
 
-
-	uint16_t read =
-		rte_eth_rx_burst(
-			worker->port_id,
-			worker->queue_id,
-			mbufs,
-			ctx->read_size);
+	uint16_t read = rte_eth_rx_burst(
+		worker->port_id, worker->queue_id, mbufs, ctx->read_size
+	);
 	for (uint32_t idx = 0; idx < read; ++idx) {
 		struct packet *packet = mbuf_to_packet(mbufs[idx]);
 		memset(packet, 0, sizeof(struct packet));
-		//FIXME update packet fields
+		// FIXME update packet fields
 		packet->mbuf = mbufs[idx];
 
 		packet->rx_device_id = worker->device_id;
@@ -72,11 +66,7 @@ worker_read(struct dataplane_worker *worker, struct packet_list *packets)
 }
 
 static size_t
-worker_connection_push_cb(
-	void **item,
-	size_t count,
-	void *data)
-{
+worker_connection_push_cb(void **item, size_t count, void *data) {
 	if (count > 0) {
 		struct packet *packet = (struct packet *)data;
 		struct rte_mbuf *mbuf = packet_to_mbuf(packet);
@@ -88,11 +78,7 @@ worker_connection_push_cb(
 }
 
 static size_t
-worker_rx_pipe_pop_cb(
-	void **item,
-	size_t count,
-	void *data)
-{
+worker_rx_pipe_pop_cb(void **item, size_t count, void *data) {
 	struct dataplane_worker *worker = (struct dataplane_worker *)data;
 	struct packet **packets = (struct packet **)item;
 
@@ -101,12 +87,9 @@ worker_rx_pipe_pop_cb(
 		mbufs[idx] = packet_to_mbuf(packets[idx]);
 	}
 
-	size_t written =
-		rte_eth_tx_burst(
-			worker->port_id,
-			worker->queue_id,
-			mbufs,
-			count);
+	size_t written = rte_eth_tx_burst(
+		worker->port_id, worker->queue_id, mbufs, count
+	);
 
 	for (size_t idx = 0; idx < written; ++idx) {
 		packets[idx]->tx_result = 0;
@@ -120,11 +103,7 @@ worker_rx_pipe_pop_cb(
 }
 
 static size_t
-worker_connection_free_cb(
-	void **item,
-	size_t count,
-	void *data)
-{
+worker_connection_free_cb(void **item, size_t count, void *data) {
 	struct packet_list *failed = (struct packet_list *)data;
 
 	for (size_t idx = 0; idx < count; ++idx) {
@@ -144,10 +123,7 @@ worker_connection_free_cb(
  * using corresponding data pipe so the routine name might be confusing.
  */
 static int
-worker_send_to_port(
-	struct worker_write_ctx *ctx,
-	struct packet *packet)
-{
+worker_send_to_port(struct worker_write_ctx *ctx, struct packet *packet) {
 	struct worker_tx_connection *tx_conn =
 		ctx->tx_connections + packet->tx_device_id;
 
@@ -158,9 +134,10 @@ worker_send_to_port(
 	}
 
 	if (data_pipe_item_push(
-		tx_conn->pipes + packet->hash % tx_conn->count,
-		worker_connection_push_cb,
-		packet) != 1) {
+		    tx_conn->pipes + packet->hash % tx_conn->count,
+		    worker_connection_push_cb,
+		    packet
+	    ) != 1) {
 		fprintf(stderr, "no space\n");
 		return -1;
 	}
@@ -170,23 +147,20 @@ worker_send_to_port(
 
 static void
 worker_collect_from_port(
-	struct dataplane_worker *worker,
-	struct packet_list *failed)
-{
-	for (uint32_t conn_idx = 0;
-	     conn_idx < worker->dataplane->device_count;
+	struct dataplane_worker *worker, struct packet_list *failed
+) {
+	for (uint32_t conn_idx = 0; conn_idx < worker->dataplane->device_count;
 	     ++conn_idx) {
 		struct worker_tx_connection *tx_conn =
 			worker->write_ctx.tx_connections + conn_idx;
-		for (uint32_t pipe_idx = 0;
-		     pipe_idx < tx_conn->count;
+		for (uint32_t pipe_idx = 0; pipe_idx < tx_conn->count;
 		     ++pipe_idx) {
 			data_pipe_item_free(
 				tx_conn->pipes + pipe_idx,
 				worker_connection_free_cb,
-				failed);
+				failed
+			);
 		}
-
 	}
 }
 
@@ -195,16 +169,18 @@ worker_submit_burst(
 	struct dataplane_worker *worker,
 	struct rte_mbuf **mbufs,
 	uint16_t count,
-	struct packet_list *failed)
-{
+	struct packet_list *failed
+) {
 	uint16_t written = rte_eth_tx_burst(
-		worker->port_id,
-		worker->queue_id,
-		mbufs,
-		count);
+		worker->port_id, worker->queue_id, mbufs, count
+	);
 
 	if (written < count)
-		fprintf(stderr, "brst fld %d:%d %d\n", worker->port_id, worker->queue_id, count - written);
+		fprintf(stderr,
+			"brst fld %d:%d %d\n",
+			worker->port_id,
+			worker->queue_id,
+			count - written);
 
 	for (uint16_t idx = written; idx < count; ++idx) {
 		packet_list_add(failed, mbuf_to_packet(mbufs[idx]));
@@ -212,8 +188,7 @@ worker_submit_burst(
 }
 
 static void
-worker_write(struct dataplane_worker *worker, struct packet_list *packets)
-{
+worker_write(struct dataplane_worker *worker, struct packet_list *packets) {
 	struct packet_list failed;
 	packet_list_init(&failed);
 
@@ -234,7 +209,11 @@ worker_write(struct dataplane_worker *worker, struct packet_list *packets)
 			++to_write;
 		} else {
 			if (worker_send_to_port(ctx, packet)) {
-				fprintf(stderr, "send fld %d %d to %d\n", worker->device_id, worker->queue_id, packet->tx_device_id);
+				fprintf(stderr,
+					"send fld %d %d to %d\n",
+					worker->device_id,
+					worker->queue_id,
+					packet->tx_device_id);
 				packet_list_add(&failed, packet);
 			}
 		}
@@ -248,20 +227,15 @@ worker_write(struct dataplane_worker *worker, struct packet_list *packets)
 
 	*packets = failed;
 
-	for (uint32_t pipe_idx = 0;
-	     pipe_idx < ctx->rx_pipe_count;
-	     ++pipe_idx) {
+	for (uint32_t pipe_idx = 0; pipe_idx < ctx->rx_pipe_count; ++pipe_idx) {
 		data_pipe_item_pop(
-			ctx->rx_pipes + pipe_idx,
-			worker_rx_pipe_pop_cb,
-			worker);
+			ctx->rx_pipes + pipe_idx, worker_rx_pipe_pop_cb, worker
+		);
 	}
-
 }
 
 static void
-worker_loop_round(struct dataplane_worker *worker)
-{
+worker_loop_round(struct dataplane_worker *worker) {
 	struct packet_list input_packets;
 	packet_list_init(&input_packets);
 
@@ -291,9 +265,7 @@ worker_loop_round(struct dataplane_worker *worker)
 		struct packet *packet;
 		while ((packet = packet_list_pop(&input_packets))) {
 			if (packet->pipeline == pipeline) {
-				pipeline_front_output(
-					&pipeline_front,
-					packet);
+				pipeline_front_output(&pipeline_front, packet);
 			} else {
 				packet_list_add(&ready_packets, packet);
 			}
@@ -321,12 +293,10 @@ worker_loop_round(struct dataplane_worker *worker)
 }
 
 void
-worker_exec(struct dataplane_worker *worker)
-{
+worker_exec(struct dataplane_worker *worker) {
 	while (1) {
 		worker_loop_round(worker);
 	}
-
 }
 
 int
@@ -334,8 +304,8 @@ dataplane_worker_init(
 	struct dataplane *dataplane,
 	struct dataplane_device *device,
 	struct dataplane_worker *worker,
-	int queue_id)
-{
+	int queue_id
+) {
 	worker->dataplane = dataplane;
 	worker->device = device;
 	worker->device_id = device->device_id;
@@ -347,12 +317,7 @@ dataplane_worker_init(
 	worker->write_ctx.rx_pipes = NULL;
 
 	// Initialize device rx and tx queue
-	if (rte_eth_tx_queue_setup(
-		device->port_id,
-		queue_id,
-		4096,
-		0,
-		NULL)) {
+	if (rte_eth_tx_queue_setup(device->port_id, queue_id, 4096, 0, NULL)) {
 		return -1;
 	}
 
@@ -362,7 +327,8 @@ dataplane_worker_init(
 		sizeof(mempool_name) - 1,
 		"wrk_rx_pool_%d_%d",
 		device->port_id,
-		queue_id);
+		queue_id
+	);
 
 	worker->rx_mempool = rte_mempool_create(
 		mempool_name,
@@ -375,35 +341,29 @@ dataplane_worker_init(
 		rte_pktmbuf_init,
 		NULL,
 		0,
-		MEMPOOL_F_SP_PUT | MEMPOOL_F_SC_GET);
+		MEMPOOL_F_SP_PUT | MEMPOOL_F_SC_GET
+	);
 	if (worker->rx_mempool == NULL) {
 		return -1;
 	}
 
 	if (rte_eth_rx_queue_setup(
-		device->port_id,
-		queue_id,
-		4096,
-		0,
-		NULL,
-		worker->rx_mempool)) {
+		    device->port_id, queue_id, 4096, 0, NULL, worker->rx_mempool
+	    )) {
 		goto error_mempool;
 	}
 
 	// Allocate connection data for each dataplane device
 	worker->write_ctx.tx_connections = (struct worker_tx_connection *)
-		malloc(
-			sizeof(struct worker_tx_connection) *
-			dataplane->device_count);
+		malloc(sizeof(struct worker_tx_connection) *
+		       dataplane->device_count);
 	if (worker->write_ctx.tx_connections == NULL) {
 		goto error_mempool;
 	}
 
-	memset(
-		worker->write_ctx.tx_connections,
-		0,
-		sizeof(struct worker_tx_connection) *
-		dataplane->device_count);
+	memset(worker->write_ctx.tx_connections,
+	       0,
+	       sizeof(struct worker_tx_connection) * dataplane->device_count);
 
 	// Initialize zero rx connections
 	worker->write_ctx.rx_pipe_count = 0;
@@ -415,5 +375,3 @@ error_mempool:
 
 	return -1;
 }
-
-

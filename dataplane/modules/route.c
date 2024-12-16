@@ -48,43 +48,29 @@ struct route_module {
 };
 
 static uint32_t
-route_handle_v4(
-	struct route_module_config *config,
-	struct packet *packet)
-{
+route_handle_v4(struct route_module_config *config, struct packet *packet) {
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
-	struct rte_ipv4_hdr* header =
-		rte_pktmbuf_mtod_offset(
-			mbuf,
-			struct rte_ipv4_hdr*,
-			packet->network_header.offset);
+	struct rte_ipv4_hdr *header = rte_pktmbuf_mtod_offset(
+		mbuf, struct rte_ipv4_hdr *, packet->network_header.offset
+	);
 
 	return lpm_lookup(&config->lpm_v4, 4, (uint8_t *)&header->dst_addr);
-
 }
 
 static uint32_t
-route_handle_v6(
-	struct route_module_config *config,
-	struct packet *packet)
-{
+route_handle_v6(struct route_module_config *config, struct packet *packet) {
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
-	struct rte_ipv6_hdr* header =
-		rte_pktmbuf_mtod_offset(
-			mbuf,
-			struct rte_ipv6_hdr*,
-			packet->network_header.offset);
+	struct rte_ipv6_hdr *header = rte_pktmbuf_mtod_offset(
+		mbuf, struct rte_ipv6_hdr *, packet->network_header.offset
+	);
 
 	return lpm_lookup(&config->lpm_v6, 16, header->dst_addr);
 }
 
 static void
-route_set_packet_destination(
-	struct packet *packet,
-	struct route *route)
-{
+route_set_packet_destination(struct packet *packet, struct route *route) {
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
 	/*
@@ -92,29 +78,24 @@ route_set_packet_destination(
 	 * ethernet header?
 	 */
 	struct rte_ether_hdr *ether_hdr =
-		rte_pktmbuf_mtod_offset(
-			mbuf,
-			struct rte_ether_hdr *,
-			0);
+		rte_pktmbuf_mtod_offset(mbuf, struct rte_ether_hdr *, 0);
 
-	memcpy(
-		ether_hdr->dst_addr.addr_bytes,
-		route->dst_addr.addr_bytes,
-		sizeof(route->dst_addr));
+	memcpy(ether_hdr->dst_addr.addr_bytes,
+	       route->dst_addr.addr_bytes,
+	       sizeof(route->dst_addr));
 
-	memcpy(
-		ether_hdr->src_addr.addr_bytes,
-		route->src_addr.addr_bytes,
-		sizeof(route->src_addr));
+	memcpy(ether_hdr->src_addr.addr_bytes,
+	       route->src_addr.addr_bytes,
+	       sizeof(route->src_addr));
 }
 
 static void
 route_handle_packets(
 	struct module *module,
 	struct module_config *config,
-	struct pipeline_front *pipeline_front)
-{
-	(void) module;
+	struct pipeline_front *pipeline_front
+) {
+	(void)module;
 	struct route_module_config *route_config =
 		container_of(config, struct route_module_config, config);
 
@@ -126,7 +107,7 @@ route_handle_packets(
 		    rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
 			route_list_id = route_handle_v4(route_config, packet);
 		} else if (packet->network_header.type ==
-		    rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)) {
+			   rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6)) {
 			route_list_id = route_handle_v6(route_config, packet);
 		} else {
 			pipeline_front_drop(pipeline_front, packet);
@@ -149,7 +130,6 @@ route_handle_packets(
 	}
 }
 
-
 static int
 route_handle_configure(
 	struct module *module,
@@ -157,24 +137,23 @@ route_handle_configure(
 	const void *config_data,
 	size_t config_data_size,
 	struct module_config *old_config,
-	struct module_config **new_config)
-{
-	(void) module;
-	(void) config_data;
-	(void) config_data_size;
-	(void) old_config;
-	(void) new_config;
+	struct module_config **new_config
+) {
+	(void)module;
+	(void)config_data;
+	(void)config_data_size;
+	(void)old_config;
+	(void)new_config;
 
-	struct route_module_config *config =
-		(struct route_module_config *)
+	struct route_module_config *config = (struct route_module_config *)
 		malloc(sizeof(struct route_module_config));
 
 	snprintf(
 		config->config.name,
 		sizeof(config->config.name),
 		"%s",
-		config_name);
-
+		config_name
+	);
 
 	lpm_init(&config->lpm_v4);
 	lpm_init(&config->lpm_v6);
@@ -184,66 +163,64 @@ route_handle_configure(
 		4,
 		(uint8_t[4]){0, 0, 0, 0},
 		(uint8_t[4]){0xff, 0xff, 0xff, 0xff},
-		0);
+		0
+	);
 
 	lpm_insert(
 		&config->lpm_v6,
 		16,
 		(uint8_t[16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-		(uint8_t[16]){
-			0xff, 0xff, 0xff, 0xff,
-			0xff, 0xff, 0xff, 0xff,
-			0xff, 0xff, 0xff, 0xff,
-			0xff, 0xff, 0xff, 0xff},
-		1);
+		(uint8_t[16]){0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff,
+			      0xff},
+		1
+	);
 	config->route_indexes = (uint32_t *)malloc(sizeof(uint32_t) * 2);
 	config->route_indexes[0] = 0;
 	config->route_indexes[1] = 1;
 
-	config->routes = (struct route *)
-		malloc(sizeof(struct route) * 2);
-	memcpy(
-		config->routes[0].dst_addr.addr_bytes,
-		(uint8_t[6]){0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
-		6);
-	memcpy(
-		config->routes[0].src_addr.addr_bytes,
-		(uint8_t[6]){0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c},
-		6);
+	config->routes = (struct route *)malloc(sizeof(struct route) * 2);
+	memcpy(config->routes[0].dst_addr.addr_bytes,
+	       (uint8_t[6]){0x01, 0x02, 0x03, 0x04, 0x05, 0x06},
+	       6);
+	memcpy(config->routes[0].src_addr.addr_bytes,
+	       (uint8_t[6]){0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c},
+	       6);
 
-	memcpy(
-		config->routes[1].dst_addr.addr_bytes,
-		(uint8_t[6]){0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6},
-		6);
-	memcpy(
-		config->routes[1].src_addr.addr_bytes,
-		(uint8_t[6]){0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac},
-		6);
+	memcpy(config->routes[1].dst_addr.addr_bytes,
+	       (uint8_t[6]){0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6},
+	       6);
+	memcpy(config->routes[1].src_addr.addr_bytes,
+	       (uint8_t[6]){0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0xac},
+	       6);
 
-	config->route_lists = (struct route_list *)
-		malloc(sizeof(struct route_list) * 2);
-	config->route_lists[0] = (struct route_list){
-		config->route_indexes + 0,
-		1
-	};
-	config->route_lists[1] = (struct route_list){
-		config->route_indexes + 1,
-		1
-	};
+	config->route_lists =
+		(struct route_list *)malloc(sizeof(struct route_list) * 2);
+	config->route_lists[0] =
+		(struct route_list){config->route_indexes + 0, 1};
+	config->route_lists[1] =
+		(struct route_list){config->route_indexes + 1, 1};
 
 	*new_config = &config->config;
 
 	return 0;
 }
 
-
-
-
-
-
 struct module *
-new_module_route()
-{
+new_module_route() {
 	struct route_module *module =
 		(struct route_module *)malloc(sizeof(struct route_module));
 
@@ -251,7 +228,9 @@ new_module_route()
 		return NULL;
 	}
 
-	snprintf(module->module.name, sizeof(module->module.name), "%s", "route");
+	snprintf(
+		module->module.name, sizeof(module->module.name), "%s", "route"
+	);
 	module->module.handler = route_handle_packets;
 	module->module.config_handler = route_handle_configure;
 

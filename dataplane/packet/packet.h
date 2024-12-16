@@ -1,12 +1,12 @@
 #ifndef PACKET_H
 #define PACKET_H
 
-#include <stdlib.h>
 #include <stdint.h>
+#include <stdlib.h>
 
-#include "rte_mbuf.h"
 #include "rte_ether.h"
 #include "rte_ip.h"
+#include "rte_mbuf.h"
 
 #define PACKET_HEADER_TYPE_UNKNOWN 0
 
@@ -35,13 +35,11 @@ struct packet {
 
 	uint16_t tx_result;
 
-
 	uint16_t flags;
 	uint16_t vlan;
 
 	struct network_header network_header;
 	struct transport_header transport_header;
-
 };
 
 struct packet_list {
@@ -50,29 +48,25 @@ struct packet_list {
 };
 
 static inline void
-packet_list_init(struct packet_list *list)
-{
+packet_list_init(struct packet_list *list) {
 	list->first = NULL;
 	list->last = &list->first;
 }
 
 static inline void
-packet_list_add(struct packet_list *list, struct packet *packet)
-{
+packet_list_add(struct packet_list *list, struct packet *packet) {
 	*list->last = packet;
 	packet->next = NULL;
 	list->last = &packet->next;
 }
 
 static inline struct packet *
-packet_list_first(struct packet_list *list)
-{
+packet_list_first(struct packet_list *list) {
 	return list->first;
 }
 
 static inline void
-packet_list_concat(struct packet_list *dst, struct packet_list *src)
-{
+packet_list_concat(struct packet_list *dst, struct packet_list *src) {
 	// Nothing to do if src is empty
 	if (src->first == NULL)
 		return;
@@ -104,15 +98,13 @@ int
 parse_packet(struct packet *packet);
 
 static inline struct rte_mbuf *
-packet_to_mbuf(const struct packet *packet)
-{
+packet_to_mbuf(const struct packet *packet) {
 	return packet->mbuf;
 }
 
 static inline struct packet *
-mbuf_to_packet(struct rte_mbuf *mbuf)
-{
-	return (struct packet *)((void*)mbuf->buf_addr);
+mbuf_to_packet(struct rte_mbuf *mbuf) {
+	return (struct packet *)((void *)mbuf->buf_addr);
 }
 
 struct ipv6_ext_2byte {
@@ -121,11 +113,10 @@ struct ipv6_ext_2byte {
 } __rte_packed;
 
 struct ipv6_ext_fragment {
-        uint8_t next_type;
-        uint8_t reserved;
-        uint16_t offset_flag;
-        uint32_t identification;
+	uint8_t next_type;
+	uint8_t reserved;
+	uint16_t offset_flag;
+	uint32_t identification;
 } __rte_packed;
-
 
 #endif

@@ -8,21 +8,16 @@
 
 #include "drivers/sock_dev.h"
 
-//FIXME remove this include
+// FIXME remove this include
 #include "modules/acl.h"
 #include "modules/balancer.h"
-#include "modules/route.h"
 #include "modules/kernel.h"
-
-
+#include "modules/route.h"
 
 #include "common/data_pipe.h"
 
-
 static int
-dataplane_init_kernel_pipeline(
-	struct dataplane *dataplane)
-{
+dataplane_init_kernel_pipeline(struct dataplane *dataplane) {
 	pipeline_init(&dataplane->kernel_pipeline);
 
 	struct pipeline_module_config_ref kernel_cfg_refs[1];
@@ -33,20 +28,18 @@ dataplane_init_kernel_pipeline(
 		&dataplane->kernel_pipeline,
 		kernel_cfg_refs,
 		1,
-		&dataplane->config.module_registry);
+		&dataplane->config.module_registry
+	);
 }
 
 static int
-dataplane_init_phy_pipeline(
-	struct dataplane *dataplane)
-{
+dataplane_init_phy_pipeline(struct dataplane *dataplane) {
 	pipeline_init(&dataplane->phy_pipeline);
 
 	struct pipeline_module_config_ref phy_cfg_refs[4];
 	phy_cfg_refs[0] =
 		(struct pipeline_module_config_ref){"kernel", "kernel0"};
-	phy_cfg_refs[1] =
-		(struct pipeline_module_config_ref){"acl", "acl0"};
+	phy_cfg_refs[1] = (struct pipeline_module_config_ref){"acl", "acl0"};
 	phy_cfg_refs[2] =
 		(struct pipeline_module_config_ref){"balancer", "balancer0"};
 	phy_cfg_refs[3] =
@@ -56,7 +49,8 @@ dataplane_init_phy_pipeline(
 		&dataplane->phy_pipeline,
 		phy_cfg_refs + 0,
 		4,
-		&dataplane->config.module_registry);
+		&dataplane->config.module_registry
+	);
 }
 
 /*
@@ -80,9 +74,9 @@ dataplane_sock_port_init(
 	device->port_id = sock_dev_create(sock_name, name, numa_id);
 	if (rte_eth_dev_configure(
 		device->port_id,
-	        queue_count,
-	        queue_count,
-	        &port_conf)) {
+		queue_count,
+		queue_count,
+		&port_conf)) {
 		return -1;
 	}
 
@@ -108,25 +102,23 @@ dataplane_sock_port_init(
 }
 */
 
-
 static int
 dataplane_worker_connect(
 	struct dataplane *dataplane,
 	struct dataplane_device *device,
 	struct dataplane_worker *wrk_tx,
 	struct worker_tx_connection *tx_conn,
-	struct dataplane_worker *wrk_rx)
-{
-	(void) dataplane;
-	(void) device;
-	(void) wrk_tx;
+	struct dataplane_worker *wrk_rx
+) {
+	(void)dataplane;
+	(void)device;
+	(void)wrk_tx;
 
 	if (!(tx_conn->count & (tx_conn->count + 1))) {
-		struct data_pipe *pipes = (struct data_pipe *)
-			realloc(
-				tx_conn->pipes,
-				sizeof(struct data_pipe) * 2 *
-				(tx_conn->count + 1));
+		struct data_pipe *pipes = (struct data_pipe *)realloc(
+			tx_conn->pipes,
+			sizeof(struct data_pipe) * 2 * (tx_conn->count + 1)
+		);
 		if (pipes == NULL)
 			return -1;
 		tx_conn->pipes = pipes;
@@ -134,11 +126,11 @@ dataplane_worker_connect(
 
 	if (!(wrk_rx->write_ctx.rx_pipe_count &
 	      (wrk_rx->write_ctx.rx_pipe_count + 1))) {
-		struct data_pipe *pipes = (struct data_pipe *)
-			realloc(
-				wrk_rx->write_ctx.rx_pipes,
-				sizeof(struct data_pipe) * 2 *
-				(wrk_rx->write_ctx.rx_pipe_count + 1));
+		struct data_pipe *pipes = (struct data_pipe *)realloc(
+			wrk_rx->write_ctx.rx_pipes,
+			sizeof(struct data_pipe) * 2 *
+				(wrk_rx->write_ctx.rx_pipe_count + 1)
+		);
 		if (pipes == NULL)
 			return -1;
 		wrk_rx->write_ctx.rx_pipes = pipes;
@@ -160,8 +152,8 @@ static int
 dataplane_connect_device(
 	struct dataplane *dataplane,
 	struct dataplane_device *from_device,
-	struct dataplane_device *to_device)
-{
+	struct dataplane_device *to_device
+) {
 	/*
 	 * Each worker from source device should have at least one
 	 * connection to destination device. Also create at least one
@@ -172,43 +164,34 @@ dataplane_connect_device(
 	if (to_device->worker_count > pipe_count)
 		pipe_count = to_device->worker_count;
 
-	for (size_t pipe_idx = 0;
-	     pipe_idx < pipe_count;
-	     ++pipe_idx) {
+	for (size_t pipe_idx = 0; pipe_idx < pipe_count; ++pipe_idx) {
 		// Select source and destination workers
 		struct dataplane_worker *from_worker =
 			from_device->workers +
 			pipe_idx % from_device->worker_count;
 
 		struct dataplane_worker *to_worker =
-			to_device->workers +
-			pipe_idx % to_device->worker_count;
+			to_device->workers + pipe_idx % to_device->worker_count;
 
 		struct worker_tx_connection *tx_conn =
 			from_worker->write_ctx.tx_connections +
 			to_device->device_id;
 
-
 		// FIXME: handle errors
 		dataplane_worker_connect(
-			dataplane,
-			from_device,
-			from_worker,
-			tx_conn,
-			to_worker);
+			dataplane, from_device, from_worker, tx_conn, to_worker
+		);
 	}
 
 	return 0;
 }
-
 
 /*
  * This function creates device interconnect topology which heavily depends
  * on default virtual devices creation policy.
  */
 static int
-dataplane_connect_devices(
-	struct dataplane *dataplane)
+dataplane_connect_devices(struct dataplane *dataplane)
 
 {
 	/*
@@ -225,37 +208,37 @@ dataplane_connect_devices(
 	size_t phy_device_count = dataplane->device_count / 2;
 
 	// Create physical devices full-mesh interconnection
-	for (size_t dev1_idx = 0;
-	     dev1_idx < phy_device_count;
-	     ++dev1_idx) {
+	for (size_t dev1_idx = 0; dev1_idx < phy_device_count; ++dev1_idx) {
 		for (size_t dev2_idx = dev1_idx + 1;
 		     dev2_idx < phy_device_count;
 		     ++dev2_idx) {
 			dataplane_connect_device(
 				dataplane,
 				dataplane->devices + dev1_idx,
-				dataplane->devices + dev2_idx);
+				dataplane->devices + dev2_idx
+			);
 
 			dataplane_connect_device(
 				dataplane,
 				dataplane->devices + dev2_idx,
-				dataplane->devices + dev1_idx);
+				dataplane->devices + dev1_idx
+			);
 		}
 	}
 
 	// Create interconnect between physical and virtual device pair
-	for (size_t dev1_idx = 0;
-	     dev1_idx < phy_device_count;
-	     ++dev1_idx) {
+	for (size_t dev1_idx = 0; dev1_idx < phy_device_count; ++dev1_idx) {
 		dataplane_connect_device(
 			dataplane,
 			dataplane->devices + dev1_idx,
-			dataplane->devices + dev1_idx + phy_device_count);
+			dataplane->devices + dev1_idx + phy_device_count
+		);
 
 		dataplane_connect_device(
 			dataplane,
 			dataplane->devices + dev1_idx + phy_device_count,
-			dataplane->devices + dev1_idx);
+			dataplane->devices + dev1_idx
+		);
 	}
 
 	return 0;
@@ -265,24 +248,24 @@ static int
 dataplane_create_devices(
 	struct dataplane *dataplane,
 	size_t device_count,
-	const char *const*devices)
-{
+	const char *const *devices
+) {
 
 	dataplane->device_count = device_count * 2;
-	dataplane->devices = (struct dataplane_device *)
-		malloc(
-			sizeof(struct dataplane_device) *
-			dataplane->device_count);
+	dataplane->devices = (struct dataplane_device *)malloc(
+		sizeof(struct dataplane_device) * dataplane->device_count
+	);
 
 	for (size_t dev_idx = 0; dev_idx < device_count; ++dev_idx) {
 		// FIXME: handle port initializations bellow
-		(void) dataplane_dpdk_port_init(
+		(void)dataplane_dpdk_port_init(
 			dataplane,
 			dataplane->devices + dev_idx,
 			dev_idx,
 			devices[dev_idx],
 			2,
-			0);
+			0
+		);
 	}
 
 	for (size_t dev_idx = 0; dev_idx < device_count; ++dev_idx) {
@@ -291,28 +274,31 @@ dataplane_create_devices(
 			vdev_name,
 			sizeof(vdev_name),
 			"virtio_user_kni%lu",
-			dev_idx);
+			dev_idx
+		);
 
 		struct rte_ether_addr ether_addr;
 		// FIXME: handle port initializations bellow
-		(void) dataplane_dpdk_port_get_mac(
-			dataplane->devices + dev_idx,
-			&ether_addr);
+		(void)dataplane_dpdk_port_get_mac(
+			dataplane->devices + dev_idx, &ether_addr
+		);
 
-		(void) dpdk_add_vdev_port(
+		(void)dpdk_add_vdev_port(
 			vdev_name,
 			vdev_name + strlen("virtio_user_"),
 			&ether_addr,
 			1,
-			0);
+			0
+		);
 
-		(void) dataplane_dpdk_port_init(
+		(void)dataplane_dpdk_port_init(
 			dataplane,
 			dataplane->devices + device_count + dev_idx,
 			device_count + dev_idx,
 			vdev_name,
 			1,
-			0);
+			0
+		);
 	}
 
 	return 0;
@@ -323,8 +309,8 @@ dataplane_init(
 	struct dataplane *dataplane,
 	const char *binary,
 	size_t device_count,
-	const char *const*devices)
-{
+	const char *const *devices
+) {
 	dataplane->config.module_registry = (struct module_registry){NULL, 0};
 
 	dataplane_register_module(dataplane, new_module_acl());
@@ -338,29 +324,28 @@ dataplane_init(
 	 */
 
 	if (module_registry_configure(
-		&dataplane->config.module_registry,
-		"acl",
-		"acl0",
-		NULL,
-		0)) {
+		    &dataplane->config.module_registry, "acl", "acl0", NULL, 0
+	    )) {
 		return -1;
 	}
 
 	if (module_registry_configure(
-		&dataplane->config.module_registry,
-		"balancer",
-		"balancer0",
-		NULL,
-		0)) {
+		    &dataplane->config.module_registry,
+		    "balancer",
+		    "balancer0",
+		    NULL,
+		    0
+	    )) {
 		return -1;
 	}
 
 	if (module_registry_configure(
-		&dataplane->config.module_registry,
-		"route",
-		"route0",
-		NULL,
-		0)) {
+		    &dataplane->config.module_registry,
+		    "route",
+		    "route0",
+		    NULL,
+		    0
+	    )) {
 		return -1;
 	}
 
@@ -372,11 +357,12 @@ dataplane_init(
 		kernel_map[device_count + dev_idx] = dev_idx;
 
 	if (module_registry_configure(
-		&dataplane->config.module_registry,
-		"kernel",
-		"kernel0",
-		kernel_map,
-		sizeof(kernel_map))) {
+		    &dataplane->config.module_registry,
+		    "kernel",
+		    "kernel0",
+		    kernel_map,
+		    sizeof(kernel_map)
+	    )) {
 		return -1;
 	}
 
@@ -384,16 +370,9 @@ dataplane_init(
 	dataplane_init_kernel_pipeline(dataplane);
 	dataplane_init_phy_pipeline(dataplane);
 
+	(void)dpdk_init(binary, device_count, devices);
 
-	(void) dpdk_init(
-		binary,
-		device_count,
-		devices);
-
-	dataplane_create_devices(
-		dataplane,
-		device_count,
-		devices);
+	dataplane_create_devices(dataplane, device_count, devices);
 
 	dataplane_connect_devices(dataplane);
 
@@ -401,38 +380,28 @@ dataplane_init(
 }
 
 int
-dataplane_start(struct dataplane *dataplane)
-{
-	for (size_t dev_idx = 0;
-	     dev_idx < dataplane->device_count;
-	     ++dev_idx) {
-		dataplane_device_start(
-			dataplane,
-			dataplane->devices + dev_idx);
+dataplane_start(struct dataplane *dataplane) {
+	for (size_t dev_idx = 0; dev_idx < dataplane->device_count; ++dev_idx) {
+		dataplane_device_start(dataplane, dataplane->devices + dev_idx);
 	}
 
 	return 0;
 }
 
-
 int
-dataplane_stop(struct dataplane *dataplane)
-{
-	for (size_t dev_idx = 0;
-	     dev_idx < dataplane->device_count;
-	     ++dev_idx) {
-		dataplane_device_stop(
-			dataplane->devices + dev_idx);
+dataplane_stop(struct dataplane *dataplane) {
+	for (size_t dev_idx = 0; dev_idx < dataplane->device_count; ++dev_idx) {
+		dataplane_device_stop(dataplane->devices + dev_idx);
 	}
 
 	return 0;
 }
 
 void
-dataplane_route_pipeline(struct dataplane *dataplane, struct packet_list *packets)
-{
-	for (struct packet *packet = packet_list_first(packets);
-	     packet != NULL;
+dataplane_route_pipeline(
+	struct dataplane *dataplane, struct packet_list *packets
+) {
+	for (struct packet *packet = packet_list_first(packets); packet != NULL;
 	     packet = packet->next) {
 		if (packet->rx_device_id >= dataplane->device_count / 2) {
 			packet->pipeline = &dataplane->kernel_pipeline;
@@ -443,9 +412,10 @@ dataplane_route_pipeline(struct dataplane *dataplane, struct packet_list *packet
 }
 
 void
-dataplane_drop_packets(struct dataplane *dataplane, struct packet_list *packets)
-{
-	(void) dataplane;
+dataplane_drop_packets(
+	struct dataplane *dataplane, struct packet_list *packets
+) {
+	(void)dataplane;
 	struct packet *packet = packet_list_first(packets);
 	while (packet != NULL) {
 		// Freeing packet will destroy the `next` field to
@@ -458,14 +428,11 @@ dataplane_drop_packets(struct dataplane *dataplane, struct packet_list *packets)
 }
 
 int
-dataplane_register_module(struct dataplane *dataplane, struct module *module)
-{
+dataplane_register_module(struct dataplane *dataplane, struct module *module) {
 	struct module_registry *module_registry =
 		&dataplane->config.module_registry;
 
-	for (uint32_t idx = 0;
-	     idx < module_registry->module_count;
-	     ++idx) {
+	for (uint32_t idx = 0; idx < module_registry->module_count; ++idx) {
 		struct module_config_registry *module_config_registry =
 			module_registry->modules + idx;
 
@@ -475,9 +442,10 @@ dataplane_register_module(struct dataplane *dataplane, struct module *module)
 		}
 
 		if (!strncmp(
-			module_config_registry->module->name,
-			module->name,
-			MODULE_NAME_LEN)) {
+			    module_config_registry->module->name,
+			    module->name,
+			    MODULE_NAME_LEN
+		    )) {
 			// TODO: error code
 			return -1;
 		}
@@ -488,23 +456,19 @@ dataplane_register_module(struct dataplane *dataplane, struct module *module)
 	// FIXME array extending as routine/library
 	if (module_registry->module_count % 8 == 0) {
 		struct module_config_registry *new_config_registry =
-			(struct module_config_registry *)
-			realloc(
+			(struct module_config_registry *)realloc(
 				module_registry->modules,
 				sizeof(struct module_config_registry) *
-				(module_registry->module_count + 8));
+					(module_registry->module_count + 8)
+			);
 		if (new_config_registry == NULL) {
 			// TODO: error code
 			return -1;
 		}
 		module_registry->modules = new_config_registry;
-
 	}
 
-	module_registry->modules[ module_registry->module_count++] =
+	module_registry->modules[module_registry->module_count++] =
 		(struct module_config_registry){module, NULL, 0};
 	return 0;
 }
-
-
-

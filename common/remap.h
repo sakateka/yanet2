@@ -51,17 +51,15 @@ struct remap_table {
 };
 
 static inline int
-remap_table_init(struct remap_table *table, uint32_t capacity)
-{
+remap_table_init(struct remap_table *table, uint32_t capacity) {
 	table->gen = 1;
 	table->count = 1;
-	table->keys =
-		(struct remap_item **)malloc(sizeof(struct remap_item *));
+	table->keys = (struct remap_item **)malloc(sizeof(struct remap_item *));
 	if (table->keys == NULL)
 		return -1;
-	table->keys[0] =
-		(struct remap_item *)malloc(
-			sizeof(struct remap_item) * REMAP_TABLE_CHUNK_SIZE);
+	table->keys[0] = (struct remap_item *)malloc(
+		sizeof(struct remap_item) * REMAP_TABLE_CHUNK_SIZE
+	);
 	if (table->keys[0] == NULL) {
 		free(table->keys);
 		return -1;
@@ -72,8 +70,7 @@ remap_table_init(struct remap_table *table, uint32_t capacity)
 }
 
 static void
-remap_table_free(struct remap_table *table)
-{
+remap_table_free(struct remap_table *table) {
 	for (uint32_t chunk_idx = 0;
 	     chunk_idx < table->count / REMAP_TABLE_CHUNK_SIZE;
 	     ++chunk_idx)
@@ -82,8 +79,7 @@ remap_table_free(struct remap_table *table)
 }
 
 static inline void
-remap_table_new_gen(struct remap_table *table)
-{
+remap_table_new_gen(struct remap_table *table) {
 	++(table->gen);
 }
 
@@ -99,8 +95,7 @@ remap_table_item(struct remap_table *table, uint32_t key) {
  * chunk if required and returns first available key.
  */
 static inline int
-remap_table_new_key(struct remap_table *table, uint32_t *key)
-{
+remap_table_new_key(struct remap_table *table, uint32_t *key) {
 	if (false && table->free_list != REMAP_TABLE_INVALID) {
 		*key = table->free_list;
 		struct remap_item *free_item = remap_table_item(table, *key);
@@ -113,16 +108,15 @@ remap_table_new_key(struct remap_table *table, uint32_t *key)
 	if (!(table->count % REMAP_TABLE_CHUNK_SIZE)) {
 		uint32_t new_chunk_count =
 			table->count / REMAP_TABLE_CHUNK_SIZE + 1;
-		struct remap_item **keys =
-			(struct remap_item **)realloc(
-				table->keys,
-				sizeof(struct remap_item *) * new_chunk_count);
+		struct remap_item **keys = (struct remap_item **)realloc(
+			table->keys,
+			sizeof(struct remap_item *) * new_chunk_count
+		);
 		if (keys == NULL)
 			return -1;
-		table->keys[new_chunk_count - 1] =
-			(struct remap_item *)malloc(
-				sizeof(struct remap_item) *
-				REMAP_TABLE_CHUNK_SIZE);
+		table->keys[new_chunk_count - 1] = (struct remap_item *)malloc(
+			sizeof(struct remap_item) * REMAP_TABLE_CHUNK_SIZE
+		);
 		if (table->keys[new_chunk_count - 1] == NULL)
 			return -1;
 	}
@@ -134,8 +128,7 @@ remap_table_new_key(struct remap_table *table, uint32_t *key)
 }
 
 static inline int
-remap_table_touch(struct remap_table *table, uint32_t key, uint32_t *value)
-{
+remap_table_touch(struct remap_table *table, uint32_t key, uint32_t *value) {
 	int res = 0;
 	struct remap_item *item = remap_table_item(table, key);
 
@@ -172,8 +165,7 @@ remap_table_touch(struct remap_table *table, uint32_t key, uint32_t *value)
  * NOTE: Touching keys is not legal after compaction.
  */
 static inline void
-remap_table_compact(struct remap_table *table)
-{
+remap_table_compact(struct remap_table *table) {
 	uint32_t new_key = 0;
 
 	for (uint32_t low_idx = 0; low_idx < table->count; ++low_idx) {
@@ -190,8 +182,7 @@ remap_table_compact(struct remap_table *table)
  * The routine returns compacted view of remap table.
  */
 static inline uint32_t
-remap_table_compacted(struct remap_table *table, uint32_t key)
-{
+remap_table_compacted(struct remap_table *table, uint32_t key) {
 	struct remap_item *item = remap_table_item(table, key);
 	return item->value;
 }

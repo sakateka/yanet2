@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 #include "common/key.h"
-#include "common/radix.h"
 #include "common/lpm.h"
+#include "common/radix.h"
 
 struct range_collector {
 	struct radix radix;
@@ -15,8 +15,7 @@ struct range_collector {
 };
 
 static inline int
-range_collector_init(struct range_collector *collector)
-{
+range_collector_init(struct range_collector *collector) {
 	if (radix_init(&collector->radix))
 		return -1;
 	collector->masks = NULL;
@@ -25,8 +24,7 @@ range_collector_init(struct range_collector *collector)
 }
 
 static inline void
-range_collector_free(struct range_collector *collector)
-{
+range_collector_free(struct range_collector *collector) {
 	free(collector->masks);
 	radix_free(&collector->radix);
 }
@@ -35,22 +33,20 @@ static inline int
 range_collector_add_mask(
 	struct range_collector *collector,
 	uint8_t key_size,
-	uint32_t *mask_index)
-{
+	uint32_t *mask_index
+) {
 	if (!(collector->mask_count & (collector->mask_count + 1))) {
-		uint8_t *masks =
-			(uint8_t *)realloc(collector->masks,
-					      key_size *
-					      (collector->mask_count + 1) * 2);
+		uint8_t *masks = (uint8_t *)realloc(
+			collector->masks,
+			key_size * (collector->mask_count + 1) * 2
+		);
 		if (masks == NULL)
 			return -1;
 		collector->masks = masks;
 	}
 
-	memset(
-		collector->masks + collector->mask_count * key_size,
-		0,
-		key_size);
+	memset(collector->masks + collector->mask_count * key_size, 0, key_size
+	);
 	*mask_index = collector->mask_count++;
 	return 0;
 }
@@ -60,8 +56,8 @@ range_collector_set_mask(
 	struct range_collector *collector,
 	uint8_t key_size,
 	uint32_t mask_index,
-	uint8_t prefix)
-{
+	uint8_t prefix
+) {
 	uint32_t pos = mask_index * key_size + prefix / 8;
 	collector->masks[pos] |= 0x80 >> (prefix % 8);
 }
@@ -71,18 +67,22 @@ range_collector_add(
 	struct range_collector *collector,
 	uint8_t key_size,
 	const uint8_t *value,
-	const uint8_t prefix)
-{
+	const uint8_t prefix
+) {
 	if (!prefix)
 		return 0;
 
 	uint32_t mask_index = radix_lookup(&collector->radix, key_size, value);
 	if (mask_index == RADIX_VALUE_INVALID) {
-		if (range_collector_add_mask(collector, key_size, &mask_index)) {
+		if (range_collector_add_mask(
+			    collector, key_size, &mask_index
+		    )) {
 			return -1;
 		}
 
-		if (radix_insert(&collector->radix, key_size, value, mask_index)) {
+		if (radix_insert(
+			    &collector->radix, key_size, value, mask_index
+		    )) {
 			/*
 			 * Mask added above leaked but this should not be
 			 * an issue as the collector assumed to be freed
@@ -116,21 +116,16 @@ struct range_collector_stack_item {
 };
 
 static inline struct range_collector_stack_item
-range_collector_stack_last(
-	struct range_collector_ctx *ctx,
-	uint8_t key_size)
-{
-	return (struct range_collector_stack_item){
-		ctx->values + (ctx->stack_depth - 1),
-		ctx->to + (ctx->stack_depth - 1) * key_size};
+range_collector_stack_last(struct range_collector_ctx *ctx, uint8_t key_size) {
+	return (struct range_collector_stack_item
+	){ctx->values + (ctx->stack_depth - 1),
+	  ctx->to + (ctx->stack_depth - 1) * key_size};
 }
 
 static inline void
 range_collector_stack_push(
-	struct range_collector_ctx *ctx,
-	uint8_t key_size,
-	const uint8_t *to)
-{
+	struct range_collector_ctx *ctx, uint8_t key_size, const uint8_t *to
+) {
 	if (ctx->stack_depth > 0) {
 		struct range_collector_stack_item item =
 			range_collector_stack_last(ctx, key_size);
@@ -149,10 +144,8 @@ range_collector_stack_push(
 
 static inline int
 range_collector_stack_emit(
-	struct range_collector_ctx *ctx,
-	uint8_t key_size,
-	const uint8_t *to)
-{
+	struct range_collector_ctx *ctx, uint8_t key_size, const uint8_t *to
+) {
 	struct range_collector_stack_item item =
 		range_collector_stack_last(ctx, key_size);
 
@@ -170,18 +163,13 @@ range_collector_stack_emit(
 
 static inline int
 range_collector_stack_emit_until(
-	struct range_collector_ctx *ctx,
-	uint8_t key_size,
-	const uint8_t *to)
-{
+	struct range_collector_ctx *ctx, uint8_t key_size, const uint8_t *to
+) {
 	while (ctx->stack_depth) {
 		struct range_collector_stack_item item =
 			range_collector_stack_last(ctx, key_size);
 		if (filter_key_cmp(key_size, item.to, to) < 0) {
-			if (range_collector_stack_emit(
-				ctx,
-				key_size,
-				item.to))
+			if (range_collector_stack_emit(ctx, key_size, item.to))
 				return -1;
 			--ctx->stack_depth;
 		} else if (filter_key_cmp(key_size, ctx->pos, to) < 0) {
@@ -189,9 +177,8 @@ range_collector_stack_emit_until(
 			memcpy(emit_to, to, key_size);
 			filter_key_dec(key_size, emit_to);
 			return range_collector_stack_emit(
-				ctx,
-				key_size,
-				emit_to);
+				ctx, key_size, emit_to
+			);
 		} else {
 			break;
 		}
@@ -205,8 +192,8 @@ range_collector_add_network(
 	uint8_t key_size,
 	const uint8_t *from,
 	const uint8_t *to,
-	struct range_collector_ctx *ctx)
-{
+	struct range_collector_ctx *ctx
+) {
 	if (range_collector_stack_emit_until(ctx, key_size, from))
 		return -1;
 	range_collector_stack_push(ctx, key_size, to);
@@ -216,11 +203,8 @@ range_collector_add_network(
 
 static int
 range_collector_iterate(
-	uint8_t key_size,
-	const uint8_t *from,
-	uint32_t value,
-	void *data)
-{
+	uint8_t key_size, const uint8_t *from, uint32_t value, void *data
+) {
 	struct range_collector_ctx *ctx = (struct range_collector_ctx *)data;
 
 	const uint8_t *mask = ctx->collector->masks + value * key_size;
@@ -229,15 +213,13 @@ range_collector_iterate(
 	for (uint8_t idx = 0; idx < key_size; ++idx) {
 		uint8_t mask_item = mask[idx];
 		while (mask_item) {
-			uint8_t prefix = idx * 8 +
-				(__builtin_clzll(mask_item) - 56) + 1;
+			uint8_t prefix =
+				idx * 8 + (__builtin_clzll(mask_item) - 56) + 1;
 			filter_key_apply_prefix(key_size, from, to, prefix);
 			mask_item ^= 0x01 << (7 - (prefix - 1) % 8);
 			if (range_collector_add_network(
-				key_size,
-				from,
-				to,
-				ctx))
+				    key_size, from, to, ctx
+			    ))
 				return -1;
 		}
 	}
@@ -247,10 +229,8 @@ range_collector_iterate(
 
 static int
 range_collector_collect(
-	struct range_collector *collector,
-	uint8_t key_size,
-	struct lpm *lpm64)
-{
+	struct range_collector *collector, uint8_t key_size, struct lpm *lpm64
+) {
 	struct range_collector_ctx ctx;
 	ctx.collector = collector;
 	ctx.max_value = 0;
@@ -275,10 +255,8 @@ range_collector_collect(
 	range_collector_stack_push(&ctx, key_size, to_any);
 
 	if (radix_walk(
-		&collector->radix,
-		key_size,
-		range_collector_iterate,
-		&ctx))
+		    &collector->radix, key_size, range_collector_iterate, &ctx
+	    ))
 		goto error;
 
 	while (ctx.stack_depth > 0) {
@@ -301,35 +279,25 @@ error:
 
 static inline int
 range8_collector_add(
-	struct range_collector *collector,
-	const uint8_t *from,
-	uint8_t prefix)
-{
+	struct range_collector *collector, const uint8_t *from, uint8_t prefix
+) {
 	return range_collector_add(collector, 8, from, prefix);
 }
 
 static inline int
-range8_collector_collect(
-	struct range_collector *collector,
-	struct lpm *lpm)
-{
+range8_collector_collect(struct range_collector *collector, struct lpm *lpm) {
 	return range_collector_collect(collector, 8, lpm);
 }
 
 static inline int
 range4_collector_add(
-	struct range_collector *collector,
-	const uint8_t *from,
-	uint8_t prefix)
-{
+	struct range_collector *collector, const uint8_t *from, uint8_t prefix
+) {
 	return range_collector_add(collector, 4, from, prefix);
 }
 
 static inline int
-range4_collector_collect(
-	struct range_collector *collector,
-	struct lpm *lpm)
-{
+range4_collector_collect(struct range_collector *collector, struct lpm *lpm) {
 	return range_collector_collect(collector, 4, lpm);
 }
 

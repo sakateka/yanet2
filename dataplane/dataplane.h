@@ -5,8 +5,8 @@
 
 #include <pthread.h>
 
-#include "worker.h"
 #include "pipeline.h"
+#include "worker.h"
 
 #include "module.h"
 
@@ -22,7 +22,6 @@ struct dataplane_config {
 struct dataplane {
 	struct dataplane_config config;
 
-
 	struct pipeline phy_pipeline;
 	struct pipeline kernel_pipeline;
 
@@ -30,28 +29,29 @@ struct dataplane {
 	uint32_t device_count;
 };
 
-
 int
 dataplane_init(
 	struct dataplane *dataplane,
 	const char *binary,
 	size_t device_count,
-	const char *const* devices);
+	const char *const *devices
+);
 
 int
 dataplane_start(struct dataplane *dataplane);
 
-
 int
 dataplane_stop(struct dataplane *dataplane);
 
-
+void
+dataplane_route_pipeline(
+	struct dataplane *dataplane, struct packet_list *packets
+);
 
 void
-dataplane_route_pipeline(struct dataplane *dataplane, struct packet_list *packets);
-
-void
-dataplane_drop_packets(struct dataplane *dataplane, struct packet_list *packets);
+dataplane_drop_packets(
+	struct dataplane *dataplane, struct packet_list *packets
+);
 
 int
 dataplane_register_module(struct dataplane *dataplane, struct module *module);

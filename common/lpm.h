@@ -9,9 +9,9 @@
  * The tree does not allow to rewrite key-ranges or delete them.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <stdbool.h>
 
 #include <string.h>
 
@@ -25,22 +25,20 @@
 
 typedef uint32_t lpm_page_t[256];
 
-//TODO chunked storage
+// TODO chunked storage
 struct lpm {
 	lpm_page_t **pages;
 	size_t page_count;
 };
 
 static inline lpm_page_t *
-lpm_page(const struct lpm *lpm, uint32_t page_idx)
-{
+lpm_page(const struct lpm *lpm, uint32_t page_idx) {
 	return lpm->pages[page_idx / LPM_CHUNK_SIZE] +
-		page_idx % LPM_CHUNK_SIZE;
+	       page_idx % LPM_CHUNK_SIZE;
 }
 
 static inline int
-lpm_init(struct lpm *lpm)
-{
+lpm_init(struct lpm *lpm) {
 	lpm->pages = (lpm_page_t **)malloc(sizeof(lpm_page_t *) * 1);
 	if (lpm->pages == NULL)
 		return -1;
@@ -53,10 +51,8 @@ lpm_init(struct lpm *lpm)
 }
 
 static inline void
-lpm_free(struct lpm *lpm)
-{
-	for (size_t chunk_idx = 0;
-	     chunk_idx < lpm->page_count / LPM_CHUNK_SIZE;
+lpm_free(struct lpm *lpm) {
+	for (size_t chunk_idx = 0; chunk_idx < lpm->page_count / LPM_CHUNK_SIZE;
 	     ++chunk_idx)
 		free(lpm->pages[chunk_idx]);
 
@@ -64,21 +60,19 @@ lpm_free(struct lpm *lpm)
 }
 
 static inline int
-lpm_new_page(struct lpm *lpm, uint32_t *page_idx)
-{
+lpm_new_page(struct lpm *lpm, uint32_t *page_idx) {
 	if (!(lpm->page_count % LPM_CHUNK_SIZE)) {
 		uint32_t new_chunk_count = lpm->page_count / LPM_CHUNK_SIZE + 1;
-		lpm_page_t **pages =
-			(lpm_page_t **)realloc(lpm->pages,
-						 sizeof(lpm_page_t *) *
-						 new_chunk_count);
+		lpm_page_t **pages = (lpm_page_t **)realloc(
+			lpm->pages, sizeof(lpm_page_t *) * new_chunk_count
+		);
 		if (pages == NULL) {
 			return -1;
 		}
 		lpm->pages = pages;
-		lpm->pages[new_chunk_count - 1] =
-			(lpm_page_t *)malloc(
-				sizeof(lpm_page_t) * LPM_CHUNK_SIZE);
+		lpm->pages[new_chunk_count - 1] = (lpm_page_t *)malloc(
+			sizeof(lpm_page_t) * LPM_CHUNK_SIZE
+		);
 		if (lpm->pages[new_chunk_count - 1])
 			return -1;
 	}
@@ -90,11 +84,8 @@ lpm_new_page(struct lpm *lpm, uint32_t *page_idx)
 
 static inline int
 lpm_check_range_lo(
-	uint8_t key_size,
-	const uint8_t *key,
-	const uint8_t *from,
-	uint8_t hop)
-{
+	uint8_t key_size, const uint8_t *key, const uint8_t *from, uint8_t hop
+) {
 	uint8_t check[key_size];
 	memcpy(check, key, hop + 1);
 
@@ -107,11 +98,8 @@ lpm_check_range_lo(
 
 static inline int
 lpm_check_range_hi(
-	uint8_t key_size,
-	const uint8_t *key,
-	const uint8_t *to,
-	uint8_t hop)
-{
+	uint8_t key_size, const uint8_t *key, const uint8_t *to, uint8_t hop
+) {
 	uint8_t check[key_size];
 	memcpy(check, key, hop + 1);
 
@@ -132,8 +120,8 @@ lpm_insert(
 	uint8_t key_size,
 	const uint8_t *from,
 	const uint8_t *to,
-	uint32_t value)
-{
+	uint32_t value
+) {
 	uint8_t key[key_size];
 	lpm_page_t *pages[key_size];
 
@@ -143,11 +131,11 @@ lpm_insert(
 	int8_t max_hop = 0;
 
 	while (1) {
-	/*
-		for (int idx = 0; idx < hop + 1; ++idx)
-			fprintf(stdout, "%02x ", key[idx]);
-		fprintf(stdout, " === %d\n", hop);
-*/
+		/*
+			for (int idx = 0; idx < hop + 1; ++idx)
+				fprintf(stdout, "%02x ", key[idx]);
+			fprintf(stdout, " === %d\n", hop);
+	*/
 		uint32_t *stored_value = (*pages[hop]) + key[hop];
 		if (*stored_value == LPM_VALUE_INVALID) {
 			if (hop < key_size - 1 &&
@@ -199,11 +187,7 @@ lpm_insert(
 }
 
 static inline uint32_t
-lpm_lookup(
-	const struct lpm *lpm,
-	uint8_t key_size,
-	const uint8_t *key)
-{
+lpm_lookup(const struct lpm *lpm, uint8_t key_size, const uint8_t *key) {
 	uint32_t value = 0;
 
 	for (uint8_t hop = 0; hop < key_size; ++hop) {
@@ -233,8 +217,8 @@ lpm_walk(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_walk_func walk_func,
-	void *walk_func_data)
-{
+	void *walk_func_data
+) {
 	uint8_t key[key_size];
 	memset(key, 0, key_size);
 	lpm_page_t *pages[key_size];
@@ -257,18 +241,21 @@ lpm_walk(
 			if (prev_value != value) {
 				if (prev_value != LPM_VALUE_INVALID) {
 					if (walk_func(
-						key_size,
-						prev_from,
-						prev_to,
-						prev_value & LPM_VALUE_MASK,
-						walk_func_data)) {
+						    key_size,
+						    prev_from,
+						    prev_to,
+						    prev_value & LPM_VALUE_MASK,
+						    walk_func_data
+					    )) {
 						return -1;
 					}
 				}
 
 				prev_value = value;
 				memcpy(prev_from, key, key_size);
-				memset(prev_from + hop + 1, 0x00, key_size - hop - 1);
+				memset(prev_from + hop + 1,
+				       0x00,
+				       key_size - hop - 1);
 			}
 			memcpy(prev_to, key, key_size);
 			memset(prev_to + hop + 1, 0xff, key_size - hop - 1);
@@ -302,11 +289,12 @@ out:
 
 	if (prev_value != LPM_VALUE_INVALID) {
 		if (walk_func(
-			key_size,
-			prev_from,
-			prev_to,
-			prev_value & LPM_VALUE_MASK,
-			walk_func_data)) {
+			    key_size,
+			    prev_from,
+			    prev_to,
+			    prev_value & LPM_VALUE_MASK,
+			    walk_func_data
+		    )) {
 			return -1;
 		}
 	}
@@ -317,10 +305,7 @@ out:
 /*
  * LPM iteration callback called for each valid value.
  */
-typedef int (*lpm_collect_values_func)(
-	uint32_t value,
-	void *data
-);
+typedef int (*lpm_collect_values_func)(uint32_t value, void *data);
 
 /*
  * Collect all valid values for [from..to] key range.
@@ -332,8 +317,8 @@ lpm_collect_values(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_collect_values_func collect_func,
-	void *collect_func_data)
-{
+	void *collect_func_data
+) {
 	uint8_t key[key_size];
 	lpm_page_t *pages[key_size];
 
@@ -347,8 +332,8 @@ lpm_collect_values(
 			// TODO: handle unintialized value: should we call cb?
 		} else if (value & LPM_VALUE_FLAG) {
 			if (collect_func(
-				value & LPM_VALUE_MASK,
-				collect_func_data)) {
+				    value & LPM_VALUE_MASK, collect_func_data
+			    )) {
 				return -1;
 			}
 		} else {
@@ -384,11 +369,7 @@ out:
  * ones.
  */
 static inline void
-lpm_remap(
-	struct lpm *lpm,
-	uint8_t key_size,
-	struct value_table *table)
-{
+lpm_remap(struct lpm *lpm, uint8_t key_size, struct value_table *table) {
 	uint8_t key[key_size];
 	lpm_page_t *pages[key_size];
 
@@ -401,10 +382,11 @@ lpm_remap(
 		if (value == LPM_VALUE_INVALID) {
 
 		} else if (value & LPM_VALUE_FLAG) {
-			(*pages[hop])[key[hop]] = value_table_get(
-				table,
-				0,
-				value & LPM_VALUE_MASK) | LPM_VALUE_FLAG;
+			(*pages[hop])[key[hop]] =
+				value_table_get(
+					table, 0, value & LPM_VALUE_MASK
+				) |
+				LPM_VALUE_FLAG;
 		} else {
 			++hop;
 			key[hop] = 0;
@@ -428,10 +410,7 @@ out:
 }
 
 static inline void
-lpm_compact(
-	struct lpm *lpm,
-	uint8_t key_size)
-{
+lpm_compact(struct lpm *lpm, uint8_t key_size) {
 	uint8_t key[key_size];
 	lpm_page_t *pages[key_size];
 
@@ -441,8 +420,7 @@ lpm_compact(
 
 	while (1) {
 		uint32_t value = (*pages[hop])[key[hop]];
-		if (value == LPM_VALUE_INVALID ||
-		    value & LPM_VALUE_FLAG) {
+		if (value == LPM_VALUE_INVALID || value & LPM_VALUE_FLAG) {
 		} else {
 			++hop;
 			key[hop] = 0;
@@ -459,10 +437,12 @@ lpm_compact(
 				bool is_monolite = 1;
 				uint32_t first_value = (*pages[hop])[0];
 				for (uint8_t idx = 255; idx > 0; --idx)
-					is_monolite &= first_value == (*pages[hop])[idx];
+					is_monolite &= first_value ==
+						       (*pages[hop])[idx];
 
 				--hop;
-				if (is_monolite && (first_value & LPM_VALUE_FLAG)) {
+				if (is_monolite &&
+				    (first_value & LPM_VALUE_FLAG)) {
 					(*pages[hop])[key[hop]] = first_value;
 				}
 			} else {
@@ -477,19 +457,13 @@ out:
 
 static inline int
 lpm8_insert(
-	struct lpm *lpm8,
-	const uint8_t *from,
-	const uint8_t *to,
-	uint32_t value)
-{
+	struct lpm *lpm8, const uint8_t *from, const uint8_t *to, uint32_t value
+) {
 	return lpm_insert(lpm8, 8, from, to, value);
 }
 
 static inline uint32_t
-lpm8_lookup(
-	const struct lpm *lpm8,
-	const uint8_t *key)
-{
+lpm8_lookup(const struct lpm *lpm8, const uint8_t *key) {
 	return lpm_lookup(lpm8, 8, key);
 }
 
@@ -499,15 +473,11 @@ lpm8_collect_values(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_collect_values_func collect_func,
-	void *collect_func_data)
-{
+	void *collect_func_data
+) {
 	return lpm_collect_values(
-		lpm8,
-		8,
-		from,
-		to,
-		collect_func,
-		collect_func_data);
+		lpm8, 8, from, to, collect_func, collect_func_data
+	);
 }
 
 static inline int
@@ -516,42 +486,30 @@ lpm8_walk(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_walk_func walk_func,
-	void *walk_func_data)
-{
+	void *walk_func_data
+) {
 	return lpm_walk(lpm8, 8, from, to, walk_func, walk_func_data);
 }
 
 static inline void
-lpm8_remap(
-	struct lpm *lpm8,
-	struct value_table *table)
-{
+lpm8_remap(struct lpm *lpm8, struct value_table *table) {
 	return lpm_remap(lpm8, 8, table);
 }
 
 static inline void
-lpm8_compact(
-	struct lpm *lpm8)
-{
+lpm8_compact(struct lpm *lpm8) {
 	return lpm_compact(lpm8, 8);
 }
 
-
 static inline int
 lpm4_insert(
-	struct lpm *lpm4,
-	const uint8_t *from,
-	const uint8_t *to,
-	uint32_t value)
-{
+	struct lpm *lpm4, const uint8_t *from, const uint8_t *to, uint32_t value
+) {
 	return lpm_insert(lpm4, 4, from, to, value);
 }
 
 static inline uint32_t
-lpm4_lookup(
-	const struct lpm *lpm4,
-	const uint8_t *key)
-{
+lpm4_lookup(const struct lpm *lpm4, const uint8_t *key) {
 	return lpm_lookup(lpm4, 4, key);
 }
 
@@ -561,15 +519,11 @@ lpm4_collect_values(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_collect_values_func collect_func,
-	void *collect_func_data)
-{
+	void *collect_func_data
+) {
 	return lpm_collect_values(
-		lpm4,
-		4,
-		from,
-		to,
-		collect_func,
-		collect_func_data);
+		lpm4, 4, from, to, collect_func, collect_func_data
+	);
 }
 
 static inline int
@@ -578,25 +532,19 @@ lpm4_walk(
 	const uint8_t *from,
 	const uint8_t *to,
 	lpm_walk_func walk_func,
-	void *walk_func_data)
-{
+	void *walk_func_data
+) {
 	return lpm_walk(lpm4, 4, from, to, walk_func, walk_func_data);
 }
 
 static inline void
-lpm4_remap(
-	struct lpm *lpm4,
-	struct value_table *table)
-{
+lpm4_remap(struct lpm *lpm4, struct value_table *table) {
 	return lpm_remap(lpm4, 4, table);
 }
 
 static inline void
-lpm4_compact(
-	struct lpm *lpm4)
-{
+lpm4_compact(struct lpm *lpm4) {
 	return lpm_compact(lpm4, 4);
 }
-
 
 #endif

@@ -15,12 +15,9 @@ struct acl_module_config {
 // FIXME: make the structure private
 struct acl_module {
 	struct module module;
-
-
 };
 
 struct module *
 new_module_acl();
-
 
 #endif

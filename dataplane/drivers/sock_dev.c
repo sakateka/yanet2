@@ -27,19 +27,16 @@
 
 struct sock_internals;
 
-struct __attribute__((__packed__)) packHeader
-{
+struct __attribute__((__packed__)) packHeader {
 	uint32_t data_length;
 };
 
-struct sock_queue
-{
-	struct sock_internals* internals;
-	struct rte_mempool* mb_pool;
+struct sock_queue {
+	struct sock_internals *internals;
+	struct rte_mempool *mb_pool;
 };
 
-struct sock_internals
-{
+struct sock_internals {
 	struct rte_pci_driver pci_drv;
 	struct rte_pci_device pci_dev;
 	struct rte_pci_id pci_id;
@@ -54,15 +51,14 @@ struct sock_internals
 };
 
 static int
-sock_dev_configure(struct rte_eth_dev* dev __rte_unused)
-{
+sock_dev_configure(struct rte_eth_dev *dev __rte_unused) {
 	return 0;
 }
 
 static int
-sock_dev_info_get(struct rte_eth_dev* dev __rte_unused,
-                  struct rte_eth_dev_info* dev_info)
-{
+sock_dev_info_get(
+	struct rte_eth_dev *dev __rte_unused, struct rte_eth_dev_info *dev_info
+) {
 	dev_info->max_mac_addrs = 1;
 	dev_info->max_rx_pktlen = (uint32_t)-1;
 	dev_info->max_rx_queues = MAX_RX_QUEUES;
@@ -77,45 +73,43 @@ sock_dev_info_get(struct rte_eth_dev* dev __rte_unused,
 }
 
 static int
-sock_dev_start(struct rte_eth_dev* dev)
-{
+sock_dev_start(struct rte_eth_dev *dev) {
 	dev->data->dev_started = 1;
 	dev->data->dev_link.link_status = RTE_ETH_LINK_UP;
 	return 0;
 }
 
 static int
-sock_dev_stop(struct rte_eth_dev* dev)
-{
+sock_dev_stop(struct rte_eth_dev *dev) {
 	dev->data->dev_started = 0;
 	dev->data->dev_link.link_status = RTE_ETH_LINK_DOWN;
 	return 0;
 }
 
 static int
-sock_dev_close(struct rte_eth_dev* dev)
-{
-	struct sock_internals* internals =
-	        (struct sock_internals*)dev->data->dev_private;
+sock_dev_close(struct rte_eth_dev *dev) {
+	struct sock_internals *internals =
+		(struct sock_internals *)dev->data->dev_private;
 
 	close(internals->fd);
 	unlink(internals->sockaddr.sun_path);
-	if (internals)
-	{
+	if (internals) {
 		rte_free(internals);
 	}
 	return 0;
 }
 
 static int
-sock_dev_rx_queue_setup(struct rte_eth_dev* dev,
-                        uint16_t rx_queue_id,
-                        uint16_t nb_rx_desc __rte_unused,
-                        unsigned int socket_id __rte_unused,
-                        const struct rte_eth_rxconf* rx_conf __rte_unused,
-                        struct rte_mempool* mb_pool)
-{
-	struct sock_internals* si = (struct sock_internals*)dev->data->dev_private;
+sock_dev_rx_queue_setup(
+	struct rte_eth_dev *dev,
+	uint16_t rx_queue_id,
+	uint16_t nb_rx_desc __rte_unused,
+	unsigned int socket_id __rte_unused,
+	const struct rte_eth_rxconf *rx_conf __rte_unused,
+	struct rte_mempool *mb_pool
+) {
+	struct sock_internals *si =
+		(struct sock_internals *)dev->data->dev_private;
 	dev->data->rx_queues[rx_queue_id] = si->rx_queues + rx_queue_id;
 	si->rx_queues[rx_queue_id].internals = si;
 	si->rx_queues[rx_queue_id].mb_pool = mb_pool;
@@ -123,90 +117,81 @@ sock_dev_rx_queue_setup(struct rte_eth_dev* dev,
 }
 
 static int
-sock_dev_tx_queue_setup(struct rte_eth_dev* dev,
-                        uint16_t tx_queue_id,
-                        uint16_t nb_tx_desc __rte_unused,
-                        unsigned int socket_id __rte_unused,
-                        const struct rte_eth_txconf* tx_conf __rte_unused)
-{
+sock_dev_tx_queue_setup(
+	struct rte_eth_dev *dev,
+	uint16_t tx_queue_id,
+	uint16_t nb_tx_desc __rte_unused,
+	unsigned int socket_id __rte_unused,
+	const struct rte_eth_txconf *tx_conf __rte_unused
+) {
 	dev->data->tx_queues[tx_queue_id] = dev->data->dev_private;
 	return 0;
 }
 
 static void
-sock_dev_queue_release(struct rte_eth_dev* dev __rte_unused, short unsigned q __rte_unused)
-{
+sock_dev_queue_release(
+	struct rte_eth_dev *dev __rte_unused, short unsigned q __rte_unused
+) {
 	return;
 }
 
 static int
-sock_dev_mtu_set(struct rte_eth_dev* dev __rte_unused,
-                 uint16_t mtu __rte_unused)
-{
+sock_dev_mtu_set(
+	struct rte_eth_dev *dev __rte_unused, uint16_t mtu __rte_unused
+) {
 	return 0;
 }
 
 static int
-sock_dev_promiscuous_enable(struct rte_eth_dev* dev __rte_unused)
-{
+sock_dev_promiscuous_enable(struct rte_eth_dev *dev __rte_unused) {
 	return 0;
 }
 
 static int
-sock_dev_promiscuous_disable(struct rte_eth_dev* dev __rte_unused)
-{
+sock_dev_promiscuous_disable(struct rte_eth_dev *dev __rte_unused) {
 	return 0;
 }
 
 static int
-sock_dev_allmulticast_enable(struct rte_eth_dev* dev __rte_unused)
-{
+sock_dev_allmulticast_enable(struct rte_eth_dev *dev __rte_unused) {
 	return 0;
 }
 
 static int
-sock_dev_allmulticast_disable(struct rte_eth_dev* dev __rte_unused)
-{
+sock_dev_allmulticast_disable(struct rte_eth_dev *dev __rte_unused) {
 	return 0;
 }
 
 static int
-sock_dev_link_update(struct rte_eth_dev* dev __rte_unused,
-                     int wait_to_complete __rte_unused)
-{
+sock_dev_link_update(
+	struct rte_eth_dev *dev __rte_unused, int wait_to_complete __rte_unused
+) {
 	return 0;
 }
 
-ssize_t readCount(int fd, char* buf, size_t count)
-{
+ssize_t
+readCount(int fd, char *buf, size_t count) {
 	ssize_t pos = read(fd, buf, count);
-	if (pos < 0)
-	{
-		if (errno != EAGAIN && errno != EWOULDBLOCK)
-		{
+	if (pos < 0) {
+		if (errno != EAGAIN && errno != EWOULDBLOCK) {
 			return -1;
 		}
 		return 0;
 	}
-	if (pos == 0)
-	{
+	if (pos == 0) {
 		return -1; /// EOF
 	}
 
-	while (pos < (ssize_t)count)
-	{
+	while (pos < (ssize_t)count) {
 		ssize_t readen = read(fd, buf + pos, count - pos);
-		if (readen > 0)
-		{
+		if (readen > 0) {
 			pos += readen;
 			continue;
 		}
-		if (readen == 0)
-		{
+		if (readen == 0) {
 			return -1; /// EOF
 		}
-		if (errno != EAGAIN && errno != EWOULDBLOCK)
-		{
+		if (errno != EAGAIN && errno != EWOULDBLOCK) {
 			return -1;
 		}
 	}
@@ -214,64 +199,60 @@ ssize_t readCount(int fd, char* buf, size_t count)
 }
 
 static uint16_t
-sock_dev_rx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
-{
-	if (nb_bufs == 0)
-	{
+sock_dev_rx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs) {
+	if (nb_bufs == 0) {
 		return 0;
 	}
 
-	struct sock_queue* sq = (struct sock_queue*)q;
+	struct sock_queue *sq = (struct sock_queue *)q;
 
-	if (sq->internals->conFd < 0)
-	{
-		sq->internals->conFd = accept4(sq->internals->fd, NULL, NULL, SOCK_NONBLOCK);
+	if (sq->internals->conFd < 0) {
+		sq->internals->conFd =
+			accept4(sq->internals->fd, NULL, NULL, SOCK_NONBLOCK);
 	}
 
-	if (sq->internals->conFd < 0)
-	{
+	if (sq->internals->conFd < 0) {
 		return 0; /// No connection
 	}
 
 	struct packHeader hdr;
 	char read_buf[MAX_PACK_SIZE];
 
-	ssize_t rc = readCount(sq->internals->conFd, (char*)&hdr, sizeof(hdr));
-	if (rc < 0)
-	{
+	ssize_t rc = readCount(sq->internals->conFd, (char *)&hdr, sizeof(hdr));
+	if (rc < 0) {
 		sq->internals->conFd = -1; /// Reset the connection
 		return 0;
 	}
-	if (rc == 0)
-	{
+	if (rc == 0) {
 		return 0;
 	}
 
 	hdr.data_length = ntohl(hdr.data_length);
 
-	/// Packet header received, read the packet until reading is done or an error happened
-	do
-	{
+	/// Packet header received, read the packet until reading is done or an
+	/// error happened
+	do {
 		rc = readCount(sq->internals->conFd, read_buf, hdr.data_length);
-		if (rc < 0)
-		{
+		if (rc < 0) {
 			sq->internals->eth_stats.ierrors++;
 			sq->internals->conFd = -1; /// Reset the connection
 			return 0;
 		}
 	} while (rc == 0); /// Repeat if there is no data yet
 
-	struct rte_mbuf* mbuf;
+	struct rte_mbuf *mbuf;
 	mbuf = rte_pktmbuf_alloc(sq->mb_pool);
-	if (unlikely(mbuf == NULL))
-	{
+	if (unlikely(mbuf == NULL)) {
 		sq->internals->eth_stats.ierrors++;
 		return 0;
 	}
 
-	if (hdr.data_length <= rte_pktmbuf_tailroom(mbuf))
-	{
-		rte_memcpy(rte_pktmbuf_mtod(mbuf, void*), read_buf, hdr.data_length);
+	if (hdr.data_length <= rte_pktmbuf_tailroom(mbuf)) {
+		rte_memcpy(
+			rte_pktmbuf_mtod(mbuf, void *),
+			read_buf,
+			hdr.data_length
+		);
 		mbuf->data_len = hdr.data_length;
 		mbuf->pkt_len = mbuf->data_len;
 		mbuf->port = sq->internals->portId;
@@ -279,8 +260,7 @@ sock_dev_rx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
 
 		sq->internals->eth_stats.ipackets++;
 		sq->internals->eth_stats.ibytes += hdr.data_length;
-	}
-	else /// Packet does not fit, drop it
+	} else /// Packet does not fit, drop it
 	{
 		sq->internals->eth_stats.ierrors++;
 		rte_pktmbuf_free(mbuf);
@@ -290,30 +270,27 @@ sock_dev_rx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
 }
 
 static int
-writeIovCount(int fd, struct iovec* iov, size_t count)
-{
-	while (count > 0)
-	{
+writeIovCount(int fd, struct iovec *iov, size_t count) {
+	while (count > 0) {
 		ssize_t written = writev(fd, iov, count);
-		if (written < 0)
-		{
-			if (errno != EAGAIN && errno != EWOULDBLOCK)
-			{
+		if (written < 0) {
+			if (errno != EAGAIN && errno != EWOULDBLOCK) {
 				return -1;
 			}
 			continue;
 		}
 		/// Adjust iov
-		while (written > 0)
-		{
-			if (iov->iov_len <= (size_t)written) /// Vec was consumed
+		while (written > 0) {
+			if (iov->iov_len <=
+			    (size_t)written) /// Vec was consumed
 			{
 				written -= iov->iov_len;
 				++iov;
 				--count;
 				continue;
 			}
-			iov->iov_base = (void*)((intptr_t)iov->iov_base + written);
+			iov->iov_base =
+				(void *)((intptr_t)iov->iov_base + written);
 			iov->iov_len -= written;
 			written = 0;
 		}
@@ -322,25 +299,21 @@ writeIovCount(int fd, struct iovec* iov, size_t count)
 }
 
 static uint16_t
-sock_dev_tx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
-{
-	if (nb_bufs == 0)
-	{
+sock_dev_tx(void *q, struct rte_mbuf **bufs, uint16_t nb_bufs) {
+	if (nb_bufs == 0) {
 		return 0;
 	}
 
-	struct sock_internals* si = (struct sock_internals*)q;
-	if (si->conFd < 0)
-	{
+	struct sock_internals *si = (struct sock_internals *)q;
+	if (si->conFd < 0) {
 		si->eth_stats.oerrors++;
 		return 0;
 	}
 
 	char writeBuf[MAX_PACK_SIZE];
 
-	for (uint16_t i = 0; i < nb_bufs; ++i)
-	{
-		struct rte_mbuf* mbuf = bufs[i];
+	for (uint16_t i = 0; i < nb_bufs; ++i) {
+		struct rte_mbuf *mbuf = bufs[i];
 		size_t len = rte_pktmbuf_pkt_len(mbuf);
 
 		struct packHeader hdr;
@@ -350,11 +323,11 @@ sock_dev_tx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
 		iov[0].iov_base = &hdr;
 		iov[0].iov_len = sizeof(hdr);
 
-		iov[1].iov_base = (void*)rte_pktmbuf_read(mbuf, 0, len, writeBuf);
+		iov[1].iov_base =
+			(void *)rte_pktmbuf_read(mbuf, 0, len, writeBuf);
 		iov[1].iov_len = len;
 
-		if (writeIovCount(si->conFd, iov, 2) < 0)
-		{
+		if (writeIovCount(si->conFd, iov, 2) < 0) {
 			si->conFd = -1; /// Reset the connection
 			return i;
 		}
@@ -367,18 +340,21 @@ sock_dev_tx(void* q, struct rte_mbuf** bufs, uint16_t nb_bufs)
 	return nb_bufs;
 }
 
-int sock_dev_stats_get(struct rte_eth_dev* dev,
-                       struct rte_eth_stats* igb_stats)
-{
-	struct sock_internals* private_data = (struct sock_internals*)dev->data->dev_private;
-	memcpy(igb_stats, &private_data->eth_stats, sizeof(struct rte_eth_stats));
+int
+sock_dev_stats_get(struct rte_eth_dev *dev, struct rte_eth_stats *igb_stats) {
+	struct sock_internals *private_data =
+		(struct sock_internals *)dev->data->dev_private;
+	memcpy(igb_stats, &private_data->eth_stats, sizeof(struct rte_eth_stats)
+	);
 	return 0;
 }
 
-int sock_dev_create(const char* path, const char* name, int numa_node)
-{
-	struct sock_internals* internals = (struct sock_internals*)
-	        rte_zmalloc_socket(path, sizeof(struct sock_internals), 0, numa_node);
+int
+sock_dev_create(const char *path, const char *name, int numa_node) {
+	struct sock_internals *internals =
+		(struct sock_internals *)rte_zmalloc_socket(
+			path, sizeof(struct sock_internals), 0, numa_node
+		);
 	if (internals == NULL)
 		return ENOSPC;
 
@@ -411,15 +387,18 @@ int sock_dev_create(const char* path, const char* name, int numa_node)
 	unlink(path);
 	internals->fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
 	internals->sockaddr.sun_family = AF_UNIX;
-	strncpy(internals->sockaddr.sun_path, path, sizeof(internals->sockaddr.sun_path) - 1);
-	bind(internals->fd, (struct sockaddr*)&internals->sockaddr, sizeof(internals->sockaddr));
+	strncpy(internals->sockaddr.sun_path,
+		path,
+		sizeof(internals->sockaddr.sun_path) - 1);
+	bind(internals->fd,
+	     (struct sockaddr *)&internals->sockaddr,
+	     sizeof(internals->sockaddr));
 	listen(internals->fd, 1);
 	internals->conFd = -1;
 
-	struct rte_eth_dev* eth_dev = NULL;
+	struct rte_eth_dev *eth_dev = NULL;
 	eth_dev = rte_eth_dev_allocate(name);
-	if (eth_dev == NULL)
-	{
+	if (eth_dev == NULL) {
 		close(internals->fd);
 		unlink(internals->sockaddr.sun_path);
 		rte_free(internals);
@@ -428,7 +407,7 @@ int sock_dev_create(const char* path, const char* name, int numa_node)
 
 	eth_dev->device = &internals->pci_dev.device;
 
-	struct rte_eth_dev_data* data = eth_dev->data;
+	struct rte_eth_dev_data *data = eth_dev->data;
 	data->dev_private = internals;
 	data->nb_rx_queues = 0;
 	data->nb_tx_queues = 0;

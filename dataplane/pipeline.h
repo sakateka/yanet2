@@ -27,8 +27,7 @@ struct pipeline_front {
 };
 
 static inline void
-pipeline_front_init(struct pipeline_front *pipeline_front)
-{
+pipeline_front_init(struct pipeline_front *pipeline_front) {
 	packet_list_init(&pipeline_front->input);
 	packet_list_init(&pipeline_front->output);
 	packet_list_init(&pipeline_front->drop);
@@ -37,31 +36,27 @@ pipeline_front_init(struct pipeline_front *pipeline_front)
 
 static inline void
 pipeline_front_output(
-	struct pipeline_front *pipeline_front,
-	struct packet *packet)
-{
+	struct pipeline_front *pipeline_front, struct packet *packet
+) {
 	packet_list_add(&pipeline_front->output, packet);
 }
 
 static inline void
 pipeline_front_drop(
-	struct pipeline_front *pipeline_front,
-	struct packet *packet)
-{
+	struct pipeline_front *pipeline_front, struct packet *packet
+) {
 	packet_list_add(&pipeline_front->drop, packet);
 }
 
 static inline void
 pipeline_front_bypass(
-	struct pipeline_front *pipeline_front,
-	struct packet *packet)
-{
+	struct pipeline_front *pipeline_front, struct packet *packet
+) {
 	packet_list_add(&pipeline_front->bypass, packet);
 }
 
 static inline void
-pipeline_front_switch(struct pipeline_front *pipeline_front)
-{
+pipeline_front_switch(struct pipeline_front *pipeline_front) {
 	pipeline_front->input = pipeline_front->output;
 	packet_list_init(&pipeline_front->output);
 }
@@ -101,7 +96,6 @@ struct pipeline {
 	struct pipeline_module_config *module_configs;
 };
 
-
 struct pipeline *
 pipeline_create();
 
@@ -121,7 +115,8 @@ pipeline_configure(
 	struct pipeline *pipeline,
 	struct pipeline_module_config_ref *module_config_refs,
 	uint32_t config_size,
-	struct module_registry *module_registry);
+	struct module_registry *module_registry
+);
 
 /*
  * Drives piepline front through pipeline modules.
@@ -131,8 +126,9 @@ pipeline_configure(
  * will be placed to output list and packet dropped while processing to
  * drop list.
  */
-void pipeline_process(
-	struct pipeline *pipeline,
-	struct pipeline_front *pipeline_front);
+void
+pipeline_process(
+	struct pipeline *pipeline, struct pipeline_front *pipeline_front
+);
 
 #endif

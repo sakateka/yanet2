@@ -42,11 +42,9 @@ struct balancer_module_config {
 
 struct balancer_module {
 	struct module module;
-
 };
 
 struct module *
 new_module_balancer();
-
 
 #endif

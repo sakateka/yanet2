@@ -20,8 +20,7 @@ struct value_collector {
 };
 
 static inline int
-value_collector_init(struct value_collector *collector)
-{
+value_collector_init(struct value_collector *collector) {
 	// zero-initialized array
 	collector->use_map = (uint32_t **)NULL;
 	collector->chunk_count = 0;
@@ -31,18 +30,15 @@ value_collector_init(struct value_collector *collector)
 }
 
 static inline void
-value_collector_free(struct value_collector *collector)
-{
-	for (uint32_t chunk_idx = 0;
-	     chunk_idx < collector->chunk_count;
+value_collector_free(struct value_collector *collector) {
+	for (uint32_t chunk_idx = 0; chunk_idx < collector->chunk_count;
 	     ++chunk_idx)
 		free(collector->use_map[chunk_idx]);
 	free(collector->use_map);
 }
 
 static void
-value_collector_reset(struct value_collector *collector)
-{
+value_collector_reset(struct value_collector *collector) {
 	collector->gen++;
 }
 
@@ -51,27 +47,27 @@ value_collector_reset(struct value_collector *collector)
  * the current generation.
  */
 static inline int
-value_collector_collect(struct value_collector *collector, uint32_t value)
-{
+value_collector_collect(struct value_collector *collector, uint32_t value) {
 	uint32_t chunk_idx = value / VALUE_COLLECTOR_CHUNK_SIZE;
 	if (chunk_idx >= collector->chunk_count) {
 		uint32_t **use_map = (uint32_t **)realloc(
 			collector->use_map,
-			sizeof(uint32_t **) * (chunk_idx + 1));
+			sizeof(uint32_t **) * (chunk_idx + 1)
+		);
 		if (use_map == NULL)
 			return -1;
-		memset(
-			use_map + collector->chunk_count,
-			0,
-			sizeof(uint32_t *) *
-			(chunk_idx + 1 - collector->chunk_count));
+		memset(use_map + collector->chunk_count,
+		       0,
+		       sizeof(uint32_t *) *
+			       (chunk_idx + 1 - collector->chunk_count));
 		collector->use_map = use_map;
 		collector->chunk_count = chunk_idx + 1;
 	}
 
 	if (collector->use_map[chunk_idx] == NULL) {
-		collector->use_map[chunk_idx] = (uint32_t *)
-			calloc(VALUE_COLLECTOR_CHUNK_SIZE, sizeof(uint32_t));
+		collector->use_map[chunk_idx] = (uint32_t *)calloc(
+			VALUE_COLLECTOR_CHUNK_SIZE, sizeof(uint32_t)
+		);
 		if (collector->use_map[chunk_idx] == NULL)
 			return -1;
 	}
@@ -101,8 +97,7 @@ struct value_registry {
 };
 
 static inline int
-value_registry_init(struct value_registry *registry)
-{
+value_registry_init(struct value_registry *registry) {
 	if (value_collector_init(&registry->collector))
 		return -1;
 
@@ -119,17 +114,15 @@ value_registry_init(struct value_registry *registry)
  * the routine start a new registry generation creating new key mapping range.
  */
 static inline int
-value_registry_start(struct value_registry *registry)
-{
+value_registry_start(struct value_registry *registry) {
 	value_collector_reset(&registry->collector);
 
 	if (!(registry->range_count & (registry->range_count + 1))) {
-		struct value_range *new_ranges = (struct value_range *)
-			realloc(
-				registry->ranges,
-				sizeof(struct value_range) *
+		struct value_range *new_ranges = (struct value_range *)realloc(
+			registry->ranges,
+			sizeof(struct value_range) *
 				((registry->range_count + 1) * 2)
-			);
+		);
 		if (new_ranges == NULL)
 			return -1;
 		registry->ranges = new_ranges;
@@ -142,14 +135,12 @@ value_registry_start(struct value_registry *registry)
 }
 
 static inline int
-value_registry_collect(struct value_registry *registry, uint32_t value)
-{
+value_registry_collect(struct value_registry *registry, uint32_t value) {
 	if (!(registry->value_count & (registry->value_count + 1))) {
-		uint32_t *new_values = (uint32_t *)
-			realloc(
-				registry->values,
-				sizeof(uint32_t) *
-				(registry->value_count + 1) * 2);
+		uint32_t *new_values = (uint32_t *)realloc(
+			registry->values,
+			sizeof(uint32_t) * (registry->value_count + 1) * 2
+		);
 		if (new_values == NULL)
 			return -1;
 		registry->values = new_values;
@@ -166,16 +157,14 @@ value_registry_collect(struct value_registry *registry, uint32_t value)
 }
 
 static inline void
-value_registry_free(struct value_registry *registry)
-{
+value_registry_free(struct value_registry *registry) {
 	value_collector_free(&registry->collector);
 	free(registry->ranges);
 	free(registry->values);
 }
 
 static inline uint32_t
-value_registry_capacity(struct value_registry *registry)
-{
+value_registry_capacity(struct value_registry *registry) {
 	return registry->max_value + 1;
 }
 
@@ -184,10 +173,7 @@ value_registry_capacity(struct value_registry *registry)
  * two registry values.
  */
 typedef int (*value_registry_join_func)(
-	uint32_t first,
-	uint32_t second,
-	uint32_t idx,
-	void *data
+	uint32_t first, uint32_t second, uint32_t idx, void *data
 );
 
 /*
@@ -200,12 +186,11 @@ value_registry_join_range(
 	struct value_registry *registry2,
 	uint32_t range_idx,
 	value_registry_join_func join_func,
-	void *join_func_data)
-{
+	void *join_func_data
+) {
 	struct value_range *range1 = registry1->ranges + range_idx;
 	struct value_range *range2 = registry2->ranges + range_idx;
-	for (uint32_t idx1 = range1->from;
-	     idx1 < range1->from + range1->count;
+	for (uint32_t idx1 = range1->from; idx1 < range1->from + range1->count;
 	     ++idx1) {
 		for (uint32_t idx2 = range2->from;
 		     idx2 < range2->from + range2->count;
@@ -227,8 +212,8 @@ static inline int
 value_registry_compact(
 	struct value_registry *src_registry,
 	struct value_table *values,
-	struct value_registry *dst_registry)
-{
+	struct value_registry *dst_registry
+) {
 	if (value_registry_init(dst_registry)) {
 		return -1;
 	}
@@ -248,8 +233,8 @@ value_registry_compact(
 		     v_idx < range->from + range->count;
 		     ++v_idx) {
 			value_registry_collect(
-				dst_registry,
-				src_registry->values[v_idx]);
+				dst_registry, src_registry->values[v_idx]
+			);
 		}
 	}
 

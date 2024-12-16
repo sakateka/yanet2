@@ -6,14 +6,10 @@
 struct dataplane;
 
 // Read callback provided by dataplane
-typedef void (*worker_read_func)(
-	void *data,
-	struct packet_list *packets);
+typedef void (*worker_read_func)(void *data, struct packet_list *packets);
 
 // write callback provided by dataplane
-typedef void (*worker_write_func)(
-	void *data,
-	struct packet_list *packets);
+typedef void (*worker_write_func)(void *data, struct packet_list *packets);
 
 struct worker_read_ctx {
 
@@ -35,7 +31,6 @@ struct worker_write_ctx {
 	// pipes to read from another workers
 	uint32_t rx_pipe_count;
 	struct data_pipe *rx_pipes;
-
 };
 
 struct dataplane_worker {
@@ -63,6 +58,7 @@ dataplane_worker_init(
 	struct dataplane *dataplane,
 	struct dataplane_device *device,
 	struct dataplane_worker *worker,
-	int queue_id);
+	int queue_id
+);
 
 #endif

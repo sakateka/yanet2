@@ -2,32 +2,32 @@
 
 #include <stdio.h>
 
-#include <rte_eal.h>
 #include <rte_dev.h>
+#include <rte_eal.h>
 
 int
 dpdk_init(
-	const char *binary,
-	size_t port_count,
-	const char *const*port_names)
-{
+	const char *binary, size_t port_count, const char *const *port_names
+) {
 	char buffer[1024];
 	int bufferPosition = 0;
 
 	unsigned int eal_argc = 0;
-	char* eal_argv[128];
-#define insert_eal_arg(args...)                                                                               \
-	do                                                                                                    \
-	{                                                                                                     \
-		eal_argv[eal_argc++] = &buffer[bufferPosition];                                               \
-		bufferPosition += snprintf(&buffer[bufferPosition], sizeof(buffer) - bufferPosition, ##args); \
-		bufferPosition++;                                                                             \
+	char *eal_argv[128];
+#define insert_eal_arg(args...)                                                \
+	do {                                                                   \
+		eal_argv[eal_argc++] = &buffer[bufferPosition];                \
+		bufferPosition += snprintf(                                    \
+			&buffer[bufferPosition],                               \
+			sizeof(buffer) - bufferPosition,                       \
+			##args                                                 \
+		);                                                             \
+		bufferPosition++;                                              \
 	} while (0)
-
 
 	insert_eal_arg("%s", binary);
 
-	//FIXME use huge pages if configured
+	// FIXME use huge pages if configured
 	insert_eal_arg("--no-huge");
 	insert_eal_arg("-m 4096");
 
@@ -49,9 +49,9 @@ dpdk_add_vdev_port(
 	const char *name,
 	const struct rte_ether_addr *ether_addr,
 	uint16_t queue_count,
-	uint16_t numa_id)
-{
-	(void) numa_id;
+	uint16_t numa_id
+) {
+	(void)numa_id;
 
 	char mac_addr[32];
 	snprintf(
@@ -63,8 +63,8 @@ dpdk_add_vdev_port(
 		ether_addr->addr_bytes[2],
 		ether_addr->addr_bytes[3],
 		ether_addr->addr_bytes[4],
-		ether_addr->addr_bytes[5]);
-
+		ether_addr->addr_bytes[5]
+	);
 
 	char vdev_args[256];
 	snprintf(
@@ -74,9 +74,8 @@ dpdk_add_vdev_port(
 		queue_count,
 		4096,
 		name,
-		mac_addr);
+		mac_addr
+	);
 
 	return rte_eal_hotplug_add("vdev", port_name, vdev_args);
 }
-
-

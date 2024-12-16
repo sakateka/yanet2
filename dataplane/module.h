@@ -1,8 +1,8 @@
 #ifndef MODULE_H
 #define MODULE_H
 
-#include <stdlib.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #define MODULE_NAME_LEN 80
 #define MODULE_CONFIG_NAME_LEN 80
@@ -23,14 +23,14 @@ struct module_registry {
 
 struct module_config_registry *
 module_registry_lookup(
-	struct module_registry *module_registry,
-	const char *module_name);
+	struct module_registry *module_registry, const char *module_name
+);
 
 struct module_config *
 module_config_registry_lookup(
 	struct module_config_registry *module_config_registry,
-	const char *module_config_name);
-
+	const char *module_config_name
+);
 
 int
 module_registry_configure(
@@ -38,8 +38,8 @@ module_registry_configure(
 	const char *module_name,
 	const char *module_config_name,
 	const void *data,
-	size_t data_size);
-
+	size_t data_size
+);
 
 struct pipeline_front;
 
@@ -53,7 +53,8 @@ struct pipeline_front;
 typedef void (*module_handler)(
 	struct module *module,
 	struct module_config *module_config,
-	struct pipeline_front *pipeline_front);
+	struct pipeline_front *pipeline_front
+);
 
 /*
  * The module configuration handler called when module should be created,
@@ -86,8 +87,11 @@ struct module_config {
 };
 
 static inline void
-module_process(struct module *module, struct module_config *config, struct pipeline_front *pipeline_front)
-{
+module_process(
+	struct module *module,
+	struct module_config *config,
+	struct pipeline_front *pipeline_front
+) {
 	return module->handler(module, config, pipeline_front);
 }
 
@@ -98,15 +102,16 @@ module_configure(
 	const void *config_data,
 	size_t config_data_size,
 	struct module_config *old_config,
-	struct module_config **new_config)
-{
+	struct module_config **new_config
+) {
 	return module->config_handler(
 		module,
 		config_name,
 		config_data,
 		config_data_size,
 		old_config,
-		new_config);
+		new_config
+	);
 }
 
 #endif
