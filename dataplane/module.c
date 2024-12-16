@@ -49,7 +49,8 @@ module_registry_configure(
 	struct module_registry *module_registry,
 	const char *module_name,
 	const char *module_config_name,
-	const void *data)
+	const void *data,
+	size_t data_size)
 {
 	struct module_config_registry *module_config_registry =
 		module_registry_lookup(module_registry, module_name);
@@ -68,6 +69,7 @@ module_registry_configure(
 				module_config_registry->module,
 				module_config_name,
 				data,
+				data_size,
 				*config,
 				config);
 		}
@@ -95,6 +97,7 @@ module_registry_configure(
 		module_config_registry->module,
 		module_config_name,
 		data,
+		data_size,
 		*config,
 		config)) {
 		// TODO: error code

@@ -37,7 +37,8 @@ module_registry_configure(
 	struct module_registry *module_registry,
 	const char *module_name,
 	const char *module_config_name,
-	const void *data);
+	const void *data,
+	size_t data_size);
 
 
 struct pipeline_front;
@@ -69,6 +70,7 @@ typedef int (*module_config_handler)(
 	struct module *module,
 	const char *config_name,
 	const void *config_data,
+	size_t config_data_size,
 	struct module_config *old_config,
 	struct module_config **new_config
 );
@@ -93,9 +95,18 @@ static inline int
 module_configure(
 	struct module *module,
 	const char *config_name,
-	const void *config_data, struct module_config *old_config, struct module_config **new_config)
+	const void *config_data,
+	size_t config_data_size,
+	struct module_config *old_config,
+	struct module_config **new_config)
 {
-	return module->config_handler(module, config_name, config_data, old_config, new_config);
+	return module->config_handler(
+		module,
+		config_name,
+		config_data,
+		config_data_size,
+		old_config,
+		new_config);
 }
 
 #endif

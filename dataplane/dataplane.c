@@ -341,7 +341,8 @@ dataplane_init(
 		&dataplane->config.module_registry,
 		"acl",
 		"acl0",
-		NULL)) {
+		NULL,
+		0)) {
 		return -1;
 	}
 
@@ -349,7 +350,8 @@ dataplane_init(
 		&dataplane->config.module_registry,
 		"balancer",
 		"balancer0",
-		NULL)) {
+		NULL,
+		0)) {
 		return -1;
 	}
 
@@ -357,7 +359,8 @@ dataplane_init(
 		&dataplane->config.module_registry,
 		"route",
 		"route0",
-		NULL)) {
+		NULL,
+		0)) {
 		return -1;
 	}
 
@@ -372,7 +375,8 @@ dataplane_init(
 		&dataplane->config.module_registry,
 		"kernel",
 		"kernel0",
-		kernel_map)) {
+		kernel_map,
+		sizeof(kernel_map))) {
 		return -1;
 	}
 

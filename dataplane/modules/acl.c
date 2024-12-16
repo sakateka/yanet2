@@ -216,11 +216,13 @@ acl_handle_configure(
 	struct module *module,
 	const char *config_name,
 	const void *config_data,
+	size_t config_data_size,
 	struct module_config *old_config,
 	struct module_config **new_config)
 {
 	(void) module;
 	(void) config_data;
+	(void) config_data_size;
 	(void) old_config;
 	(void) new_config;
 
