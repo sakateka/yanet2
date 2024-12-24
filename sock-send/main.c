@@ -197,8 +197,10 @@ read_thread(void *arg)
 int
 main(int argc, char **argv)
 {
-	(void) argc;
-	(void) argv;
+	if (argc != 2) {
+		fprintf(stderr, "usage: %s <socket_path>\n", argv[0]);
+		return -1;
+	}
 
 	sock_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
 	if (sock_fd < 0) {
