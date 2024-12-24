@@ -1,6 +1,6 @@
 dependencies = []
 dependencies += dependency('threads')
-dependencies += dependency('libpcap', static: true)
+dependencies += dependency('libpcap', static: false)
 
 sources = files('main.c')
 
