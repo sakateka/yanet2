@@ -1,0 +1,16 @@
+name: Build YANET
+
+on: push
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: yanetplatform/yanet2-base:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: |
+          meson setup build -Dbuildtype=debug
+          meson compile -C build
