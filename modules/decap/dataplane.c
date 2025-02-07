@@ -1,7 +1,5 @@
 #include "dataplane.h"
 
-#include "dataplane/pipeline/pipeline.h"
-
 #include "dataplane/packet/decap.h"
 
 #include "rte_ether.h"
@@ -11,11 +9,14 @@ static int
 decap_handle_v4(const struct lpm *lpm, struct packet *packet) {
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
-	struct rte_ipv4_hdr *ipv4Header = rte_pktmbuf_mtod_offset(
+	struct rte_ipv4_hdr *ipv4_hdr = rte_pktmbuf_mtod_offset(
 		mbuf, struct rte_ipv4_hdr *, packet->network_header.offset
 	);
+	if (ipv4_hdr->fragment_offset != 0) {
+		return -1; // Fragmented packet
+	}
 
-	if (lpm_lookup(lpm, 4, (uint8_t *)&ipv4Header->dst_addr) !=
+	if (lpm_lookup(lpm, 4, (uint8_t *)&ipv4_hdr->dst_addr) !=
 	    LPM_VALUE_INVALID) {
 		return packet_decap(packet);
 	}
@@ -27,25 +28,31 @@ static int
 decap_handle_v6(const struct lpm *lpm, struct packet *packet) {
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
-	struct rte_ipv6_hdr *ipv4Header = rte_pktmbuf_mtod_offset(
+	struct rte_ipv6_hdr *ipv6_hdr = rte_pktmbuf_mtod_offset(
 		mbuf, struct rte_ipv6_hdr *, packet->network_header.offset
 	);
+	if (ipv6_hdr->proto == IPPROTO_FRAGMENT) {
+		return -1; // Fragmented packet
+	}
 
-	if (lpm_lookup(lpm, 16, (uint8_t *)&ipv4Header->dst_addr) !=
+	if (lpm_lookup(lpm, 16, (uint8_t *)&ipv6_hdr->dst_addr) !=
 	    LPM_VALUE_INVALID) {
+		packet->flow_label =
+			rte_be_to_cpu_32(ipv6_hdr->vtc_flow) & 0x000FFFFF;
 		return packet_decap(packet);
 	}
 
 	return 0;
 }
 
-static void
+void
 decap_handle_packets(
 	struct module *module,
 	struct module_config *config,
 	struct packet_front *packet_front
 ) {
 	(void)module;
+
 	struct decap_module_config *decap_config =
 		container_of(config, struct decap_module_config, config);
 
@@ -63,7 +70,6 @@ decap_handle_packets(
 				&decap_config->prefixes6, packet
 			);
 		}
-
 		if (result) {
 			packet_front_drop(packet_front, packet);
 		} else {
@@ -80,9 +86,6 @@ decap_handle_configure(
 	struct module_config **new_config
 ) {
 	(void)module;
-	(void)config_data;
-	(void)config_data_size;
-	(void)new_config;
 
 	struct decap_module_config *config = (struct decap_module_config *)
 		malloc(sizeof(struct decap_module_config));

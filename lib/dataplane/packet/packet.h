@@ -43,6 +43,8 @@ struct packet {
 	uint16_t flags;
 	uint16_t vlan;
 
+	uint32_t flow_label; // 12 unused bits + 20 bits of the label
+
 	struct network_header network_header;
 	struct transport_header transport_header;
 };
@@ -98,6 +100,12 @@ packet_list_pop(struct packet_list *packets) {
 
 	return res;
 }
+
+int
+parse_ipv4_header(struct packet *packet, uint16_t *type, uint16_t *offset);
+
+int
+parse_ipv6_header(struct packet *packet, uint16_t *type, uint16_t *offset);
 
 int
 parse_packet(struct packet *packet);
