@@ -11,14 +11,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04    
+    env:
+      cache_name: build-and-test
+
     steps:      
       - uses: awalsh128/cache-apt-pkgs-action@latest
         with:
           packages: meson clang python3-pyelftools libnuma-dev libpcap-dev git
-          version: 1.0
+          version: 1.1
+
       - uses: actions/checkout@v4
         with:
           submodules: true
+
       - uses: hendrikmuhs/ccache-action@v1.2.11
         name: ccache
         with:
@@ -26,6 +31,33 @@ jobs:
       - run: |
           meson setup build -Dbuildtype=debug
           meson compile -C build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+          check-latest: true
+      # https://github.com/actions/setup-go/issues/358
+      - name: Get Go environment
+        run: |
+          echo "cache=$(go env GOCACHE)" >> $GITHUB_ENV
+          echo "modcache=$(go env GOMODCACHE)" >> $GITHUB_ENV
+      - name: Set up go cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ env.cache }}
+            ${{ env.modcache }}
+          key: ${{ env.cache_name }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/go.mod') }}
+          restore-keys: |
+            ${{ env.cache_name }}-${{ runner.os }}-go-
+
+      - run:
+          meson test -C build
+      - name: Show meson test log
+        run:
+          grep -v 'Inherited environment' build/meson-logs/testlog.txt
+
       - uses: cpp-linter/cpp-linter-action@main
         id: linter
         continue-on-error: true
