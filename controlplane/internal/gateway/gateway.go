@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
+	"time"
 
 	"github.com/siderolabs/grpc-proxy/proxy"
 	"go.uber.org/zap"
@@ -154,9 +156,16 @@ func (m *Gateway) Run(ctx context.Context) error {
 	m.log.Infow("exposing gRPC gateway", zap.Stringer("addr", listener.Addr()))
 
 	wg, ctx := errgroup.WithContext(ctx)
+
 	wg.Go(func() error {
 		return m.server.Serve(listener)
 	})
+	if m.cfg.Server.HTTPEndpoint != "" {
+		wg.Go(func() error {
+			return m.runHTTPServer(ctx)
+		})
+	}
+
 	for _, builtInModule := range m.builtInModules {
 		wg.Go(func() error {
 			m.log.Infow("starting built-in module", zap.String("module", fmt.Sprintf("%T", builtInModule)))
@@ -172,4 +181,32 @@ func (m *Gateway) Run(ctx context.Context) error {
 	m.server.GracefulStop()
 
 	return wg.Wait()
+}
+
+// runHTTPServer runs the HTTP server that provides access to gRPC services
+// via HTTP.
+func (m *Gateway) runHTTPServer(ctx context.Context) error {
+	server := &http.Server{
+		Addr:    m.cfg.Server.HTTPEndpoint,
+		Handler: NewHTTPHandler(m.registry, m.log),
+	}
+
+	// Set up graceful shutdown.
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		m.log.Infow("shutting down HTTP server", zap.String("addr", m.cfg.Server.HTTPEndpoint))
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			m.log.Warnw("failed to shut down HTTP server", zap.Error(err))
+		}
+	}()
+
+	m.log.Infow("exposing HTTP <-> gRPC gateway", zap.String("addr", m.cfg.Server.HTTPEndpoint))
+	if err := server.ListenAndServe(); err != http.ErrServerClosed {
+		return fmt.Errorf("failed to serve: %w", err)
+	}
+
+	return nil
 }
