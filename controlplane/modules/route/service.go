@@ -13,9 +13,13 @@ import (
 
 	"github.com/yanet-platform/yanet2/controlplane/internal/bitset"
 	"github.com/yanet-platform/yanet2/controlplane/internal/ffi"
+	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery/bird"
+	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery/neigh"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/rib"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/routepb"
 )
+
+var _ bird.RIBUpdater = (*RouteService)(nil)
 
 type RouteService struct {
 	routepb.UnimplementedRouteServer
@@ -60,6 +64,21 @@ func (m *RouteService) InsertRoute(
 		return nil, status.Error(codes.InvalidArgument, "NUMA indices are out of range")
 	}
 
+	if err := m.rib.AddUnicastRoute(prefix, nexthopAddr); err != nil {
+		return nil, fmt.Errorf("failed to add unicast route: %w", err)
+	}
+
+	return &routepb.InsertRouteResponse{}, m.syncRouteUpdates(name, numaIndices)
+}
+
+func (m *RouteService) BulkUpdate(routes []*rib.Route) error {
+	m.log.Debugw("apply bulk update", zap.Int("size", len(routes)))
+	m.rib.BulkUpdate(routes)
+	// TODO: notification about rib update
+	return nil
+}
+
+func (m *RouteService) syncRouteUpdates(name string, numaIndices []uint32) error {
 	// Empty means all NUMA nodes.
 	if len(numaIndices) == 0 {
 		for idx := range m.agents {
@@ -67,57 +86,81 @@ func (m *RouteService) InsertRoute(
 		}
 	}
 
-	configs := make([]*ModuleConfig, 0, len(numaIndices))
+	routes := m.rib.DumpRoutes()
 
-	// Huge mutex, but our shared memory must be protected from concurrent
-	// access.
+	// Huge mutex, but our shared memory must be protected from concurrent access.
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.updateModuleConfigs(name, numaIndices, routes)
+}
+
+func (m *RouteService) updateModuleConfigs(
+	name string,
+	numaIndices []uint32,
+	routes map[netip.Prefix]rib.RoutesList,
+) error {
+	configs := make([]*ModuleConfig, 0, len(numaIndices))
 
 	for _, numaIdx := range numaIndices {
 		agent := m.agents[numaIdx]
 
 		config, err := NewModuleConfig(agent, name)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create %q module config: %w", name, err)
+			return fmt.Errorf("failed to create %q module config: %w", name, err)
 		}
 
-		if err := m.rib.AddUnicastRoute(prefix, nexthopAddr); err != nil {
-			return nil, fmt.Errorf("failed to add unicast route: %w", err)
-		}
+		// Obtain neighbor entry with resolved hardware addresses
+		neighbours := m.rib.NeighboursView()
 
-		routes := m.rib.DumpRoutes()
+		hardwareRoutes := map[neigh.HardwareRoute]uint32{}
+		routesListsSet := map[bitset.TinyBitset]int{}
+		for prefix, routesList := range routes {
+			routesListSetKey := bitset.TinyBitset{}
 
-		hardwareRoutes := map[rib.HardwareRoute]uint32{}
-		routesLists := map[bitset.TinyBitset]uint32{}
-		for key, routeList := range routes {
-			routesList := bitset.TinyBitset{}
-
-			for _, route := range routeList.Routes {
-				if idx, ok := hardwareRoutes[route.HardwareRoute]; ok {
-					routesList.Insert(idx)
+			for _, route := range routesList.Routes {
+				if route == nil {
+					m.log.Debugw("skip prefix with no routes", zap.Stringer("prefix", prefix))
+					// FIXME add telemetry
 					continue
 				}
 
-				idx, err := config.RouteAdd(route.SourceMAC[:], route.DestinationMAC[:])
-				if err != nil {
-					return nil, fmt.Errorf("failed to add hardware route %q: %w", route.HardwareRoute, err)
+				// Lookup hwaddress for the route
+				entry, ok := neighbours.Lookup(route.NextHop)
+				if !ok {
+					return fmt.Errorf("neighbour with %q nexthop IP address not found", route.NextHop)
 				}
-				hardwareRoutes[route.HardwareRoute] = uint32(idx)
-				routesList.Insert(uint32(idx))
+
+				m.log.Debugw("found neighbour with resolved hardware addresses",
+					zap.Stringer("nexthop_addr", route.NextHop),
+				)
+
+				if idx, ok := hardwareRoutes[entry.HardwareRoute]; ok {
+					routesListSetKey.Insert(idx)
+					continue
+				}
+
+				idx, err := config.RouteAdd(
+					entry.HardwareRoute.SourceMAC[:],
+					entry.HardwareRoute.DestinationMAC[:],
+				)
+				if err != nil {
+					return fmt.Errorf("failed to add hardware route %q: %w", entry.HardwareRoute, err)
+				}
+				hardwareRoutes[entry.HardwareRoute] = uint32(idx)
+				routesListSetKey.Insert(uint32(idx))
 			}
 
-			idx, ok := routesLists[routesList]
+			idx, ok := routesListsSet[routesListSetKey]
 			if !ok {
-				routeListIdx, err := config.RouteListAdd(routesList.AsSlice())
+				routeListIdx, err := config.RouteListAdd(routesListSetKey.AsSlice())
 				if err != nil {
-					return nil, fmt.Errorf("failed to add routes list: %w", err)
+					return fmt.Errorf("failed to add routes list: %w", err)
 				}
-				idx = uint32(routeListIdx)
+				idx = routeListIdx
 			}
 
-			if err := config.PrefixAdd(key, idx); err != nil {
-				return nil, fmt.Errorf("failed to add prefix %q: %w", prefix, err)
+			if err := config.PrefixAdd(prefix, uint32(idx)); err != nil {
+				return fmt.Errorf("failed to add prefix %q: %w", prefix, err)
 			}
 		}
 
@@ -129,7 +172,7 @@ func (m *RouteService) InsertRoute(
 		config := configs[numaIdx]
 
 		if err := agent.UpdateModules([]ffi.ModuleConfig{config.AsFFIModule()}); err != nil {
-			return nil, fmt.Errorf("failed to update module: %w", err)
+			return fmt.Errorf("failed to update module: %w", err)
 		}
 
 		m.log.Infow("successfully updated module",
@@ -137,6 +180,5 @@ func (m *RouteService) InsertRoute(
 			zap.Uint32("numa", numaIdx),
 		)
 	}
-
-	return &routepb.InsertRouteResponse{}, nil
+	return nil
 }

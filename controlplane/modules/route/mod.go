@@ -14,6 +14,7 @@ import (
 
 	"github.com/yanet-platform/yanet2/controlplane/internal/ffi"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery"
+	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery/bird"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery/neigh"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/rib"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/routepb"
@@ -27,6 +28,7 @@ type RouteModule struct {
 	server             *grpc.Server
 	agents             []*ffi.Agent
 	neighbourDiscovery *neigh.NeighMonitor
+	birdExport         *bird.Export
 	log                *zap.SugaredLogger
 }
 
@@ -47,11 +49,11 @@ func NewRouteModule(cfg *Config, log *zap.SugaredLogger) (*RouteModule, error) {
 		path := fmt.Sprintf("%s%d", cfg.MemoryPathPrefix, numaIdx)
 		log.Debugw("mapping shared memory",
 			zap.Int("numa", numaIdx),
-			zap.Uint("size", cfg.MemoryRequirements),
+			zap.Stringer("size", cfg.MemoryRequirements),
 			zap.String("path", path),
 		)
 
-		agent, err := ffi.NewAgent(path, "route", cfg.MemoryRequirements)
+		agent, err := ffi.NewAgent(path, "route", uint(cfg.MemoryRequirements))
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to shared memory on NUMA %d: %w", numaIdx, err)
 		}
@@ -67,11 +69,14 @@ func NewRouteModule(cfg *Config, log *zap.SugaredLogger) (*RouteModule, error) {
 	neighbourService := NewNeighbourService(neighbourCache, log)
 	routepb.RegisterNeighbourServer(server, neighbourService)
 
+	export := bird.NewExportReader(cfg.BirdExport, routeService, log)
+
 	return &RouteModule{
 		cfg:                cfg,
 		server:             server,
 		agents:             agents,
 		neighbourDiscovery: neighbourDiscovery,
+		birdExport:         export,
 		log:                log,
 	}, nil
 }
@@ -103,6 +108,9 @@ func (m *RouteModule) Run(ctx context.Context) error {
 	})
 	wg.Go(func() error {
 		return m.neighbourDiscovery.Run(ctx)
+	})
+	wg.Go(func() error {
+		return m.birdExport.Run(ctx)
 	})
 
 	if err := m.registerServices(ctx, listenerAddr); err != nil {

@@ -1,13 +1,12 @@
 package rib
 
 import (
-	"fmt"
-	"net"
 	"net/netip"
 	"sync"
 
 	"go.uber.org/zap"
 
+	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route/internal/discovery/neigh"
 )
 
@@ -26,41 +25,28 @@ func NewRIB(neighbours *neigh.NexthopCache, log *zap.SugaredLogger) *RIB {
 	}
 }
 
+func (m *RIB) NeighboursView() discovery.CacheView[netip.Addr, neigh.NeighbourEntry] {
+	return m.neighbours.View()
+
+}
+
 func (m *RIB) AddUnicastRoute(prefix netip.Prefix, nexthopAddr netip.Addr) error {
 	m.log.Debugf("adding unicast route %q via %q", prefix, nexthopAddr)
 
-	// Obtain neighbor entry with resolved hardware addresses
-	neighbours := m.neighbours.View()
-	entry, ok := neighbours.Lookup(nexthopAddr)
-	if !ok {
-		return fmt.Errorf("neighbour with %q nexthop IP address not found", nexthopAddr)
-	}
-
-	m.log.Debugw("found neighbour with resolved hardware addresses",
-		zap.Stringer("nexthop_addr", nexthopAddr),
-		zap.Stringer("nexthop_hardware_addr", entry.LinkAddr),
-		zap.Stringer("hardware_addr", entry.HardwareAddr),
-	)
-
-	route := Route{
-		Prefix: prefix,
-	}
-
-	// Now we can directly use the hardware addresses from the entry
-	copy(route.SourceMAC[:], entry.HardwareAddr)
-	copy(route.DestinationMAC[:], entry.LinkAddr)
+	route := MakeStaticRoute()
+	route.Prefix = prefix
+	route.NextHop = nexthopAddr
 
 	m.mu.Lock()
 	m.routes.InsertOrUpdate(
-		prefix,
+		route.Prefix,
 		func() RoutesList {
 			return RoutesList{
-				Routes: []Route{route},
+				Routes: []*Route{route},
 			}
 		},
 		func(m RoutesList) RoutesList {
-			// WIP(sakateka): FIXME: deduplicate routes
-			m.Routes = append(m.Routes, route)
+			m.Insert(route)
 			return m
 		},
 	)
@@ -69,8 +55,6 @@ func (m *RIB) AddUnicastRoute(prefix netip.Prefix, nexthopAddr netip.Addr) error
 	m.log.Infow("added unicast route",
 		zap.Stringer("prefix", prefix),
 		zap.Stringer("nexthop_addr", nexthopAddr),
-		zap.Stringer("hardware_addr", entry.HardwareAddr),
-		zap.Stringer("nexthop_hardware_addr", entry.LinkAddr),
 	)
 
 	return nil
@@ -82,23 +66,32 @@ func (m *RIB) DumpRoutes() map[netip.Prefix]RoutesList {
 	return m.routes.Dump()
 }
 
-type Route struct {
-	netip.Prefix
-	NextHop netip.Addr
-	// Temporary placeholder
-	HardwareRoute
-}
+func (m *RIB) BulkUpdate(routes []*Route) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-// HardwareRoute is a hashable pair of MAC addresses.
-type HardwareRoute struct {
-	SourceMAC      [6]byte
-	DestinationMAC [6]byte
-}
-
-func (m HardwareRoute) String() string {
-	return fmt.Sprintf("%s -> %s", net.HardwareAddr(m.SourceMAC[:]), net.HardwareAddr(m.DestinationMAC[:]))
-}
-
-type RoutesList struct {
-	Routes []Route
+	for _, route := range routes {
+		if route.ToRemove {
+			m.routes.UpdateOrDelete(
+				route.Prefix,
+				func(m RoutesList) (RoutesList, bool) {
+					m.Remove(route)
+					return m, len(m.Routes) == 0
+				},
+			)
+		} else {
+			m.routes.InsertOrUpdate(
+				route.Prefix,
+				func() RoutesList {
+					return RoutesList{
+						Routes: []*Route{route},
+					}
+				},
+				func(m RoutesList) RoutesList {
+					m.Insert(route)
+					return m
+				},
+			)
+		}
+	}
 }
