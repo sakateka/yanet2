@@ -127,7 +127,7 @@ func (m *RouteService) InsertRoute(
 	slices.Sort(numaIndices)
 	numaIndices = slices.Compact(numaIndices)
 	if !slices.Equal(numaIndices, request.GetNuma()) {
-		return nil, status.Error(codes.InvalidArgument, "repeated NUMA indices is duplicated")
+		return nil, status.Error(codes.InvalidArgument, "repeated NUMA indices are duplicated")
 	}
 	if len(numaIndices) > 0 && int(numaIndices[len(numaIndices)-1]) >= len(m.agents) {
 		return nil, status.Error(codes.InvalidArgument, "NUMA indices are out of range")

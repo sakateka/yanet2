@@ -3,17 +3,22 @@ package yncp
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/yanet-platform/yanet2/controlplane/internal/gateway"
+	"github.com/yanet-platform/yanet2/controlplane/modules/decap"
 	"github.com/yanet-platform/yanet2/controlplane/modules/route"
 )
 
+type ConfigReloader func() (*Config, error)
+
 type options struct {
-	Log      *zap.SugaredLogger
-	LogLevel *zap.AtomicLevel
+	Log            *zap.SugaredLogger
+	LogLevel       *zap.AtomicLevel
+	ConfigReloader ConfigReloader
 }
 
 func newOptions() *options {
@@ -40,6 +45,15 @@ func WithLog(log *zap.SugaredLogger) DirectorOption {
 func WithAtomicLogLevel(level *zap.AtomicLevel) DirectorOption {
 	return func(o *options) {
 		o.LogLevel = level
+	}
+}
+
+// WithConfigReloader sets the function to reload the entire Director's configuration
+//
+// Config reloading does not recreate, load, or unload modules.
+func WithConfigReloader(reloader ConfigReloader) DirectorOption {
+	return func(o *options) {
+		o.ConfigReloader = reloader
 	}
 }
 
@@ -71,10 +85,19 @@ func NewDirector(cfg *Config, options ...DirectorOption) (*Director, error) {
 		return nil, fmt.Errorf("failed to initialize route built-in module: %w", err)
 	}
 
+	moduleConfigReloader := newModuleConfigReloader[decap.Config](cfg, opts.ConfigReloader, log.With("name", "decap-config-reloader"))
+	decapModule, err := decap.NewDecapModule(cfg.Modules.Decap, moduleConfigReloader, log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize decap built-in module: %w", err)
+	}
+
 	gw := gateway.NewGateway(
 		cfg.Gateway,
 		gateway.WithBuiltInModule(
 			routeModule,
+		),
+		gateway.WithBuiltInModule(
+			decapModule,
 		),
 		gateway.WithLog(log),
 		gateway.WithAtomicLogLevel(opts.LogLevel),
@@ -101,4 +124,42 @@ func (m *Director) Run(ctx context.Context) error {
 	})
 
 	return wg.Wait()
+}
+
+func newModuleConfigReloader[C any](cfg *Config, reloader ConfigReloader, log *zap.SugaredLogger) func(*C) error {
+	return func(moduleConfig *C) error {
+		targetValue := reflect.ValueOf(moduleConfig)
+		if !targetValue.CanSet() {
+			return fmt.Errorf("cannot set target module config type: %v", targetValue.Type())
+		}
+
+		newCfg := cfg
+		var err error
+		if reloader != nil {
+			newCfg, err = reloader()
+		} else {
+			log.Warn("config reloader is not defined, operating on current config")
+		}
+		if err != nil {
+			return err
+		}
+
+		oldModulesValue := reflect.ValueOf(cfg.Modules)
+		newModulesValue := reflect.ValueOf(newCfg.Modules)
+		modulesTypeS := newModulesValue.Type()
+
+		for idx := range modulesTypeS.NumField() {
+			fieldValue := newModulesValue.Field(idx)
+
+			if fieldValue.Type() != targetValue.Type() {
+				continue
+			}
+
+			// Update runtime config
+			oldModulesValue.Field(idx).Set(fieldValue)
+			// Set result config requested by user
+			targetValue.Set(fieldValue)
+		}
+		return fmt.Errorf("cannot find or set module config type: %v", targetValue.Type())
+	}
 }

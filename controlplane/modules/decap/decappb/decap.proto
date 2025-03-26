@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package decappb;
+
+option go_package = "github.com/yanet-platform/yanet2/controlplane/modules/decap/decappb;decappb";
+
+// DecapService is a service for decapsulation module.
+service DecapService {
+	// ShowConfig returns the current configuration for the decap module.
+	rpc ShowConfig(ShowConfigRequest) returns (ShowConfigResponse) {
+	}
+
+	// ReloadConfig triggers the reloading of the decap configuration.
+	rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse) {
+	}
+}
+
+// TargetModule request for operating on a specific target module.
+message TargetModule {
+	// ModuleName is the name of the module for which to reload the
+	// configuration.
+	string module_name = 1;
+	// Numa specifies NUMA nodes that should be affected.
+	//
+	// Empty means all NUMA nodes.
+	repeated uint32 numa = 2;
+}
+
+message ShowConfigRequest {
+	TargetModule target = 1;
+}
+
+message Config {
+	// MemoryPath is the path to the shared-memory file that is used to
+	// communicate with dataplane.
+	string memory_path = 1;
+	// MemoryRequirements is the amount of memory that is required for a
+	// single transaction.
+	string memory_requirements = 2;
+
+	string endpoint = 3;
+	string gateway_endpoint = 4;
+
+	// Prefixes is a list of network prefixes against which
+	// the module will match packets for processing.
+	repeated string prefixes = 5;
+}
+
+// ShowConfigResponse contains the config of decap module.
+message ShowConfigResponse {
+	Config config = 1;
+}
+
+message ReloadConfigRequest {
+	TargetModule target = 1;
+}
+message ReloadConfigResponse {
+}
