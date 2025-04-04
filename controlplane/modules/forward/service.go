@@ -54,10 +54,7 @@ func (m *ForwardService) ShowConfig(ctx context.Context, req *forwardpb.ShowConf
 			config = &ForwardConfig{}
 		}
 
-		forwardConfig := &forwardpb.ForwardConfig{
-			Devices: make([]*forwardpb.ForwardDeviceConfig, 0, len(config.DeviceForwards)),
-		}
-
+		devices := make([]*forwardpb.ForwardDeviceConfig, 0, len(config.DeviceForwards))
 		for _, device := range config.DeviceForwards {
 			deviceConfig := &forwardpb.ForwardDeviceConfig{
 				DeviceId: uint32(device.L2ForwardDeviceID),
@@ -77,12 +74,12 @@ func (m *ForwardService) ShowConfig(ctx context.Context, req *forwardpb.ShowConf
 				return cmp.Compare(a.Network, b.Network)
 			})
 
-			forwardConfig.Devices = append(forwardConfig.Devices, deviceConfig)
+			devices = append(devices, deviceConfig)
 		}
 
 		configs = append(configs, &forwardpb.InstanceConfig{
-			Numa:   numaIdx,
-			Config: forwardConfig,
+			Numa:    numaIdx,
+			Devices: devices,
 		})
 	}
 

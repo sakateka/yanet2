@@ -10,10 +10,7 @@ pub fn init(verbosity: usize) -> Result<(), Box<dyn Error>> {
         _ => LevelFilter::Trace,
     };
 
-    SimpleLogger::new()
-        .with_module_level("ync", level)
-        .with_utc_timestamps()
-        .init()?;
+    SimpleLogger::new().with_level(level).with_utc_timestamps().init()?;
 
     Ok(())
 }

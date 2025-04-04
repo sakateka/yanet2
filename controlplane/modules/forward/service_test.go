@@ -568,12 +568,11 @@ func TestShowConfig(t *testing.T) {
 		for _, cfg := range resp.Configs {
 			if cfg.Numa == 0 {
 				numa0Found = true
-				require.NotNil(t, cfg.Config, "Config for NUMA 0 should not be nil")
-				require.Len(t, cfg.Config.Devices, 4, "Should have 4 devices in NUMA 0")
+				require.Len(t, cfg.Devices, 4, "Should have 4 devices in NUMA 0")
 
 				// Check device 1 has 2 forward rules
 				device1Found := false
-				for _, device := range cfg.Config.Devices {
+				for _, device := range cfg.Devices {
 					if device.DeviceId == 1 {
 						device1Found = true
 						require.Len(t, device.Forwards, 2, "Device 1 should have 2 forwards")
@@ -584,7 +583,7 @@ func TestShowConfig(t *testing.T) {
 
 				// Check device 3 has 2 forward rules
 				device3Found := false
-				for _, device := range cfg.Config.Devices {
+				for _, device := range cfg.Devices {
 					if device.DeviceId == 3 {
 						device3Found = true
 						require.Len(t, device.Forwards, 2, "Device 3 should have 2 forwards")
@@ -602,12 +601,11 @@ func TestShowConfig(t *testing.T) {
 		for _, cfg := range resp.Configs {
 			if cfg.Numa == 1 {
 				numa1Found = true
-				require.NotNil(t, cfg.Config, "Config for NUMA 1 should not be nil")
-				require.Len(t, cfg.Config.Devices, 2, "Should have 2 devices in NUMA 1")
+				require.Len(t, cfg.Devices, 2, "Should have 2 devices in NUMA 1")
 
 				// Check device 5 has 1 forward rule
 				device5Found := false
-				for _, device := range cfg.Config.Devices {
+				for _, device := range cfg.Devices {
 					if device.DeviceId == 5 {
 						device5Found = true
 						require.Len(t, device.Forwards, 1, "Device 5 should have 1 forward")
@@ -636,13 +634,12 @@ func TestShowConfig(t *testing.T) {
 		require.NotNil(t, resp, "Response should not be nil")
 		require.Len(t, resp.Configs, 1, "Should return config for only NUMA 1")
 		require.Equal(t, uint32(1), resp.Configs[0].Numa, "Response should be for NUMA 1")
-		require.NotNil(t, resp.Configs[0].Config, "Config should not be nil")
-		require.Len(t, resp.Configs[0].Config.Devices, 2, "Should have 2 devices")
+		require.Len(t, resp.Configs[0].Devices, 2, "Should have 2 devices")
 
 		// Check that both devices are present
 		deviceIDs := []uint32{
-			resp.Configs[0].Config.Devices[0].DeviceId,
-			resp.Configs[0].Config.Devices[1].DeviceId,
+			resp.Configs[0].Devices[0].DeviceId,
+			resp.Configs[0].Devices[1].DeviceId,
 		}
 		slices.Sort(deviceIDs)
 		require.Equal(t, uint32(5), deviceIDs[0], "Should have device 5")
@@ -667,8 +664,7 @@ func TestShowConfig(t *testing.T) {
 		require.NotNil(t, resp, "Response should not be nil")
 		require.Len(t, resp.Configs, 1, "Should return config for NUMA 0")
 		require.Equal(t, uint32(0), resp.Configs[0].Numa, "Response should be for NUMA 0")
-		require.NotNil(t, resp.Configs[0].Config, "Config should not be nil")
-		require.Empty(t, resp.Configs[0].Config.Devices, "Devices should be empty for NUMA 0")
+		require.Empty(t, resp.Configs[0].Devices, "Devices should be empty for NUMA 0")
 	})
 
 	// Test scenario 4: Show for non-existent config
@@ -686,8 +682,7 @@ func TestShowConfig(t *testing.T) {
 
 		// All configs should be empty
 		for _, cfg := range resp.Configs {
-			require.NotNil(t, cfg.Config, "Config should not be nil")
-			require.Empty(t, cfg.Config.Devices, "Devices should be empty for non-existent module")
+			require.Empty(t, cfg.Devices, "Devices should be empty for non-existent module")
 		}
 	})
 
@@ -738,10 +733,9 @@ func TestShowConfig(t *testing.T) {
 		var device10 *forwardpb.ForwardDeviceConfig
 		for _, cfg := range resp.Configs {
 			if cfg.Numa == 0 {
-				require.NotNil(t, cfg.Config, "Config should not be nil")
-				require.Len(t, cfg.Config.Devices, 3, "Should have 3 devices")
+				require.Len(t, cfg.Devices, 3, "Should have 3 devices")
 
-				for _, device := range cfg.Config.Devices {
+				for _, device := range cfg.Devices {
 					if device.DeviceId == 10 {
 						device10 = device
 						break
