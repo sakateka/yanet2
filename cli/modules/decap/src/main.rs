@@ -3,13 +3,13 @@ use core::error::Error;
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use clap_complete::CompleteEnv;
 use ipnet::IpNet;
-
-use code::{
-    decap_service_client::DecapServiceClient, AddPrefixesRequest, RemovePrefixesRequest, ShowConfigRequest,
-    ShowConfigResponse, TargetModule,
-};
 use ptree::TreeBuilder;
 use tonic::transport::Channel;
+
+use code::{
+    AddPrefixesRequest, RemovePrefixesRequest, ShowConfigRequest, ShowConfigResponse, TargetModule,
+    decap_service_client::DecapServiceClient,
+};
 use ync::logging;
 
 #[allow(non_snake_case)]
@@ -29,9 +29,6 @@ pub struct Cmd {
     /// Gateway endpoint.
     #[clap(long, default_value = "grpc://[::1]:8080", global = true)]
     pub endpoint: String,
-    /// Output format.
-    #[clap(long, value_enum, default_value_t = OutputFormat::Tree)]
-    pub format: OutputFormat,
     /// Log verbosity level.
     #[clap(short, action = ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -40,21 +37,24 @@ pub struct Cmd {
 #[derive(Debug, Clone, Parser)]
 pub enum ModeCmd {
     Show(ShowConfigCmd),
-    AddPrefixes(AddPrefixesCmd),
-    RemovePrefixes(RemovePrefixesCmd),
+    PrefixAdd(AddPrefixesCmd),
+    PrefixRemove(RemovePrefixesCmd),
 }
 
 #[derive(Debug, Clone, Parser)]
 pub struct ShowConfigCmd {
     /// Decap module name to operate on.
-    #[arg(long = "mod")]
+    #[arg(long = "mod", short)]
     pub module_name: String,
+    /// Output format.
+    #[clap(long, value_enum, default_value_t = OutputFormat::Tree)]
+    pub format: OutputFormat,
 }
 
 #[derive(Debug, Clone, Parser)]
 pub struct AddPrefixesCmd {
     /// Decap module name to operate on.
-    #[arg(long = "mod")]
+    #[arg(long = "mod", short)]
     pub module_name: String,
     /// NUMA node index where the changes should be applied, optional.
     ///
@@ -63,14 +63,14 @@ pub struct AddPrefixesCmd {
     pub numa: Option<Vec<u32>>,
 
     /// Prefix to be added to the input filter of the decapsulation module.
-    #[arg(long)]
+    #[arg(long, short)]
     pub prefix: Vec<IpNet>,
 }
 
 #[derive(Debug, Clone, Parser)]
 pub struct RemovePrefixesCmd {
     /// Decap module name to operate on.
-    #[arg(long = "mod")]
+    #[arg(long = "mod", short)]
     pub module_name: String,
 
     /// NUMA node index where the changes should be applied, optional.
@@ -80,7 +80,7 @@ pub struct RemovePrefixesCmd {
     pub numa: Option<Vec<u32>>,
 
     /// Prefix to be removed from the input filter of the decapsulation module.
-    #[arg(long)]
+    #[arg(long, short)]
     pub prefix: Vec<IpNet>,
 }
 
@@ -108,11 +108,10 @@ pub async fn main() {
 async fn run(cmd: Cmd) -> Result<(), Box<dyn Error>> {
     let mut service = DecapService::new(cmd.endpoint).await?;
 
-    let format = cmd.format;
     match cmd.mode {
-        ModeCmd::Show(cmd) => service.show_config(cmd, format).await,
-        ModeCmd::AddPrefixes(cmd) => service.add_prefixes(cmd).await,
-        ModeCmd::RemovePrefixes(cmd) => service.remove_prefixes(cmd).await,
+        ModeCmd::Show(cmd) => service.show_config(cmd).await,
+        ModeCmd::PrefixAdd(cmd) => service.add_prefixes(cmd).await,
+        ModeCmd::PrefixRemove(cmd) => service.remove_prefixes(cmd).await,
     }
 }
 
@@ -126,7 +125,7 @@ impl DecapService {
         Ok(Self { client })
     }
 
-    pub async fn show_config(&mut self, cmd: ShowConfigCmd, format: OutputFormat) -> Result<(), Box<dyn Error>> {
+    pub async fn show_config(&mut self, cmd: ShowConfigCmd) -> Result<(), Box<dyn Error>> {
         let request = ShowConfigRequest {
             target: Some(TargetModule {
                 module_name: cmd.module_name.to_owned(),
@@ -134,7 +133,7 @@ impl DecapService {
             }),
         };
         let response = self.client.show_config(request).await?.into_inner();
-        match format {
+        match cmd.format {
             OutputFormat::Json => print_json(&response)?,
             OutputFormat::Tree => print_tree(&response)?,
         }
@@ -150,7 +149,7 @@ impl DecapService {
             }),
             prefixes: cmd.prefix.iter().map(|p| p.to_string()).collect(),
         };
-        log::debug!("AddPrefixesRequest: {:?}", request);
+        log::trace!("AddPrefixesRequest: {:?}", request);
         let response = self.client.add_prefixes(request).await?.into_inner();
         log::debug!("AddPrefixesResponse: {:?}", response);
         Ok(())
@@ -164,7 +163,7 @@ impl DecapService {
             }),
             prefixes: cmd.prefix.iter().map(|p| p.to_string()).collect(),
         };
-        log::debug!("RemovePrefixesRequest: {:?}", request);
+        log::trace!("RemovePrefixesRequest: {:?}", request);
         let response = self.client.remove_prefixes(request).await?.into_inner();
         log::debug!("RemovePrefixesResponse: {:?}", response);
         Ok(())

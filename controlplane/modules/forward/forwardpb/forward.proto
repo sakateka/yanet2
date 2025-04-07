@@ -56,13 +56,9 @@ message ForwardDeviceConfig {
 	repeated ForwardEntry forwards = 2;
 }
 
-message ForwardConfig {
-	repeated ForwardDeviceConfig devices = 1;
-}
-
 message InstanceConfig {
 	uint32 numa = 1;
-	ForwardConfig config = 2;
+	repeated ForwardDeviceConfig devices = 2;
 }
 
 // ShowConfigResponse contains the configuration details of the forward module.
