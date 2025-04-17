@@ -1,4 +1,5 @@
 # common dependencies
+dependencies = []
 dependencies += lib_common_dep
 dependencies += lib_logging_dep
 
@@ -11,3 +12,4 @@ nat64_dp_dep = lib_nat64_dp_dep
 nat64_cp_dep = lib_nat64_cp_dep
 
 subdir('tests')
+subdir('fuzzing')
