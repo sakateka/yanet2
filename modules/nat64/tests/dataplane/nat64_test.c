@@ -29,6 +29,7 @@
 /* Project headers */
 #include "api/nat64cp.h"
 #include "common.h"
+#include "common/memory.h"
 #include "dataplane/dpdk.h"
 #include "dataplane/module/module.h"
 #include "dataplane/nat64dp.h"

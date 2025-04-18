@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <strings.h>
@@ -97,6 +98,10 @@ log_enable_name(char *log_name) {
 		}
 	}
 	if (!isatty(STDERR_FILENO)) {
+		// When stderr is not a terminal, isatty() sets errno to ENOTTY.
+		// In cgo context, this causes the error to be non-nil and the
+		// false return value is treated as an error condition
+		errno = 0;
 		// NOTE: disable colors
 		for (uint64_t idx = 0;
 		     idx < sizeof(loggers) / sizeof(struct logger);

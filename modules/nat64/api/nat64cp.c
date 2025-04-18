@@ -28,11 +28,20 @@ nat64_module_config_init(struct agent *agent, const char *name) {
 		errno = ENXIO;
 		return NULL;
 	}
+	struct module_data *module_data = nat64_module_config_init_config(
+		&agent->memory_context, name, index
+	);
+	SET_OFFSET_OF(&module_data->agent, agent);
+	return module_data;
+}
 
+struct module_data *
+nat64_module_config_init_config(
+	struct memory_context *rmemory_context, const char *name, uint64_t index
+) {
 	struct nat64_module_config *config =
 		(struct nat64_module_config *)memory_balloc(
-			&agent->memory_context,
-			sizeof(struct nat64_module_config)
+			rmemory_context, sizeof(struct nat64_module_config)
 		);
 	if (config == NULL) {
 		errno = ENOMEM;
@@ -43,11 +52,8 @@ nat64_module_config_init(struct agent *agent, const char *name) {
 	strtcpy(config->module_data.name, name, sizeof(config->module_data.name)
 	);
 	memory_context_init_from(
-		&config->module_data.memory_context,
-		&agent->memory_context,
-		name
+		&config->module_data.memory_context, rmemory_context, name
 	);
-	SET_OFFSET_OF(&config->module_data.agent, agent);
 	config->module_data.free_handler = nat64_module_config_free;
 
 	// From this point all allocations are made on local memory context
@@ -84,9 +90,7 @@ error_lpm_v6:
 
 error_cleanup:
 	memory_bfree(
-		&agent->memory_context,
-		config,
-		sizeof(struct nat64_module_config)
+		rmemory_context, config, sizeof(struct nat64_module_config)
 	);
 	errno = ENOMEM;
 	return NULL;
