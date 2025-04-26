@@ -1,8 +1,7 @@
 #include "pipeline.h"
 
-#include "dataplane/module/module.h"
-
 #include "dataplane/config/zone.h"
+#include "lib/logging/log.h"
 
 void
 pipeline_process(
@@ -34,5 +33,20 @@ pipeline_process(
 		packet_front_switch(packet_front);
 
 		dp_module->handler(dp_config, module_data, packet_front);
+
+		LOG_TRACEX(int in = packet_list_counter(&packet_front->input);
+			   int out = packet_list_counter(&packet_front->output);
+			   int bypass =
+				   packet_list_counter(&packet_front->bypass);
+			   int drop = packet_list_counter(&packet_front->drop);
+			   packet_list_print(&packet_front->output);
+			   ,
+			   "processed packets with module %s, in %d, out "
+			   "%d, bypass %d, drop %d. Output list printed above.",
+			   dp_module->name,
+			   in,
+			   out,
+			   bypass,
+			   drop);
 	}
 }
