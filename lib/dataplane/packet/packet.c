@@ -13,6 +13,7 @@
 #include <rte_ip.h>
 
 #include "lib/logging/log.h"
+#include "yanet_build_config.h"
 
 /*
  * TODO: analyze if the valid packet parsing may
