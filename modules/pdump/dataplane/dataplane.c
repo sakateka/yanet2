@@ -93,8 +93,7 @@ pdump_handle_packets(
 
 			int rc = rte_bpf_exec(&bpf, (void *)mbuf);
 			if (rc) {
-				LOG_TRACE(
-					"capturing packet from the drop queue"
+				LOG_TRACE("capturing packet from the drop queue"
 				);
 
 				pdump_msg_header(
