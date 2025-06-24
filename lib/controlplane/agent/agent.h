@@ -42,6 +42,16 @@ agent_update_modules(
 	struct agent *agent, size_t module_count, struct cp_module **cp_modules
 );
 
+/*
+ * Delete module with specified type and name.
+ * Returns error if module is still referenced by some pipeline
+ * or module does not exist.
+ */
+int
+agent_delete_module(
+	struct agent *agent, const char *module_type, const char *module_name
+);
+
 struct pipeline_config;
 
 struct pipeline_config *
@@ -80,3 +90,10 @@ int
 cp_device_config_add_pipeline(
 	struct cp_device_config *config, const char *name, uint64_t weight
 );
+
+void
+agent_free_unused_modules(struct agent *agent);
+
+// Allows to clean up previous agents which have no loaded modules.
+void
+agent_free_unused_agents(struct agent *agent);
