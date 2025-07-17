@@ -3,14 +3,13 @@ use core::error::Error;
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use clap_complete::CompleteEnv;
 use code::{
-    AddL3ForwardRequest, L2ForwardEnableRequest, L3ForwardEntry, RemoveL3ForwardRequest, ShowConfigRequest,
-    ShowConfigResponse, TargetModule, forward_service_client::ForwardServiceClient,
-    DeleteModuleRequest,
+    AddL3ForwardRequest, DeleteModuleRequest, L2ForwardEnableRequest, L3ForwardEntry, RemoveL3ForwardRequest,
+    ShowConfigRequest, ShowConfigResponse, TargetModule, forward_service_client::ForwardServiceClient,
 };
 use ipnet::IpNet;
 use ptree::TreeBuilder;
 use tonic::transport::Channel;
-use ync::{logging, instance::InstanceMap};
+use ync::{instance::InstanceMap, logging};
 
 #[allow(non_snake_case)]
 pub mod code {
@@ -75,7 +74,7 @@ pub struct L2ForwardCmd {
     #[arg(long = "mod", short)]
     pub module_name: String,
     /// Dataplane instances where the changes should be applied, optional.
-    /// 
+    ///
     /// If no instances specified, the route will be applied to all instances nodes.
     #[arg(long)]
     pub instances: Option<Vec<u32>>,
@@ -93,7 +92,7 @@ pub struct AddL3ForwardCmd {
     #[arg(long = "mod", short)]
     pub module_name: String,
     /// Dataplane instances where the changes should be applied, optional.
-    /// 
+    ///
     /// If no instances specified, the route will be applied to all instances nodes.
     #[arg(long)]
     pub instances: Option<Vec<u32>>,
@@ -114,7 +113,7 @@ pub struct RemoveL3ForwardCmd {
     #[arg(long = "mod", short)]
     pub module_name: String,
     /// Dataplane instances where the changes should be applied, optional.
-    /// 
+    ///
     /// If no instances specified, the route will be applied to all instances nodes.
     #[arg(long)]
     pub instances: Option<Vec<u32>>,
@@ -157,7 +156,7 @@ impl ForwardService {
             target: Some(TargetModule {
                 module_name: cmd.module_name,
                 instances: InstanceMap::MAX.as_u32(),
-            })
+            }),
         };
         self.client.delete_module(request).await?;
         Ok(())
@@ -167,14 +166,18 @@ impl ForwardService {
         let request = L2ForwardEnableRequest {
             target: Some(TargetModule {
                 module_name: cmd.module_name,
-                instances: cmd.instances.map(InstanceMap::from).unwrap_or(InstanceMap::MAX).as_u32(),
+                instances: cmd
+                    .instances
+                    .map(InstanceMap::from)
+                    .unwrap_or(InstanceMap::MAX)
+                    .as_u32(),
             }),
             src_dev_id: cmd.src as u32,
             dst_dev_id: cmd.dst as u32,
         };
-        log::trace!("L2ForwardEnableRequest: {:?}", request);
+        log::trace!("L2ForwardEnableRequest: {request:?}");
         let response = self.client.enable_l2_forward(request).await?.into_inner();
-        log::debug!("L2ForwardEnableResponse: {:?}", response);
+        log::debug!("L2ForwardEnableResponse: {response:?}");
         Ok(())
     }
 
@@ -182,7 +185,11 @@ impl ForwardService {
         let request = AddL3ForwardRequest {
             target: Some(TargetModule {
                 module_name: cmd.module_name,
-                instances: cmd.instances.map(InstanceMap::from).unwrap_or(InstanceMap::MAX).as_u32(),
+                instances: cmd
+                    .instances
+                    .map(InstanceMap::from)
+                    .unwrap_or(InstanceMap::MAX)
+                    .as_u32(),
             }),
             src_dev_id: cmd.src as u32,
             forward: Some(L3ForwardEntry {
@@ -190,9 +197,9 @@ impl ForwardService {
                 dst_dev_id: cmd.dst as u32,
             }),
         };
-        log::trace!("AddL3ForwardRequest: {:?}", request);
+        log::trace!("AddL3ForwardRequest: {request:?}");
         let response = self.client.add_l3_forward(request).await?.into_inner();
-        log::debug!("AddL3ForwardResponse: {:?}", response);
+        log::debug!("AddL3ForwardResponse: {response:?}");
         Ok(())
     }
 
@@ -200,14 +207,18 @@ impl ForwardService {
         let request = RemoveL3ForwardRequest {
             target: Some(TargetModule {
                 module_name: cmd.module_name,
-                instances: cmd.instances.map(InstanceMap::from).unwrap_or(InstanceMap::MAX).as_u32(),
+                instances: cmd
+                    .instances
+                    .map(InstanceMap::from)
+                    .unwrap_or(InstanceMap::MAX)
+                    .as_u32(),
             }),
             src_dev_id: cmd.src as u32,
             network: cmd.network.to_string(),
         };
-        log::trace!("RemoveL3ForwardRequest: {:?}", request);
+        log::trace!("RemoveL3ForwardRequest: {request:?}");
         let response = self.client.remove_l3_forward(request).await?.into_inner();
-        log::debug!("RemoveL3ForwardResponse: {:?}", response);
+        log::debug!("RemoveL3ForwardResponse: {response:?}");
         Ok(())
     }
 }
