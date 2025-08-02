@@ -80,3 +80,10 @@ subdir('agent')
 subdir('sock-send')
 subdir('tests')
 subdir('coordinator')
+
+# Define a default test setup that excludes large tests
+add_test_setup(
+  'default',
+  exclude_suites: ['large'],
+  is_default: true,
+)
