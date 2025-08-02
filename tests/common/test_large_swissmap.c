@@ -230,10 +230,8 @@ test_large_swissmap(struct memory_context *ctx) {
 
 	// Configure the map for five-tuples
 	swiss_map_config_t config = {0};
-	config.key_info.size = sizeof(five_tuple_t);
-	config.key_info.align = 1; // Packed structure
-	config.value_info.size = sizeof(uint32_t);
-	config.value_info.align = sizeof(uint32_t);
+	config.key_size = sizeof(five_tuple_t);
+	config.value_size = sizeof(uint32_t);
 	config.hash_fn_id = SWISS_HASH_FNV1A; // Note: using FNV1A instead of
 					      // five_tuple_hash
 	config.key_equal_fn_id =
