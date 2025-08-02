@@ -86,10 +86,8 @@
  *
  * // Configure the map
  * swiss_map_config_t config = {0};
- * config.key_info.size = sizeof(int);
- * config.key_info.align = sizeof(int);
- * config.value_info.size = sizeof(int);
- * config.value_info.align = sizeof(int);
+ * config.key_size = sizeof(int);
+ * config.value_size = sizeof(int);
  * config.hash_fn = swiss_hash_fnv1a;
  * config.key_equal_fn = swiss_default_key_equal;
  * config.alloc_fn = swiss_default_alloc;
@@ -201,14 +199,6 @@ typedef bool (*swiss_key_equal_fn_t)(
 );
 
 /**
- * @brief Key/value copy function type
- * @param dst Destination pointer
- * @param src Source pointer
- * @param size Number of bytes to copy
- */
-typedef void (*swiss_copy_fn_t)(void *dst, const void *src, size_t size);
-
-/**
  * @brief Memory allocation function type with context
  * @param ctx Memory context pointer
  * @param size Number of bytes to allocate
@@ -236,20 +226,6 @@ typedef void (*swiss_free_fn_t)(void *ctx, void *ptr, size_t size);
 typedef uint64_t (*swiss_rand_fn_t)(void);
 
 /**
- * @brief Type information for keys and values
- *
- * Describes the layout and properties of key or value types for proper
- * storage and manipulation within the hash table.
- */
-typedef struct {
-	size_t size;		 /**< Size in bytes */
-	size_t align;		 /**< Alignment requirement */
-	bool has_pointers;	 /**< Whether type contains pointers */
-	swiss_copy_fn_t copy;	 /**< Custom copy function (optional) */
-	swiss_free_fn_t free_fn; /**< Custom free function (optional) */
-} swiss_type_info_t;
-
-/**
  * @brief Map configuration structure
  *
  * Contains all the type information and function IDs needed to
@@ -258,9 +234,9 @@ typedef struct {
  * compatibility.
  */
 typedef struct {
-	swiss_type_info_t key_info;   /**< Key type information */
-	swiss_type_info_t value_info; /**< Value type information */
-	void *mem_ctx;		      /**< Memory context for allocations */
+	void *mem_ctx;	   /**< Memory context for allocations */
+	size_t key_size;   /**< Size of keys in bytes */
+	size_t value_size; /**< Size of values in bytes */
 	// Function IDs for cross-process compatibility
 	swiss_func_id_t hash_fn_id;	 /**< Hash function ID */
 	swiss_func_id_t key_equal_fn_id; /**< Key comparison function ID */
@@ -576,7 +552,7 @@ static inline void *
 swiss_group_key(
 	swiss_group_ref_t group, const swiss_map_config_t *config, size_t i
 ) {
-	size_t slot_size = config->key_info.size + config->value_info.size;
+	size_t slot_size = config->key_size + config->value_size;
 	size_t offset = sizeof(swiss_ctrl_group_t) + i * slot_size;
 	return (char *)group.data + offset;
 }
@@ -592,9 +568,9 @@ static inline void *
 swiss_group_value(
 	swiss_group_ref_t group, const swiss_map_config_t *config, size_t i
 ) {
-	size_t slot_size = config->key_info.size + config->value_info.size;
-	size_t offset = sizeof(swiss_ctrl_group_t) + i * slot_size +
-			config->key_info.size;
+	size_t slot_size = config->key_size + config->value_size;
+	size_t offset =
+		sizeof(swiss_ctrl_group_t) + i * slot_size + config->key_size;
 	return (char *)group.data + offset;
 }
 
@@ -750,7 +726,7 @@ static inline swiss_group_ref_t
 swiss_groups_group(
 	swiss_groups_ref_t *groups, const swiss_map_config_t *config, uint64_t i
 ) {
-	size_t slot_size = config->key_info.size + config->value_info.size;
+	size_t slot_size = config->key_size + config->value_size;
 	size_t group_size =
 		sizeof(swiss_ctrl_group_t) + SWISS_GROUP_SLOTS * slot_size;
 	size_t offset = i * group_size;
@@ -772,7 +748,7 @@ swiss_init_groups(
 	const swiss_map_config_t *config,
 	uint64_t length
 ) {
-	size_t slot_size = config->key_info.size + config->value_info.size;
+	size_t slot_size = config->key_size + config->value_size;
 	size_t group_size =
 		sizeof(swiss_ctrl_group_t) + SWISS_GROUP_SLOTS * slot_size;
 
@@ -873,8 +849,7 @@ swiss_table_free(swiss_table_t *table, const swiss_map_config_t *config) {
 		return;
 
 	if (table->groups.data) {
-		size_t slot_size =
-			config->key_info.size + config->value_info.size;
+		size_t slot_size = config->key_size + config->value_size;
 		size_t group_size = sizeof(swiss_ctrl_group_t) +
 				    SWISS_GROUP_SLOTS * slot_size;
 		uint64_t group_count = table->groups.length_mask + 1;
@@ -908,7 +883,7 @@ swiss_table_get(
 ) {
 	swiss_hash_fn_t hash_fn =
 		(swiss_hash_fn_t)swiss_func_registry[config->hash_fn_id];
-	uint64_t hash = hash_fn(key, config->key_info.size, map->seed);
+	uint64_t hash = hash_fn(key, config->key_size, map->seed);
 
 	swiss_probe_seq_t seq =
 		swiss_make_probe_seq(hash, table->groups.length_mask);
@@ -928,9 +903,7 @@ swiss_table_get(
 			swiss_key_equal_fn_t key_equal_fn =
 				(swiss_key_equal_fn_t
 				)swiss_func_registry[config->key_equal_fn_id];
-			if (key_equal_fn(
-				    key, slot_key, config->key_info.size
-			    )) {
+			if (key_equal_fn(key, slot_key, config->key_size)) {
 				*value = swiss_group_value(group, config, i);
 				return true;
 			}
@@ -988,17 +961,9 @@ swiss_table_put_slot(
 			swiss_key_equal_fn_t key_equal_fn =
 				(swiss_key_equal_fn_t
 				)swiss_func_registry[config->key_equal_fn_id];
-			if (key_equal_fn(
-				    key, slot_key, config->key_info.size
-			    )) {
-				// Key exists, update it
-				if (config->key_info.copy) {
-					config->key_info.copy(
-						slot_key,
-						key,
-						config->key_info.size
-					);
-				}
+			if (key_equal_fn(key, slot_key, config->key_size)) {
+				// Key exists, use existing slot
+				// memcpy(slot_key, key, config->key_size);
 				*ok = true;
 				return swiss_group_value(group, config, i);
 			}
@@ -1043,18 +1008,8 @@ swiss_table_put_slot(
 						group, config, i
 					);
 
-					// Copy key
-					if (config->key_info.copy) {
-						config->key_info.copy(
-							slot_key,
-							key,
-							config->key_info.size
-						);
-					} else {
-						memcpy(slot_key,
-						       key,
-						       config->key_info.size);
-					}
+					// Copy key to the new slot
+					memcpy(slot_key, key, config->key_size);
 
 					swiss_ctrl_set(ctrl, i, h2);
 					table->growth_left--;
@@ -1109,9 +1064,7 @@ swiss_table_delete(
 			swiss_key_equal_fn_t key_equal_fn =
 				(swiss_key_equal_fn_t
 				)swiss_func_registry[config->key_equal_fn_id];
-			if (key_equal_fn(
-				    key, slot_key, config->key_info.size
-			    )) {
+			if (key_equal_fn(key, slot_key, config->key_size)) {
 				table->used--;
 				map->used--;
 
@@ -1161,7 +1114,7 @@ swiss_table_clear(swiss_table_t *table, const swiss_map_config_t *config) {
 
 		// Clear all slots in the group
 		// size_t slot_size =
-		// 	config->key_info.size + config->value_info.size;
+		// 	config->key_size + config->value_size;
 		// char *slots = (char *)ADDR_OF(&group.data) +
 		// sizeof(swiss_ctrl_group_t); memset(slots, 0,
 		// SWISS_GROUP_SLOTS * slot_size);
@@ -1213,7 +1166,7 @@ swiss_table_rehash(
 			swiss_hash_fn_t hash_fn = (swiss_hash_fn_t
 			)swiss_func_registry[config->hash_fn_id];
 			uint64_t hash =
-				hash_fn(key, config->key_info.size, map->seed);
+				hash_fn(key, config->key_size, map->seed);
 
 			// Insert into new table without checking capacity
 			bool ok;
@@ -1221,17 +1174,7 @@ swiss_table_rehash(
 				new_table, config, map, hash, key, &ok
 			);
 			if (ok && new_slot) {
-				if (config->value_info.copy) {
-					config->value_info.copy(
-						new_slot,
-						value,
-						config->value_info.size
-					);
-				} else {
-					memcpy(new_slot,
-					       value,
-					       config->value_info.size);
-				}
+				memcpy(new_slot, value, config->value_size);
 				// Adjust counters since swiss_table_put_slot
 				// increments them
 				new_table->used--;
@@ -1327,7 +1270,7 @@ swiss_table_split(
 			swiss_hash_fn_t hash_fn = (swiss_hash_fn_t
 			)swiss_func_registry[config->hash_fn_id];
 			uint64_t hash =
-				hash_fn(key, config->key_info.size, map->seed);
+				hash_fn(key, config->key_size, map->seed);
 
 			// If entry belongs to right split, move it
 			if (hash & split_mask) {
@@ -1337,17 +1280,9 @@ swiss_table_split(
 					*right, config, map, hash, key, &ok
 				);
 				if (likely(ok && new_slot)) {
-					if (config->value_info.copy) {
-						config->value_info.copy(
-							new_slot,
-							value,
-							config->value_info.size
-						);
-					} else {
-						memcpy(new_slot,
-						       value,
-						       config->value_info.size);
-					}
+					memcpy(new_slot,
+					       value,
+					       config->value_size);
 					// swiss_table_put_slot already
 					// incremented (*right)->used and
 					// map->used We need to decrement
@@ -1663,7 +1598,7 @@ swiss_map_get(swiss_map_t *map, const void *key, void **value) {
 
 	swiss_hash_fn_t hash_fn =
 		(swiss_hash_fn_t)swiss_func_registry[map->config.hash_fn_id];
-	uint64_t hash = hash_fn(key, map->config.key_info.size, map->seed);
+	uint64_t hash = hash_fn(key, map->config.key_size, map->seed);
 	uint64_t idx = swiss_map_directory_index(map, hash);
 	swiss_table_t *table = swiss_map_directory_at(map, idx);
 
@@ -1683,7 +1618,7 @@ swiss_map_put_slot(swiss_map_t *map, const void *key) {
 
 	swiss_hash_fn_t hash_fn =
 		(swiss_hash_fn_t)swiss_func_registry[map->config.hash_fn_id];
-	uint64_t hash = hash_fn(key, map->config.key_info.size, map->seed);
+	uint64_t hash = hash_fn(key, map->config.key_size, map->seed);
 
 	while (true) {
 		uint64_t idx = swiss_map_directory_index(map, hash);
@@ -1731,13 +1666,7 @@ static inline int
 swiss_map_put(swiss_map_t *map, const void *key, const void *value) {
 	void *slot = swiss_map_put_slot(map, key);
 	if (slot) {
-		if (map->config.value_info.copy) {
-			map->config.value_info.copy(
-				slot, value, map->config.value_info.size
-			);
-		} else {
-			memcpy(slot, value, map->config.value_info.size);
-		}
+		memcpy(slot, value, map->config.value_size);
 		return 0;
 	}
 	return -1;
@@ -1760,7 +1689,7 @@ swiss_map_delete(swiss_map_t *map, const void *key) {
 
 	swiss_hash_fn_t hash_fn =
 		(swiss_hash_fn_t)swiss_func_registry[map->config.hash_fn_id];
-	uint64_t hash = hash_fn(key, map->config.key_info.size, map->seed);
+	uint64_t hash = hash_fn(key, map->config.key_size, map->seed);
 
 	size_t old_used = map->used;
 
@@ -1844,10 +1773,8 @@ swiss_map_empty(const swiss_map_t *map) {
 		struct memory_context *ctx, size_t hint                        \
 	) {                                                                    \
 		swiss_map_config_t config = {0};                               \
-		config.key_info.size = sizeof(key_type);                       \
-		config.key_info.align = _Alignof(key_type);                    \
-		config.value_info.size = sizeof(value_type);                   \
-		config.value_info.align = _Alignof(value_type);                \
+		config.key_size = sizeof(key_type);                            \
+		config.value_size = sizeof(value_type);                        \
 		config.hash_fn_id = SWISS_HASH_FNV1A;                          \
 		config.key_equal_fn_id = SWISS_KEY_EQUAL_DEFAULT;              \
 		config.alloc_fn_id = SWISS_ALLOC_SHARED;                       \

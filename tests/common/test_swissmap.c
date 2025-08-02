@@ -41,10 +41,8 @@ collision_hash(const void *key, size_t key_size, uint64_t seed) {
 static swiss_map_config_t
 create_default_int_config(struct memory_context *ctx) {
 	swiss_map_config_t config = {0};
-	config.key_info.size = sizeof(int);
-	config.key_info.align = sizeof(int);
-	config.value_info.size = sizeof(int);
-	config.value_info.align = sizeof(int);
+	config.key_size = sizeof(int);
+	config.value_size = sizeof(int);
 	config.hash_fn_id = SWISS_HASH_FNV1A;
 	config.key_equal_fn_id =
 		SWISS_KEY_EQUAL_DEFAULT; // Note: using default instead of
@@ -147,10 +145,8 @@ test_int_map(struct memory_context *ctx) {
 void
 test_string_map(struct memory_context *ctx) {
 	swiss_map_config_t config = {0};
-	config.key_info.size = 32; // Fixed size strings
-	config.key_info.align = 1;
-	config.value_info.size = sizeof(int);
-	config.value_info.align = sizeof(int);
+	config.key_size = 32; // Fixed size strings
+	config.value_size = sizeof(int);
 	config.hash_fn_id = SWISS_HASH_FNV1A;
 	config.key_equal_fn_id =
 		SWISS_KEY_EQUAL_DEFAULT; // Note: using default instead of
@@ -861,6 +857,47 @@ test_directory_expansion(struct memory_context *ctx) {
 	swiss_map_free(map);
 }
 
+// Test overwriting half of the values in the map
+void
+test_overwrite(struct memory_context *ctx) {
+	swiss_map_config_t config = create_default_int_config(ctx);
+	swiss_map_t *map = create_map(&config, 0);
+
+	// Insert initial values
+	const int count = 100;
+	const int multiplier = 10;
+	const int overwrite_multiplier = 100;
+
+	// Insert initial key-value pairs
+	insert_and_verify(map, 0, count, multiplier);
+
+	// Overwrite half of the values
+	for (int i = 0; i < count / 2; i++) {
+		int value = i * overwrite_multiplier;
+		assert(swiss_map_put(map, &i, &value) == 0);
+	}
+
+	// Verify all values - first half should be overwritten, second half
+	// unchanged
+	for (int i = 0; i < count; i++) {
+		int *found_value;
+		assert(swiss_map_get(map, &i, (void **)&found_value));
+
+		if (i < count / 2) {
+			// First half should be overwritten
+			assert(*found_value == i * overwrite_multiplier);
+		} else {
+			// Second half should be unchanged
+			assert(*found_value == i * multiplier);
+		}
+	}
+
+	// Verify map size is still the same
+	assert(swiss_map_size(map) == (size_t)count);
+
+	swiss_map_free(map);
+}
+
 int
 main() {
 	// Set up arena and memory context like in lpm_test.c
@@ -894,6 +931,7 @@ main() {
 	test_probe_sequence_algorithm();
 	test_control_byte_states();
 	test_directory_expansion(&mctx);
+	test_overwrite(&mctx);
 
 	// Verify no memory leaks (like in lpm_test.c)
 	if (mctx.balloc_size != mctx.bfree_size) {

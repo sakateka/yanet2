@@ -90,10 +90,8 @@ static const char *SHM_NAME = "/swissmap_test_shm"; // NOLINT
 static swiss_map_config_t
 create_int_config(struct memory_context *ctx) {
 	swiss_map_config_t config = {0};
-	config.key_info.size = sizeof(int);
-	config.key_info.align = sizeof(int);
-	config.value_info.size = sizeof(int);
-	config.value_info.align = sizeof(int);
+	config.key_size = sizeof(int);
+	config.value_size = sizeof(int);
 	config.hash_fn_id = SWISS_HASH_FNV1A;
 	config.key_equal_fn_id = SWISS_KEY_EQUAL_DEFAULT;
 	config.alloc_fn_id = SWISS_ALLOC_SHARED;
