@@ -3,9 +3,12 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include <assert.h>
+
 #include <string.h>
 
 #include "common/memory.h"
+#include "common/memory_address.h"
 
 #define RADIX_VALUE_INVALID 0xffffffff
 #define RADIX_CHUNK_SIZE 16
@@ -36,7 +39,6 @@ radix_page(const struct radix *radix, uint32_t page_idx) {
 
 static inline int
 radix_new_page(struct radix *radix, uint32_t *page_idx) {
-
 	if (!(radix->page_count % RADIX_CHUNK_SIZE)) {
 		struct memory_context *memory_context =
 			ADDR_OF(&radix->memory_context);
@@ -51,11 +53,8 @@ radix_new_page(struct radix *radix, uint32_t *page_idx) {
 		radix_page_t **old_pages = ADDR_OF(&radix->pages);
 		uint64_t old_chunk_count = radix->page_count / RADIX_CHUNK_SIZE;
 		uint64_t new_chunk_count = old_chunk_count + 1;
-		radix_page_t **new_pages = (radix_page_t **)memory_brealloc(
-			memory_context,
-			old_pages,
-			old_chunk_count * sizeof(*old_pages),
-			new_chunk_count * sizeof(*new_pages)
+		radix_page_t **new_pages = (radix_page_t **)memory_balloc(
+			memory_context, new_chunk_count * sizeof(*new_pages)
 		);
 		if (new_pages == NULL) {
 			memory_bfree(
@@ -66,13 +65,24 @@ radix_new_page(struct radix *radix, uint32_t *page_idx) {
 			return -1;
 		}
 
+		// Set correct relative addresses
+		for (size_t i = 0; i < old_chunk_count; ++i) {
+			EQUATE_OFFSET(&new_pages[i], &old_pages[i]);
+		}
+
 		SET_OFFSET_OF(&new_pages[new_chunk_count - 1], new_chunk);
 		SET_OFFSET_OF(&radix->pages, new_pages);
+
+		memory_bfree(
+			memory_context,
+			old_pages,
+			old_chunk_count * sizeof(radix_page_t *)
+		);
 	}
 	if (page_idx != NULL)
 		*page_idx = radix->page_count;
-	memset(radix_page(radix, radix->page_count), 0xff, sizeof(radix_page_t)
-	);
+	radix_page_t *page = radix_page(radix, radix->page_count);
+	memset(page, 0xff, sizeof(radix_page_t));
 	radix->page_count += 1;
 	return 0;
 }
@@ -115,7 +125,7 @@ radix_insert(
 
 	for (uint8_t iter = 0; iter < key_size - 1; ++iter) {
 		uint32_t *stored_value = (*page) + key[iter];
-		if (*stored_value == RADIX_VALUE_INVALID &&
+		if ((*stored_value == RADIX_VALUE_INVALID) &&
 		    radix_new_page(radix, stored_value))
 			return -1;
 		page = radix_page(radix, *stored_value);
@@ -149,6 +159,38 @@ typedef int (*radix_iterate_func)(
 	uint8_t key_size, const uint8_t *key, uint32_t value, void *data
 );
 
+static inline void
+radix_walk_rec(
+	const struct radix *radix,
+	uint8_t key_size,
+	uint8_t *key,
+	radix_page_t *page,
+	uint8_t depth,
+	radix_iterate_func cb,
+	void *cb_data
+) {
+	for (uint16_t next = 0; next < 256; ++next) {
+		uint32_t value = (*page)[next];
+		if (value == RADIX_VALUE_INVALID) {
+			continue;
+		}
+		key[depth] = next;
+		if (depth + 1 < key_size) {
+			radix_walk_rec(
+				radix,
+				key_size,
+				key,
+				radix_page(radix, value),
+				depth + 1,
+				cb,
+				cb_data
+			);
+		} else {
+			cb(key_size, key, value, cb_data);
+		}
+	}
+}
+
 /*
  * The routine iterates through whole RADIX and invokes a callback for
  * each valid key/value pair.
@@ -161,40 +203,15 @@ radix_walk(
 	void *iterate_func_data
 ) {
 	uint8_t key[key_size];
-	radix_page_t *pages[key_size];
-
-	uint8_t depth = 0;
-	key[depth] = 0;
-	pages[depth] = radix_page(radix, 0);
-
-	while (1) {
-		uint32_t value = (*pages[depth])[key[depth]];
-
-		if (value != RADIX_VALUE_INVALID) {
-			if (depth == key_size - 1) {
-				if (iterate_func(
-					    key_size,
-					    key,
-					    value,
-					    iterate_func_data
-				    ))
-					return -1;
-			} else {
-				pages[depth + 1] = radix_page(radix, value);
-				key[depth + 1] = 0;
-				++depth;
-				continue;
-			}
-		}
-
-		key[depth]++;
-		if (key[depth] == 0) {
-			if (depth == 0)
-				break;
-			--depth;
-			key[depth]++;
-		}
-	}
+	radix_walk_rec(
+		radix,
+		key_size,
+		key,
+		radix_page(radix, 0),
+		0,
+		iterate_func,
+		iterate_func_data
+	);
 	return 0;
 }
 

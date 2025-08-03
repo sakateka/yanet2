@@ -32,6 +32,7 @@ go = find_program('go', required: true)
 protoc = find_program('protoc', required: true)
 
 yanet_c_args = []
+# yanet_c_args = ['-g', '-O0']
 yanet_link_args = []
 if get_option('fuzzing').enabled()
   fuzz_args = [
@@ -68,8 +69,8 @@ libdpdk_dep = libdpdk.get_variable('dpdk_dep')
 libdpdk_inc_dep = libdpdk_dep.partial_dependency(includes: true)
 
 subdir('common')
-subdir('filter')
 subdir('lib')
+subdir('filter')
 subdir('modules')
 subdir('controlplane')
 subdir('dataplane')

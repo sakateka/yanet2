@@ -1,5 +1,6 @@
 #pragma once
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +16,7 @@
  */
 
 #define VALUE_COLLECTOR_CHUNK_SIZE 4096
+#define VALUE_COLLECTOR_UNTOUCHED ((uint32_t)-1)
 
 /*
  * Value collector is a simple array where each item contains inforamation
@@ -66,6 +68,10 @@ value_collector_reset(struct value_collector *collector) {
 	collector->gen++;
 }
 
+/*
+ * Routine returns 1 if value was not seen during current generation,
+ * 0 if it was seen, and -1 in case of error.
+ */
 static inline int
 value_collector_check(struct value_collector *collector, uint32_t value) {
 	uint32_t chunk_idx = value / VALUE_COLLECTOR_CHUNK_SIZE;
@@ -74,20 +80,30 @@ value_collector_check(struct value_collector *collector, uint32_t value) {
 	if (chunk_idx >= collector->chunk_count) {
 		uint32_t new_chunk_count = chunk_idx + 1;
 
-		uint32_t **new_use_map = (uint32_t **)memory_brealloc(
+		uint32_t **new_use_map = (uint32_t **)memory_balloc(
 			collector->memory_context,
-			use_map,
-			collector->chunk_count * sizeof(uint32_t *),
 			new_chunk_count * sizeof(uint32_t *)
 		);
 
 		if (new_use_map == NULL)
 			return -1;
 
+		// Set correct relative addresses
+		for (uint32_t idx = 0; idx < collector->chunk_count; ++idx) {
+			uint32_t *chunk = ADDR_OF(&use_map[idx]);
+			SET_OFFSET_OF(&new_use_map[idx], chunk);
+		}
+
 		for (uint32_t idx = collector->chunk_count;
 		     idx < new_chunk_count;
 		     ++idx)
 			new_use_map[idx] = NULL;
+
+		memory_bfree(
+			collector->memory_context,
+			use_map,
+			collector->chunk_count * sizeof(uint32_t *)
+		);
 
 		use_map = new_use_map;
 		SET_OFFSET_OF(&collector->use_map, use_map);
@@ -104,15 +120,15 @@ value_collector_check(struct value_collector *collector, uint32_t value) {
 		if (chunk == NULL)
 			return -1;
 
+		memset(chunk,
+		       0xff,
+		       VALUE_COLLECTOR_CHUNK_SIZE * sizeof(uint32_t));
+
 		SET_OFFSET_OF(&use_map[chunk_idx], chunk);
 	}
 
 	uint32_t value_idx = value % VALUE_COLLECTOR_CHUNK_SIZE;
-	if (chunk[value_idx] != collector->gen) {
-		return 1;
-	}
-
-	return 0;
+	return chunk[value_idx] != collector->gen;
 }
 
 /*
@@ -198,11 +214,7 @@ value_registry_start(struct value_registry *registry) {
 
 static inline int
 value_registry_collect(struct value_registry *registry, uint32_t value) {
-	int check = value_collector_check(&registry->collector, value);
-	if (check < 1)
-		return check;
-
-	if (value_collector_collect(&registry->collector, value)) {
+	if (value_collector_collect(&registry->collector, value) == 1) {
 		uint32_t *values = ADDR_OF(&registry->values);
 
 		if (mem_array_expand_exp(

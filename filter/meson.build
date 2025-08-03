@@ -1,9 +1,11 @@
-dependencies = []
-
-dependencies += lib_common_dep
+dependencies = [
+  lib_common_dep, lib_packet_dp_dep
+]
 
 sources = files(
   'ipfw.c',
+  'filter.c',
+  'helper.c',
 )
 
 lib_filter = static_library(
@@ -19,3 +21,7 @@ lib_filter_dep = declare_dependency(
   link_with: lib_filter,
   include_directories: include_directories('.'),
 )
+
+subdir('utils')
+subdir('tests')
+subdir('bench')
