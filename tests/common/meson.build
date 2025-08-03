@@ -54,3 +54,6 @@ test_swissmap = executable(
   dependencies: dependencies,
 )
 test('swissmap', test_swissmap)
+
+# Swissmap fuzzing tests
+subdir('fuzzing')

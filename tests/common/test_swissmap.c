@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ARENA_SIZE (1 << 20) // 1MB arena
+#define ARENA_SIZE (1 << 20) * 2 // 2MB arena
 
 // Simple key equality function for integers
 bool
@@ -329,10 +329,94 @@ test_duplicate_key_bug(struct memory_context *ctx) {
 void
 test_table_growth(struct memory_context *ctx) {
 	swiss_map_config_t config = create_default_int_config(ctx);
+	// Start with very small capacity to force growth
 	swiss_map_t *map = create_map(&config, 8);
 
-	// Insert many keys to trigger growth and verify
-	insert_and_verify(map, 0, 100, 10);
+	// Record initial state
+	uint8_t initial_global_depth = map->global_depth;
+	int initial_dir_len = map->dir_len;
+
+	printf("Initial state: global_depth=%u, dir_len=%d\n",
+	       initial_global_depth,
+	       initial_dir_len);
+
+	// Track growth events
+	bool growth_detected = false;
+	bool splitting_detected = false;
+
+	// Insert enough elements to definitely trigger growth and splitting
+	// We need to fill beyond the initial table capacity
+	int elements_to_insert = MAX_TABLE_CAPACITY + 100; // Force splitting
+
+	printf("Inserting %d elements to force growth...\n",
+	       elements_to_insert);
+
+	for (int i = 0; i < elements_to_insert; i++) {
+		int value = i * 10;
+
+		// Record state before insertion
+		uint8_t prev_global_depth = map->global_depth;
+		int prev_dir_len = map->dir_len;
+
+		assert(swiss_map_put(map, &i, &value) == 0);
+
+		// Check if growth occurred
+		if (map->global_depth > prev_global_depth) {
+			printf("Directory expansion detected at element %d: "
+			       "global_depth=%u->%u\n",
+			       i,
+			       prev_global_depth,
+			       map->global_depth);
+			growth_detected = true;
+		}
+
+		if (map->dir_len > prev_dir_len) {
+			printf("Directory size increase detected at element "
+			       "%d: dir_len=%d->%d\n",
+			       i,
+			       prev_dir_len,
+			       map->dir_len);
+			splitting_detected = true;
+		}
+
+		// Verify structural consistency after each insertion
+		assert(map->dir_len == (1 << map->global_depth));
+		assert(map->global_shift == 64 - map->global_depth);
+	}
+
+	printf("Final state: global_depth=%u, dir_len=%d, elements=%zu\n",
+	       map->global_depth,
+	       map->dir_len,
+	       swiss_map_size(map));
+
+	// Verify growth actually occurred
+	assert(growth_detected &&
+	       "No directory expansion detected - test failed to trigger growth"
+	);
+	assert(splitting_detected && "No directory size increase detected - "
+				     "test failed to trigger splitting");
+
+	// Verify final state
+	assert(map->global_depth > initial_global_depth);
+	assert(map->dir_len > initial_dir_len);
+	assert(swiss_map_size(map) == (size_t)elements_to_insert);
+
+	// Verify all elements are still accessible after growth
+	printf("Verifying all %d elements are accessible...\n",
+	       elements_to_insert);
+	for (int i = 0; i < elements_to_insert; i++) {
+		int *found_value;
+		assert(swiss_map_get(map, &i, (void **)&found_value));
+		assert(*found_value == i * 10);
+	}
+
+	printf("✓ Table growth test passed: detected directory expansion and "
+	       "splitting\n");
+	printf("✓ Growth: global_depth %u->%u, dir_len %d->%d\n",
+	       initial_global_depth,
+	       map->global_depth,
+	       initial_dir_len,
+	       map->dir_len);
 
 	swiss_map_free(map);
 }
@@ -390,7 +474,7 @@ test_memory_leak_prevention(struct memory_context *ctx) {
 	size_t after_create_balloc_size = ctx->balloc_size;
 
 	// Insert some data to trigger allocations
-	for (int i = 0; i < 50; i++) {
+	for (int i = 0; i < MAX_TABLE_CAPACITY * 10; i++) {
 		int value = i * 10;
 		assert(swiss_map_put(map, &i, &value) == 0);
 	}
@@ -403,7 +487,7 @@ test_memory_leak_prevention(struct memory_context *ctx) {
 	swiss_map_clear(map);
 
 	// Delete all elements
-	for (int i = 0; i < 50; i++) {
+	for (int i = 0; i < MAX_TABLE_CAPACITY * 10; i++) {
 		swiss_map_delete(map, &i);
 	}
 
@@ -451,7 +535,7 @@ test_memory_leak_prevention(struct memory_context *ctx) {
 
 	// Insert data into each map
 	for (int i = 0; i < 5; i++) {
-		for (int j = 0; j < 1024; j++) {
+		for (int j = 0; j < MAX_TABLE_CAPACITY * 10; j++) {
 			int key = i * 10 + j;
 			int value = key * 10;
 			assert(swiss_map_put(maps[i], &key, &value) == 0);
@@ -631,6 +715,7 @@ test_probe_sequence_algorithm() {
 		assert(seq3.offset < 4);
 		seq3 = swiss_probe_seq_next(seq3);
 	}
+	assert(seq3.offset < 4);
 }
 
 // Test control byte state transitions

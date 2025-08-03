@@ -47,35 +47,37 @@
  * Swiss Map Structure:
  *
  *   swiss_map_t
- *   ├── used,seed,config,dir_len,global_depth
- *   └── dir_ptr ──► Directory [table_ptr[0], table_ptr[1], ...]
- *                                │
- *                                ▼ (H1 >> global_shift)
+ *   +- used,seed,config,dir_len,global_depth
+ *   +- dir_ptr -> Directory [table_ptr[0], table_ptr[1], ...]
+ *                                |
+ *                                v (H1 >> global_shift)
  *   swiss_table_t (from table_ptr[i])
- *   ├── used,capacity,growth_left,local_depth,index
- *   └── groups ──► Groups Array [group0, group1, ...]
- *                                │
- *                                ▼ (H1 & length_mask)
+ *   +- used,capacity,growth_left,local_depth,index
+ *   +- groups -> Groups Array [group0, group1, ...]
+ *                                |
+ *                                v (H1 & length_mask)
  *   swiss_group_ref_t (from groups[i])
- *   ├── Control: [ctrl0, ctrl1, ..., ctrl7] (8 bytes)
- *   │             └─ H2 hash bits for matching
- *   └── Slots:   [key0|val0, key1|val1, ..., key7|val7]
+ *   +- Control: [ctrl0, ctrl1, ..., ctrl7] (8 bytes)
+ *   |             `-H2 hash bits for matching
+ *   +- Slots:   [key0|val0, key1|val1, ..., key7|val7]
  *
  * Hash Function Flow:
  *
- *   Key ──► hash_fn() ──► 64-bit Hash
- *                            │
- *                            ├─► H1 (upper 57) ──► Directory Index
- *                            │   (hash >> global_shift)
- *                            │                           │
- *                            │                           ▼
- *                            │                    table_ptr[i] ──► Table
- *                            │                           │
- *                            │                           ▼ (H1 & table.mask)
- *                            │                    groups[i] ──► Group
- *                            │                           │
- *                            └─► H2 (lower 7) ──► Control Byte Match (SIMD)
- *                                (hash & 0x7F)
+ *   Key -> hash_fn() --+
+ *                      |
+ *    64-bit Hash <-----+
+ *         |
+ *         +-> H1 (upper 57) -> Directory Index
+ *         |   (hash >> global_shift)  |
+ *         |                           |
+ *         |                           v
+ *         |                    table_ptr[i] -> Table
+ *         |                           |
+ *         |                           v (H1 & table.mask)
+ *         |                    groups[i] -> Group
+ *         |                           |
+ *         +-> H2 (lower 7) -> Control Byte Match (SIMD)
+ *             (hash & 0x7F)
  * ```
  *
  *
@@ -141,6 +143,7 @@
 
 #include "memory.h"
 #include "memory_address.h"
+#include "numutils.h"
 
 // Swiss table constants
 #define SWISS_GROUP_SLOTS 8 /**< Number of slots per group */
@@ -577,42 +580,6 @@ swiss_group_value(
 // Utility functions
 
 /**
- * @brief Align number up to next power of 2
- * @param n Input number
- * @param overflow Pointer to overflow flag
- * @return Next power of 2, or 0 if overflow
- */
-static inline uint64_t
-swiss_align_up_pow2(uint64_t n, bool *overflow) {
-	if (n == 0) {
-		*overflow = false;
-		return 0;
-	}
-
-	// Find the position of the highest set bit
-	int pos = 63 - __builtin_clzll(n - 1);
-	if (pos >= 63) {
-		*overflow = true;
-		return 0;
-	}
-
-	uint64_t result = 1ULL << (pos + 1);
-	*overflow = (result == 0);
-	return result;
-}
-
-/**
- * @brief Align size up to alignment boundary
- * @param n Size to align
- * @param align Alignment requirement (must be power of 2)
- * @return Aligned size
- */
-static inline size_t
-swiss_align_up(size_t n, size_t align) {
-	return (n + align - 1) & ~(align - 1);
-}
-
-/**
  * @brief Default pseudo random number generator using LCG for hash seeds
  *
  * This implements a Linear Congruential Generator (LCG) using the constants
@@ -798,9 +765,7 @@ swiss_table_new(
 		return NULL;
 	}
 
-	bool overflow;
-	capacity = swiss_align_up_pow2(capacity, &overflow);
-	if (overflow) {
+	if (!(capacity = align_up_pow2(capacity))) {
 		errno = EINVAL;
 		return NULL;
 	}
@@ -1140,7 +1105,7 @@ swiss_table_clear(swiss_table_t *table, const swiss_map_config_t *config) {
  * @param config Map configuration
  * @param map Parent map for hash seed
  */
-static inline void
+static inline int
 swiss_table_rehash(
 	swiss_table_t *old_table,
 	swiss_table_t *new_table,
@@ -1173,15 +1138,20 @@ swiss_table_rehash(
 			void *new_slot = swiss_table_put_slot(
 				new_table, config, map, hash, key, &ok
 			);
-			if (ok && new_slot) {
+			if (likely(ok && new_slot)) {
 				memcpy(new_slot, value, config->value_size);
 				// Adjust counters since swiss_table_put_slot
 				// increments them
 				new_table->used--;
 				map->used--;
+			} else {
+				// Very unlikely, as the new table
+				// should have a free slot.
+				return -1;
 			}
 		}
 	}
+	return 0;
 }
 
 /**
@@ -1208,7 +1178,10 @@ swiss_table_grow(
 	}
 
 	// Rehash all entries from old table to new table
-	swiss_table_rehash(table, new_table, config, map);
+	if (swiss_table_rehash(table, new_table, config, map) != 0) {
+		swiss_table_free(new_table, config);
+		return NULL;
+	}
 
 	return new_table;
 }
@@ -1483,9 +1456,7 @@ swiss_map_new(const swiss_map_config_t *config, size_t hint) {
 		dir_size = 1;
 	}
 
-	bool overflow;
-	dir_size = swiss_align_up_pow2(dir_size, &overflow);
-	if (overflow) {
+	if (!(dir_size = align_up_pow2(dir_size))) {
 		errno = EINVAL;
 		return NULL;
 	}

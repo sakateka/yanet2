@@ -7,7 +7,7 @@
 #include <time.h>
 
 #define ARENA_SIZE (1 << 30) // 1GB arena for large test
-#define NUM_ARENAS 3	     // Use 2 arenas for 2GB total
+#define NUM_ARENAS 3	     // Use 3 arenas for 3GB total
 
 // Five-tuple structure for network flows
 typedef struct {
