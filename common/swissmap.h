@@ -90,11 +90,11 @@
  * swiss_map_config_t config = {0};
  * config.key_size = sizeof(int);
  * config.value_size = sizeof(int);
- * config.hash_fn = swiss_hash_fnv1a;
- * config.key_equal_fn = swiss_default_key_equal;
- * config.alloc_fn = swiss_default_alloc;
- * config.free_fn = swiss_default_free;
- * config.rand_fn = swiss_rand_default; // Used for hash seed randomization
+ * config.hash_fn_id = SWISS_HASH_FNV1A;
+ * config.key_equal_fn_id = SWISS_KEY_EQUAL_DEFAULT;
+ * config.alloc_fn_id = SWISS_ALLOC_SHARED;
+ * config.free_fn_id = SWISS_FREE_SHARED;
+ * config.rand_fn_id = SWISS_RAND_DEFAULT; // Used for hash seed randomization
  *
  * // Create and use map
  * swiss_map_t *map = swiss_map_new(&config, 0);
@@ -117,7 +117,7 @@
  * // Declare a type-safe map for int->int
  * SWISS_MAP_DECLARE(IntMap, int, int);
  *
- * IntMap_t *map = IntMap_new(0);
+ * IntMap_t *map = IntMap_new(mctx, 0);
  * int key = 42, value = 100;
  * IntMap_put(map, &key, &value);
  * IntMap_free(map);
@@ -312,7 +312,7 @@ typedef struct swiss_table {
 	uint16_t capacity;	   /**< Total number of slots */
 	uint16_t growth_left;	   /**< Slots available before rehash */
 	uint8_t local_depth;	   /**< Bits used by directory lookups */
-	int index;		   /**< Index in directory (-1 if stale) */
+	int index;		   /**< Index in directory. */
 	swiss_groups_ref_t groups; /**< Array of slot groups */
 } swiss_table_t;
 
