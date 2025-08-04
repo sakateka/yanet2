@@ -31,7 +31,7 @@ test('value_table', table_test, suite: ['common'])
 test_large_swissmap = executable(
   'test_large_swissmap',
   ['test_large_swissmap.c',],
-  c_args: yanet_test_c_args,
+  c_args: yanet_test_c_args + ['-O3'],
   link_args: yanet_link_args,
   dependencies: dependencies,
 )
