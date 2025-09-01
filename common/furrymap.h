@@ -114,7 +114,8 @@ typedef bool (*furrymap_key_equal_fn_t)(
 // Used to prevent hash collision attacks and ensure different distributions
 typedef uint64_t (*furrymap_rand_fn_t)(void);
 
-// Map configuration - function pointers resolved at runtime from IDs for cross-process compatibility
+// Map configuration - function pointers resolved at runtime from IDs for
+// cross-process compatibility
 typedef struct furrymap_config {
 	struct memory_context *mem_ctx;
 	size_t key_size;
@@ -147,12 +148,13 @@ typedef struct furrymap_ctx {
 
 typedef struct furrymap {
 	furrymap_config_t config;
-	size_t index_mask;		// index_size - 1 for fast modulo operation
+	size_t index_mask; // index_size - 1 for fast modulo operation
 	size_t total_elements;
 	uint32_t max_chain_length;
 	uint32_t seed;
 	furrymap_group_t **index_array;
-	furrymap_lock_t *locks_ptr;	// Per-bucket locks when enable_locks is true
+	furrymap_lock_t
+		*locks_ptr; // Per-bucket locks when enable_locks is true
 	furrymap_lock_t main_ctx_lock;
 	furrymap_ctx_t *local_ctx;
 } furrymap_t;
@@ -165,7 +167,6 @@ typedef struct furrymap_stats {
 	size_t total_subgroups;
 	size_t memory_used;
 } furrymap_stats_t;
-
 
 static inline void
 furrymap_bucket_lock(furrymap_t *map, size_t bucket) {
@@ -189,7 +190,7 @@ typedef struct furrymap_unlocker {
 	furrymap_t *map;
 	size_t bucket;
 	bool is_locked;
-	void *value;	// NULL if not found
+	void *value; // NULL if not found
 } furrymap_unlocker_t;
 
 static inline void
@@ -416,7 +417,8 @@ furrymap_init_local_context(furrymap_t *map) {
 			};
 		}
 		if (idx != count) {
-			// One of the furrymap_expand_worker_context_internal calls failed
+			// One of the furrymap_expand_worker_context_internal
+			// calls failed
 			for (size_t i = 0; i <= idx; i++) {
 				// FIXME: free block allocators and arenas
 			}
@@ -767,7 +769,8 @@ furrymap_destroy(furrymap_t *map) {
 	furrymap_group_t **index_array = ADDR_OF(&map->index_array);
 
 	if (!map->config.enable_locks) {
-		// Free all groups and their chains when local contexts were not used
+		// Free all groups and their chains when local contexts were not
+		// used
 		for (size_t i = 0; i <= map->index_mask; i++) {
 			furrymap_group_t *group = ADDR_OF(&index_array[i]);
 			while (group) {
@@ -833,7 +836,8 @@ furrymap_get(furrymap_t *map, const void *key, void **value) {
 		};
 		for (int i = 0; i < 4; i++) {
 			if (!refs[i]) {
-				// If we encounter an empty subgroup, there is no value
+				// If we encounter an empty subgroup, there is
+				// no value
 				return false;
 			}
 			uint64_t matches =
@@ -1007,7 +1011,8 @@ furrymap_delete(furrymap_t *map, const void *key) {
 		};
 		for (int i = 0; i < 4; i++) {
 			if (!refs[i]) {
-				// If we encounter an empty subgroup, there is no value
+				// If we encounter an empty subgroup, there is
+				// no value
 				return false;
 			}
 			uint64_t matches =
@@ -1093,7 +1098,9 @@ furrymap_get_safe(furrymap_t *map, const void *key) {
 
 // Insert or update key-value pair in map (with locking)
 static inline bool
-furrymap_put_safe(furrymap_t *map, const void *key, const void *value, size_t worker_idx) {
+furrymap_put_safe(
+	furrymap_t *map, const void *key, const void *value, size_t worker_idx
+) {
 	if (!map)
 		return false;
 

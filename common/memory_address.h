@@ -36,7 +36,6 @@
 								    : NULL))); \
 	} while (0)
 
-
 /**
  * @brief Assign one relative pointer to another
  *

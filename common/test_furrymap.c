@@ -537,7 +537,8 @@ reader_thread_benchmark(void *arg) {
 		for (size_t i = 0; i < TOTAL_VALUES; i++) {
 			int key = i;
 
-			furrymap_unlocker_t unlocker = furrymap_get_safe(data->map, &key);
+			furrymap_unlocker_t unlocker =
+				furrymap_get_safe(data->map, &key);
 			if (unlocker.value) {
 				uint8_t *value = (uint8_t *)unlocker.value;
 				if (j == 0) {
