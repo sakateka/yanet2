@@ -62,8 +62,10 @@ memory_balloc(struct memory_context *context, size_t size) {
 	void *result = block_allocator_balloc(
 		ADDR_OF(&context->block_allocator), size
 	);
-	if (result == NULL)
+	if (result == NULL) {
+		errno = errno ? errno : ENOMEM;
 		return NULL;
+	}
 	++context->balloc_count;
 	context->balloc_size += size;
 	return result;
@@ -71,7 +73,7 @@ memory_balloc(struct memory_context *context, size_t size) {
 
 static inline void
 memory_bfree(struct memory_context *context, void *block, size_t size) {
-	if (!size)
+	if (!size || !block)
 		return;
 	++context->bfree_count;
 	context->bfree_size += size;
