@@ -25,5 +25,24 @@
 // After this macros called, it is guarated ADDR_OR(PTR1) == ADDR_OF(PTR2).
 #define EQUATE_OFFSET(PTR1, PTR2)                                              \
 	do {                                                                   \
-		SET_OFFSET_OF(PTR1, ADDR_OF(PTR2));                            \
+		typeof(*PTR2) addr = ADDR_OF(PTR2);                            \
+		SET_OFFSET_OF(PTR1, addr);                                     \
 	} while (0)
+
+#define ATOMIC_ADDR_OF(OFFSET)                                                 \
+	__extension__({                                                        \
+		typeof(*OFFSET) _offset = atomic_load_explicit(                \
+			(_Atomic(typeof(*OFFSET)) *)OFFSET,                    \
+			memory_order_acquire                                   \
+		);                                                             \
+		(typeof(_offset))((uintptr_t)_offset +                         \
+				  (uintptr_t)(_offset ? (OFFSET) : NULL));     \
+	})
+
+#define ATOMIC_SET_OFFSET_OF(PTR, ADDR)                                        \
+	atomic_store_explicit(                                                 \
+		(_Atomic(typeof(*PTR)) *)PTR,                                  \
+		(typeof(ADDR))((uintptr_t)(ADDR) -                             \
+			       (uintptr_t)((ADDR) ? (PTR) : NULL)),            \
+		memory_order_release                                           \
+	)
