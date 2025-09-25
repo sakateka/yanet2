@@ -35,6 +35,20 @@ init_default_config(
 }
 
 void
+test_constants() {
+	printf("L%d: Bucket size const\n", __LINE__);
+	assert(TTLMAP_BUCKET_SIZE == sizeof(ttlmap_bucket_t));
+
+	printf("L%d: Chunk index max size is power of 2\n", __LINE__);
+	assert(align_up_pow2(TTLMAP_CHUNK_INDEX_MAX_SIZE) ==
+	       TTLMAP_CHUNK_INDEX_MAX_SIZE);
+
+	printf("L%d: Chunk mask is power of 2\n", __LINE__);
+	assert(align_up_pow2(TTLMAP_CHUNK_INDEX_MASK) - 1 ==
+	       TTLMAP_CHUNK_INDEX_MASK);
+}
+
+void
 test_basic_operations(void *arena) {
 	printf("Testing basic operations...\n");
 	uint16_t worker_idx = 0;
@@ -236,6 +250,7 @@ main() {
 
 	printf("%s%s=== Single-threaded Tests ===%s\n", C_BOLD, C_BLUE, C_RESET
 	);
+	test_constants();
 	test_basic_operations(arena);
 	test_collision_handling(arena);
 

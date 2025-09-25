@@ -18,7 +18,9 @@
 // ============================================================================
 
 #define TTLMAP_BUCKET_ENTRIES 5
-#define TTLMAP_CHUNK_INDEX_MAX_SIZE (MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / 64)
+#define TTLMAP_BUCKET_SIZE 64
+#define TTLMAP_CHUNK_INDEX_MAX_SIZE                                            \
+	(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / TTLMAP_BUCKET_SIZE)
 #define TTLMAP_CHUNK_INDEX_MASK (TTLMAP_CHUNK_INDEX_MAX_SIZE - 1)
 
 // Function registry for cross-process compatibility.
