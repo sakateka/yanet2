@@ -17,7 +17,7 @@
 // Constants and Global Registry
 // ============================================================================
 
-#define TTLMAP_BUCKET_ENTRIES 5
+#define TTLMAP_BUCKET_ENTRIES 4
 #define TTLMAP_BUCKET_SIZE 64
 #define TTLMAP_CHUNK_INDEX_MAX_SIZE                                            \
 	(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / TTLMAP_BUCKET_SIZE)
@@ -65,10 +65,9 @@ typedef struct ttlmap_config {
 
 typedef struct ttlmap_bucket {
 	uint16_t sig[TTLMAP_BUCKET_ENTRIES];
-	uint32_t deadline[TTLMAP_BUCKET_ENTRIES];
+	uint64_t deadline[TTLMAP_BUCKET_ENTRIES];
 	uint32_t idx[TTLMAP_BUCKET_ENTRIES];
 	uint32_t next;
-	uint8_t pad[4];
 	rwlock_t lock;
 } ttlmap_bucket_t;
 
@@ -629,7 +628,7 @@ static inline int64_t
 ttlmap_get(
 	ttlmap_t *map,
 	uint16_t worker_idx,
-	uint32_t now,
+	uint64_t now,
 	const void *key,
 	void **value,
 	rwlock_t **lock
@@ -692,8 +691,8 @@ static inline int64_t
 ttlmap_put(
 	ttlmap_t *map,
 	uint16_t worker_idx,
-	uint32_t now,
-	uint32_t ttl,
+	uint64_t now,
+	uint64_t ttl,
 	const void *key,
 	const void *value,
 	rwlock_t **lock
@@ -715,7 +714,7 @@ ttlmap_put(
 		(hash & map->index_mask) >> map->buckets_chunk_shift;
 	uint32_t bucket_idx = hash & map->index_mask & TTLMAP_CHUNK_INDEX_MASK;
 
-	uint32_t deadline = now + ttl;
+	uint64_t deadline = now + ttl;
 
 	ttlmap_bucket_t *extra = ADDR_OF(&map->extra_buckets);
 	ttlmap_bucket_t **chunks = ADDR_OF(&map->buckets);
@@ -912,8 +911,8 @@ static inline int
 ttlmap_put_safe(
 	ttlmap_t *map,
 	uint16_t worker_idx,
-	uint32_t now,
-	uint32_t ttl,
+	uint64_t now,
+	uint64_t ttl,
 	const void *key,
 	const void *value
 ) {

@@ -14,8 +14,8 @@
 #define NUM_REPETITIONS 10
 #define L3_CACHE_SIZE (32ULL * 1024 * 1024) // 32MB typical L3 cache
 
-volatile uint32_t now = 0; // For testing purposes it's fine.
-const uint32_t ttl = 50000;
+volatile uint64_t now = 0; // For testing purposes it's fine.
+const uint64_t ttl = 50000;
 
 void
 benchmark_performance(void *arena) {
