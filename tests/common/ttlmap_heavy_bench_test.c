@@ -24,8 +24,8 @@
 #define TOTAL_VALUES (L3_CACHE_SIZE / VALUE_SIZE * 8) // Nx L3 cache size
 #define TOTAL_OPS (TOTAL_VALUES * NUM_THREADS * NUM_REPETITIONS)
 
-volatile uint32_t now = 0; // For testing purposes it's fine.
-const uint32_t ttl = 50000;
+volatile uint64_t now = 0; // For testing purposes it's fine.
+const uint64_t ttl = 50000;
 
 static void *
 allocate_hugepages_memory(size_t size) {

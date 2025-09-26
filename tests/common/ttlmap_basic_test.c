@@ -16,8 +16,8 @@
 
 #define ARENA_SIZE (1 << 20) * 400 // 400MB arena
 
-volatile uint32_t now = 0; // For testing purposes it's fine.
-const uint32_t ttl = 50000;
+volatile uint64_t now = 0; // For testing purposes it's fine.
+const uint64_t ttl = 50000;
 
 static inline void
 init_default_config(

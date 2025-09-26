@@ -9,7 +9,7 @@
 #include <unistd.h>
 
 #define ARENA_SIZE (1 << 20) * 500 // 500MB arena
-volatile uint32_t now = 0;
+volatile uint64_t now = 0;
 
 void
 test_layermap_basic_operations(void *arena) {

@@ -153,7 +153,7 @@ static inline int64_t
 layermap_get(
 	layermap_t *lmap,
 	uint16_t worker_idx,
-	uint32_t now,
+	uint64_t now,
 	const void *key,
 	void **value,
 	rwlock_t **lock
@@ -202,8 +202,8 @@ static inline int64_t
 layermap_put(
 	layermap_t *lmap,
 	uint16_t worker_idx,
-	uint32_t now,
-	uint32_t ttl,
+	uint64_t now,
+	uint64_t ttl,
 	const void *key,
 	const void *value,
 	rwlock_t **lock
