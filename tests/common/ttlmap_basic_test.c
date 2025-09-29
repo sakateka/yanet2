@@ -76,7 +76,13 @@ test_basic_operations(void *arena) {
 	// Test insertion.
 	int key1 = 777, value1 = 100;
 	printf("L%d: TTLMap put()\n", __LINE__);
-	int ret = ttlmap_put(map, worker_idx, now, ttl, &key1, &value1, NULL);
+	uint32_t entry = ttlmap_acquire_kv(map);
+	uint8_t *key_ptr1 = ttlmap_get_key(map, entry);
+	uint8_t *value_ptr1 = ttlmap_get_value(map, entry);
+	memcpy(key_ptr1, &key1, config.key_size);
+	memcpy(value_ptr1, &value1, config.value_size);
+
+	int ret = ttlmap_put(map, worker_idx, now, ttl, entry, key_ptr1, false);
 	assert(ret >= 0);
 
 	printf("L%d: TTLMap size()\n", __LINE__);
@@ -91,7 +97,7 @@ test_basic_operations(void *arena) {
 	int *found_value = NULL;
 	printf("L%d: TTLMap get()\n", __LINE__);
 	int get_ok = ttlmap_get(
-		map, worker_idx, now, &key1, (void **)&found_value, NULL
+		map, worker_idx, now, &key1, (void **)&found_value, false
 	);
 	assert(get_ok >= 0);
 
@@ -100,7 +106,13 @@ test_basic_operations(void *arena) {
 	// Test update.
 	int value2 = 200;
 	printf("L%d: TTLMap put()\n", __LINE__);
-	ret = ttlmap_put(map, worker_idx, now, ttl, &key1, &value2, NULL);
+	uint32_t entry2 = ttlmap_acquire_kv(map);
+	uint8_t *key_ptr2 = ttlmap_get_key(map, entry2);
+	uint8_t *value_ptr2 = ttlmap_get_value(map, entry2);
+	memcpy(key_ptr2, &key1, config.key_size);
+	memcpy(value_ptr2, &value2, config.value_size);
+	ret = ttlmap_put(map, worker_idx, now, ttl, entry2, key_ptr2, false);
+	printf("L%d: TTLMap put() = %d\n", __LINE__, ret);
 	assert(ret >= 0);
 
 	printf("L%d: TTLMap size()\n", __LINE__);
@@ -109,7 +121,7 @@ test_basic_operations(void *arena) {
 
 	printf("L%d: TTLMap get()\n", __LINE__);
 	get_ok = ttlmap_get(
-		map, worker_idx, now, &key1, (void **)&found_value, NULL
+		map, worker_idx, now, key_ptr2, (void **)&found_value, false
 	);
 	assert(get_ok >= 0);
 	assert(*found_value == 200);
@@ -119,8 +131,13 @@ test_basic_operations(void *arena) {
 	for (int i = 0; i < 100; i++) {
 		int key = i;
 		int value = i * 10;
+		uint32_t entry = ttlmap_acquire_kv(map);
+		uint8_t *key_ptr = ttlmap_get_key(map, entry);
+		uint8_t *value_ptr = ttlmap_get_value(map, entry);
+		memcpy(key_ptr, &key, config.key_size);
+		memcpy(value_ptr, &value, config.value_size);
 		int ret = ttlmap_put(
-			map, worker_idx, now, ttl, &key, &value, NULL
+			map, worker_idx, now, ttl, entry, &key, false
 		);
 		assert(ret >= 0);
 		size = ttlmap_size(map);
@@ -200,8 +217,13 @@ test_collision_handling(void *arena) {
 	for (int i = 0; i < 1000; i++) {
 		int key = i;
 		int value = i * 2;
+		uint32_t entry = ttlmap_acquire_kv(map);
+		uint8_t *key_ptr = ttlmap_get_key(map, entry);
+		uint8_t *value_ptr = ttlmap_get_value(map, entry);
+		memcpy(key_ptr, &key, config.key_size);
+		memcpy(value_ptr, &value, config.value_size);
 		int ret = ttlmap_put(
-			map, worker_idx, now, ttl, &key, &value, NULL
+			map, worker_idx, now, ttl, entry, &key, false
 		);
 		assert(ret >= 0);
 	}
@@ -214,7 +236,7 @@ test_collision_handling(void *arena) {
 		int key = i;
 		int *found_value = NULL;
 		int get_ok = ttlmap_get(
-			map, worker_idx, now, &key, (void **)&found_value, NULL
+			map, worker_idx, now, &key, (void **)&found_value, false
 		);
 		assert(get_ok >= 0);
 		assert(*found_value == i * 2);
@@ -248,7 +270,8 @@ main() {
 		return -1;
 	}
 
-	printf("%s%s=== Single-threaded Tests ===%s\n", C_BOLD, C_BLUE, C_RESET
+	printf(
+		"%s%s=== Single-threaded Tests ===%s\n", C_BOLD, C_BLUE, C_RESET
 	);
 	test_constants();
 	test_basic_operations(arena);

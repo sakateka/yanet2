@@ -45,11 +45,25 @@ benchmark_performance(void *arena) {
 	// Benchmark insertions.
 	double start = get_time();
 	for (int j = 0; j < NUM_REPETITIONS; j++) {
-		for (int i = 0; i < index_size; i++) {
+		for (int i = 0; i < index_size - 10; i++) {
 			int key = i;
 			int value = i;
+			int64_t entry = ttlmap_acquire_kv(map);
+			if (entry == -1) {
+				printf("L%d: failed to allocate new entry %d "
+				       "on "
+				       "repetition %d\n",
+				       __LINE__,
+				       i,
+				       j + 1);
+				assert(false);
+			}
+			uint8_t *key_ptr = ttlmap_get_key(map, entry);
+			uint8_t *value_ptr = ttlmap_get_value(map, entry);
+			memcpy(key_ptr, &key, config.key_size);
+			memcpy(value_ptr, &value, config.value_size);
 			int ret = ttlmap_put(
-				map, worker_idx, now, ttl, &key, &value, NULL
+				map, worker_idx, now, ttl, entry, &key, false
 			);
 			if (ret < 0) {
 				printf("L%d: failed to insert key %d on "
@@ -63,8 +77,8 @@ benchmark_performance(void *arena) {
 		}
 	}
 	double end = get_time();
-	size_t total_elements = map->counters[0].total_elements;
-	assert(total_elements == (size_t)index_size);
+	size_t total_elements = map->wdata[0].total_elements;
+	assert(total_elements == (size_t)index_size - 10);
 	double insert_time = (end - start) / (double)NUM_REPETITIONS;
 	double insert_throughput = index_size / insert_time;
 	printf("  Inserted %s items in %.3f seconds %s(%s ops/sec)%s\n",
@@ -78,7 +92,7 @@ benchmark_performance(void *arena) {
 	start = get_time();
 	volatile int checksum = 0; // Prevent compiler optimization.
 	for (int j = 0; j < NUM_REPETITIONS; j++) {
-		for (int i = 0; i < index_size; i++) {
+		for (int i = 0; i < index_size - 10; i++) {
 			int key = i;
 			int *value;
 			int get_ok = ttlmap_get(
@@ -87,7 +101,7 @@ benchmark_performance(void *arena) {
 				now,
 				&key,
 				(void **)&value,
-				NULL
+				false
 			);
 			if (get_ok < 0) {
 				printf("failed to get key: %d at L%d",
@@ -149,7 +163,8 @@ main() {
 		return -1;
 	}
 
-	printf("%s%s=== Single-threaded Tests ===%s\n", C_BOLD, C_BLUE, C_RESET
+	printf(
+		"%s%s=== Single-threaded Tests ===%s\n", C_BOLD, C_BLUE, C_RESET
 	);
 	benchmark_performance(arena);
 

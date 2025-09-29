@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -16,6 +17,9 @@
 // ============================================================================
 // Constants and Global Registry
 // ============================================================================
+#define TTLMAP_VALUE_STATE_UNINIT 0x0 /* Value is detached */
+#define TTLMAP_VALUE_STATE_FREE 0x1   /* Value is detached */
+#define TTLMAP_VALUE_STATE_READ 0x2   /* Value is readed */
 
 #define TTLMAP_BUCKET_ENTRIES 4
 #define TTLMAP_BUCKET_SIZE 64
@@ -71,11 +75,13 @@ typedef struct ttlmap_bucket {
 	rwlock_t lock;
 } ttlmap_bucket_t;
 
-typedef struct ttlmap_counter {
-	uint16_t max_chain;
+typedef struct ttlmap_worker_data {
+	uint32_t free_list_head;
+	uint32_t pad[12];
+	uint32_t max_chain;
 	uint32_t total_elements;
 	uint32_t max_deadline;
-} ttlmap_counter_t;
+} ttlmap_worker_data_t;
 
 typedef struct ttlmap {
 	uint32_t index_mask;
@@ -104,10 +110,11 @@ typedef struct ttlmap {
 	uint32_t extra_free_idx;
 	uint32_t extra_size;
 
-	uint32_t key_cursor;
+	_Atomic(uint32_t) key_cursor;
+	uint16_t value_slot_size;
 
 	struct ttlmap *next;
-	ttlmap_counter_t counters[];
+	ttlmap_worker_data_t wdata[];
 } ttlmap_t;
 
 typedef struct ttlmap_stats {
@@ -196,8 +203,8 @@ ttlmap_get_value(ttlmap_t *map, uint32_t idx) {
 	}
 	uint8_t **value_store = ADDR_OF(&map->value_store);
 	uint8_t *chunk = (uint8_t *)(ADDR_OF(&value_store[chunk_idx]));
-	uint8_t *value_slot = chunk + (size_t)idx * map->value_size;
-	return value_slot;
+	uint8_t *value_slot = chunk + (size_t)idx * map->value_slot_size;
+	return value_slot + sizeof(uint32_t); // + skipping value state
 }
 
 static inline size_t
@@ -205,7 +212,7 @@ ttlmap_size(const ttlmap_t *map) {
 	size_t total = 0;
 	if (map) {
 		for (size_t i = 0; i < map->worker_count; i++) {
-			total += map->counters[i].total_elements;
+			total += map->wdata[i].total_elements;
 		}
 	}
 	return total;
@@ -215,7 +222,7 @@ static inline bool
 ttlmap_empty(const ttlmap_t *map) {
 	if (map) {
 		for (size_t i = 0; i < map->worker_count; i++) {
-			if (map->counters[i].total_elements) {
+			if (map->wdata[i].total_elements) {
 				return false;
 			}
 		}
@@ -228,8 +235,8 @@ ttlmap_max_chain_length(const ttlmap_t *map) {
 	size_t chain = 0;
 	if (map) {
 		for (size_t i = 0; i < map->worker_count; i++) {
-			if (chain < map->counters[i].max_chain) {
-				chain = map->counters[i].max_chain;
+			if (chain < map->wdata[i].max_chain) {
+				chain = map->wdata[i].max_chain;
 			}
 		}
 	}
@@ -250,8 +257,8 @@ ttlmap_get_stats(const ttlmap_t *map, ttlmap_stats_t *stats) {
 	size_t total_memory = 0;
 
 	// 1. Main map structure with counters
-	size_t map_size =
-		sizeof(ttlmap_t) + sizeof(ttlmap_counter_t) * map->worker_count;
+	size_t map_size = sizeof(ttlmap_t) +
+			  sizeof(ttlmap_worker_data_t) * map->worker_count;
 	total_memory += map_size;
 
 	// 2. Bucket chunks array (array of pointers)
@@ -286,7 +293,7 @@ ttlmap_get_stats(const ttlmap_t *map, ttlmap_stats_t *stats) {
 	total_memory += value_store_array_size;
 
 	// 8. Value chunks (actual value storage)
-	total_memory += (size_t)map->value_size * (map->index_mask + 1);
+	total_memory += (size_t)map->value_slot_size * (map->index_mask + 1);
 
 	stats->memory_used = total_memory;
 }
@@ -324,27 +331,92 @@ ttlmap_allocate_chunks(
 
 static inline uint32_t
 ttlmap_max_deadline(const ttlmap_t *map) {
-	uint32_t deadline = map->counters[0].max_deadline;
+	uint32_t deadline = map->wdata[0].max_deadline;
 	for (size_t i = 1; i < map->worker_count; i++) {
-		if (map->counters[i].max_deadline > deadline) {
-			deadline = map->counters[i].max_deadline;
+		if (map->wdata[i].max_deadline > deadline) {
+			deadline = map->wdata[i].max_deadline;
 		}
 	}
 	return deadline;
 }
 
 static inline int64_t
-ttlmap_next_free_key(ttlmap_t *map) {
+ttlmap_acquire_kv(ttlmap_t *map, uint16_t worker_idx) {
+	ttlmap_worker_data_t *wdata = &map->wdata[worker_idx];
+	if (wdata->free_list_head <= map->index_mask) {
+		uint32_t *key =
+			(uint32_t *)ttlmap_get_key(map, wdata->free_list_head);
+		uint32_t current_key = wdata->free_list_head;
+		wdata->free_list_head = *key;
+		return current_key;
+	}
+
 	if (map->key_cursor > map->index_mask) {
 		return -1;
 	}
-	uint32_t curr_key =
-		__atomic_fetch_add(&map->key_cursor, 1, __ATOMIC_RELAXED);
+
+	uint32_t curr_key = atomic_fetch_add_explicit(
+		&map->key_cursor, 1, memory_order_relaxed
+	);
+
 	if (curr_key > map->index_mask) {
 		return -1;
 	}
-
 	return curr_key;
+}
+
+static inline void
+ttlmap_mark_value_free(ttlmap_t *map, uint32_t idx) {
+
+	void *value = ttlmap_get_value(map, idx);
+	_Atomic(uint32_t) *state = ((_Atomic(uint32_t) *)value) - 1;
+	uint32_t curr_value;
+	do {
+		curr_value = atomic_load_explicit(state, memory_order_relaxed);
+	} while ((curr_value & TTLMAP_VALUE_STATE_FREE) == 0 &&
+		 !atomic_compare_exchange_strong_explicit(
+			 state,
+			 &curr_value,
+			 curr_value | TTLMAP_VALUE_STATE_FREE,
+			 memory_order_relaxed,
+			 memory_order_relaxed
+		 ));
+}
+
+static inline void
+ttlmap_release_kv(ttlmap_t *map, uint32_t idx, uint16_t worker_idx) {
+	void *value = ttlmap_get_value(map, idx);
+	_Atomic(uint32_t) *state = ((_Atomic(uint32_t) *)value) - 1;
+	uint32_t curr_value = atomic_load_explicit(state, memory_order_relaxed);
+	if (curr_value > TTLMAP_VALUE_STATE_FREE) {
+		do {
+			curr_value = atomic_load_explicit(
+				state, memory_order_relaxed
+			);
+		} while (curr_value >= TTLMAP_VALUE_STATE_READ &&
+			 !atomic_compare_exchange_strong_explicit(
+				 state,
+				 &curr_value,
+				 curr_value - TTLMAP_VALUE_STATE_READ,
+				 memory_order_relaxed,
+				 memory_order_relaxed
+			 ));
+
+		if (curr_value - TTLMAP_VALUE_STATE_FREE !=
+		    TTLMAP_VALUE_STATE_FREE) {
+			return;
+		}
+	}
+	if (curr_value != TTLMAP_VALUE_STATE_FREE) {
+		return;
+	}
+
+	*state = TTLMAP_VALUE_STATE_UNINIT;
+
+	uint32_t *key = (uint32_t *)ttlmap_get_key(map, idx);
+	// save current head to the key
+	*key = map->wdata[worker_idx].free_list_head;
+	map->wdata[worker_idx].free_list_head = idx;
 }
 
 // Utility function to update counters (max_chain, total_elements, and
@@ -357,7 +429,7 @@ ttlmap_update_counters(
 	int increment_total,
 	uint32_t deadline
 ) {
-	ttlmap_counter_t *counter = &map->counters[worker_idx];
+	ttlmap_worker_data_t *counter = &map->wdata[worker_idx];
 	counter->total_elements += increment_total;
 	if (chain_length > counter->max_chain) {
 		counter->max_chain = chain_length;
@@ -388,8 +460,9 @@ ttlmap_destroy(ttlmap_t *map, struct memory_context *ctx) {
 			((map->index_mask & TTLMAP_CHUNK_INDEX_MASK) + 1);
 
 		for (size_t i = 0; i < chunk_count; i++) {
-			if (!chunks[i]) { // In case of allocation failure, the
-					  // first null pointer indicates the
+			if (!chunks[i]) { // In case of allocation
+					  // failure, the first null
+					  // pointer indicates the
 					  // failed allocation.
 				break;
 			}
@@ -413,10 +486,10 @@ ttlmap_destroy(ttlmap_t *map, struct memory_context *ctx) {
 	if (key_chunks) {
 		size_t key_chunk_size = map->keys_in_chunk * map->key_size;
 		for (size_t i = 0; i < map->keys_chunk_cnt; i++) {
-			if (!key_chunks[i]) { // In case of allocation failure,
-					      // the first null pointer
-					      // indicates the failed
-					      // allocation.
+			if (!key_chunks[i]) { // In case of allocation
+					      // failure, the first null
+					      // pointer indicates the
+					      // failed allocation.
 				break;
 			}
 			uint8_t *kchunk = ADDR_OF(&key_chunks[i]);
@@ -430,11 +503,12 @@ ttlmap_destroy(ttlmap_t *map, struct memory_context *ctx) {
 	uint8_t **value_chunks = ADDR_OF(&map->value_store);
 	if (value_chunks) {
 		size_t value_chunk_size =
-			map->values_in_chunk * map->value_size;
+			map->values_in_chunk * map->value_slot_size;
 		for (size_t i = 0; i < map->values_chunk_cnt; i++) {
 			if (!value_chunks[i]) { // In case of allocation
-						// failure, the first null
-						// pointer indicates the failed
+						// failure, the first
+						// null pointer
+						// indicates the failed
 						// allocation.
 				break;
 			}
@@ -448,8 +522,8 @@ ttlmap_destroy(ttlmap_t *map, struct memory_context *ctx) {
 		);
 	}
 
-	size_t map_size =
-		sizeof(ttlmap_t) + sizeof(ttlmap_counter_t) * map->worker_count;
+	size_t map_size = sizeof(ttlmap_t) +
+			  sizeof(ttlmap_worker_data_t) * map->worker_count;
 	memory_bfree(ctx, map, map_size);
 }
 
@@ -457,6 +531,12 @@ static inline ttlmap_t *
 ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 	uint32_t index_size = config->index_size;
 	uint32_t extra_size = config->extra_bucket_count;
+
+	if (config->key_size < sizeof(uint32_t)) {
+		// Restriction to support keys free list
+		errno = EINVAL;
+		return NULL;
+	}
 
 	if (index_size < 16) {
 		index_size = 16;
@@ -476,15 +556,19 @@ ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 		extra_size = align_up_pow2(extra_size);
 	}
 
+	// Value size + value state
+	uint32_t value_slot_size = config->value_size + sizeof(uint32_t);
+
 	uint32_t keys_per_chunk =
 		MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / config->key_size;
-	// Ceiling division: (index_size + keys_per_chunk - 1) / keys_per_chunk.
-	// But ensure at least 1 chunk even if keys_per_chunk is 0.
+	// Ceiling division: (index_size + keys_per_chunk - 1) /
+	// keys_per_chunk. But ensure at least 1 chunk even if
+	// keys_per_chunk is 0.
 	uint32_t keys_chunk_cnt =
 		(index_size + keys_per_chunk - 1) / keys_per_chunk;
 
 	uint32_t values_per_chunk =
-		MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / config->value_size;
+		MEMORY_BLOCK_ALLOCATOR_MAX_SIZE / value_slot_size;
 	// Ceiling division with minimum of 1.
 	uint32_t values_chunk_cnt =
 		(index_size + values_per_chunk - 1) / values_per_chunk;
@@ -500,7 +584,7 @@ ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 		(ttlmap_rand_fn_t)ttlmap_func_registry[config->rand_fn_id];
 
 	size_t map_size = sizeof(ttlmap_t) +
-			  sizeof(ttlmap_counter_t) * config->worker_count;
+			  sizeof(ttlmap_worker_data_t) * config->worker_count;
 	ttlmap_t *map = memory_balloc(ctx, map_size);
 	if (!map) {
 		errno = ENOMEM;
@@ -510,6 +594,7 @@ ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 
 	map->key_size = config->key_size;
 	map->value_size = config->value_size;
+	map->value_slot_size = value_slot_size;
 	map->hash_seed =
 		config->hash_seed ? config->hash_seed : (uint32_t)rand_fn();
 	map->worker_count = config->worker_count;
@@ -522,12 +607,16 @@ ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 	map->buckets_chunk_shift = __builtin_popcount(TTLMAP_CHUNK_INDEX_MASK);
 
 	map->extra_size = extra_size;
-	map->extra_free_idx = 1; // idx 0 should not be used
+	map->extra_free_idx = 0;
 
 	map->keys_in_chunk =
 		index_size > keys_per_chunk ? keys_per_chunk : index_size;
 	map->keys_chunk_cnt = keys_chunk_cnt;
 	map->key_cursor = 0;
+
+	for (int i = 0; i < config->worker_count; i++) {
+		map->wdata[i].free_list_head = index_size;
+	}
 
 	map->values_in_chunk =
 		index_size > values_per_chunk ? values_per_chunk : index_size;
@@ -612,7 +701,7 @@ ttlmap_new(const ttlmap_config_t *config, struct memory_context *ctx) {
 		    index_size,
 		    map->values_in_chunk,
 		    map->values_chunk_cnt,
-		    map->value_size
+		    map->value_slot_size
 	    ) == -1) {
 		goto fail;
 	}
@@ -631,14 +720,14 @@ ttlmap_get(
 	uint64_t now,
 	const void *key,
 	void **value,
-	rwlock_t **lock
+	bool locking
 ) {
 	(void)worker_idx;
 
 	ttlmap_hash_fn_t hash_fn =
 		(ttlmap_hash_fn_t)ttlmap_func_registry[map->hash_fn_id];
-	ttlmap_key_equal_fn_t key_equal_fn = (ttlmap_key_equal_fn_t
-	)ttlmap_func_registry[map->key_equal_fn_id];
+	ttlmap_key_equal_fn_t key_equal_fn = (ttlmap_key_equal_fn_t)
+		ttlmap_func_registry[map->key_equal_fn_id];
 
 	uint64_t hash64 = hash_fn(key, map->key_size, map->hash_seed);
 	uint32_t hash = (uint32_t)hash64;
@@ -657,9 +746,9 @@ ttlmap_get(
 	ttlmap_bucket_t *buckets = ADDR_OF(&chunks[chunk_idx]);
 	ttlmap_bucket_t *bucket = &buckets[bucket_idx];
 
-	if (lock) {
-		rwlock_read_lock(&bucket->lock);
-		*lock = &bucket->lock;
+	rwlock_t *lock = &bucket->lock;
+	if (locking) {
+		rwlock_read_lock(lock);
 	}
 	while (bucket) {
 		for (size_t i = 0; i < TTLMAP_BUCKET_ENTRIES; i++) {
@@ -672,17 +761,36 @@ ttlmap_get(
 						*value = ttlmap_get_value(
 							map, key_idx
 						);
+						_Atomic(uint32_t) *state =
+							(_Atomic(uint32_t)
+								 *)(*value) -
+							1;
+						atomic_fetch_add_explicit(
+							state,
+							TTLMAP_VALUE_STATE_READ,
+							memory_order_relaxed
+						);
+					}
+					if (locking) {
+						rwlock_read_unlock(lock);
 					}
 					return key_idx;
 				}
 			} else if (!bucket->sig[i]) {
-				return -1; // Early return on first empty slot;
-					   // there should be no entries after
-					   // an empty slot.
+				if (locking) {
+					rwlock_read_unlock(lock);
+				}
+				return -1; // Early return on first
+					   // empty slot; there should
+					   // be no entries after an
+					   // empty slot.
 			}
 		}
 
 		bucket = bucket->next ? &extra[bucket->next] : NULL;
+	}
+	if (locking) {
+		rwlock_read_unlock(lock);
 	}
 	return -1;
 }
@@ -693,14 +801,14 @@ ttlmap_put(
 	uint16_t worker_idx,
 	uint64_t now,
 	uint64_t ttl,
+	uint32_t new_idx,
 	const void *key,
-	const void *value,
-	rwlock_t **lock
+	bool locking
 ) {
 	ttlmap_hash_fn_t hash_fn =
 		(ttlmap_hash_fn_t)ttlmap_func_registry[map->hash_fn_id];
-	ttlmap_key_equal_fn_t key_equal_fn = (ttlmap_key_equal_fn_t
-	)ttlmap_func_registry[map->key_equal_fn_id];
+	ttlmap_key_equal_fn_t key_equal_fn = (ttlmap_key_equal_fn_t)
+		ttlmap_func_registry[map->key_equal_fn_id];
 
 	uint64_t hash64 = hash_fn(key, map->key_size, map->hash_seed);
 	uint32_t hash = (uint32_t)hash64;
@@ -721,15 +829,14 @@ ttlmap_put(
 	ttlmap_bucket_t *buckets = ADDR_OF(&chunks[chunk_idx]);
 	ttlmap_bucket_t *bucket = &buckets[bucket_idx];
 
-	if (lock) {
-		rwlock_write_lock(&bucket->lock);
-		*lock = &bucket->lock;
+	rwlock_t *lock = &bucket->lock;
+	if (locking) {
+		rwlock_write_lock(lock);
 	}
 
 	size_t chain_length = 0;
 	ttlmap_bucket_t *last_bucket = bucket;
 
-	bool has_free = false;
 	uint32_t vacant_slot = 0;
 	ttlmap_bucket_t *bucket_to_insert = NULL;
 
@@ -738,17 +845,23 @@ ttlmap_put(
 
 		// Search for and update existing key.
 		for (uint32_t i = 0; i < TTLMAP_BUCKET_ENTRIES; i++) {
-			if (bucket->sig[i] == sig &&
-			    bucket->deadline[i] > now) {
-				uint32_t idx = bucket->idx[i];
-				uint8_t *other = ttlmap_get_key(map, idx);
+			if (bucket->sig[i] == sig) {
+				uint32_t old_idx = bucket->idx[i];
+				uint8_t *other = ttlmap_get_key(map, old_idx);
 				if (key_equal_fn(key, other, map->key_size)) {
-					uint8_t *value_ptr =
-						ttlmap_get_value(map, idx);
-					memcpy(value_ptr, value, map->value_size
-					);
-					// Update deadline for existing entry.
+					// Update deadline for existing
+					// entry.
 					bucket->deadline[i] = deadline;
+					bucket->idx[i] = new_idx;
+					if (locking) {
+						rwlock_write_unlock(lock);
+					}
+
+					ttlmap_mark_value_free(map, old_idx);
+					ttlmap_release_kv(
+						map, old_idx, worker_idx
+					);
+
 					ttlmap_update_counters(
 						map,
 						worker_idx,
@@ -756,14 +869,26 @@ ttlmap_put(
 						0,
 						deadline
 					);
-					return idx;
+					return new_idx;
 				}
-			} else if (!bucket_to_insert) {
+			} else {
 				if (!bucket->sig[i]) {
-					has_free = true;
-					vacant_slot = i;
-					bucket_to_insert = bucket;
-					break;
+					// Use free bucket's entry
+					bucket->sig[i] = sig;
+					bucket->deadline[i] = deadline;
+					bucket->idx[i] = new_idx;
+
+					if (locking) {
+						rwlock_write_unlock(lock);
+					}
+					ttlmap_update_counters(
+						map,
+						worker_idx,
+						chain_length,
+						1,
+						deadline
+					);
+					return new_idx;
 				} else if (bucket->deadline[i] < now) {
 					vacant_slot = i;
 					bucket_to_insert = bucket;
@@ -771,94 +896,66 @@ ttlmap_put(
 			}
 		}
 		last_bucket = bucket;
-
-		if (has_free) {
-			// A free slot is mutually exclusive with the next
-			// bucket, so if we found a free slot, there should be
-			// no next bucket.
-			break;
-		}
-
 		bucket = bucket->next ? &extra[bucket->next] : NULL;
 	}
 
 	if (bucket_to_insert) {
-		// Insert new key-value pair into an empty slot in existing
-		// buckets.
-		int64_t idx = (int64_t)bucket_to_insert->idx[vacant_slot];
-		if (has_free) {
-			idx = ttlmap_next_free_key(map);
-			if (idx == -1) {
-				return -1;
-			}
-			bucket_to_insert->idx[vacant_slot] = (uint32_t)idx;
-		}
+		// Insert new key-value pair into an empty slot in
+		// existing buckets.
+		uint32_t old_idx = bucket_to_insert->idx[vacant_slot];
+		ttlmap_mark_value_free(map, old_idx);
+		ttlmap_release_kv(map, old_idx, worker_idx);
 
-		// Get the key slot and store the key.
-		uint8_t *new_key = ttlmap_get_key(map, (uint32_t)idx);
-		memcpy(new_key, key, map->key_size);
-
-		uint8_t *value_ptr = ttlmap_get_value(map, idx);
-		memcpy(value_ptr, value, map->value_size);
-
-		// Store signature and key index in the bucket.
 		bucket_to_insert->sig[vacant_slot] = sig;
 		bucket_to_insert->deadline[vacant_slot] = deadline;
+		bucket_to_insert->idx[vacant_slot] = new_idx;
+		if (locking) {
+			rwlock_write_unlock(lock);
+		}
 
 		// Update counters.
 		ttlmap_update_counters(
-			map, worker_idx, chain_length, (int)has_free, deadline
+			map, worker_idx, chain_length, 0, deadline
 		);
 
-		return idx;
+		return new_idx;
 	}
 
-	// All slots in the existing chain are full; need to allocate a new
-	// bucket.
-	if (map->extra_free_idx >= map->extra_size) {
+	// All slots in the existing chain are full; need to allocate a
+	// new bucket.
+
+	// idx 0 should not be used, so increase the index
+	uint32_t new_bucket_idx = map->extra_free_idx + 1;
+	if (new_bucket_idx >= map->extra_size) {
+		if (locking) {
+			rwlock_write_unlock(lock);
+		}
 		// No more extra buckets available.
 		return -1;
 	}
-
-	// Allocate new extra bucket.
-	uint32_t new_bucket_idx =
-		__atomic_fetch_add(&map->extra_free_idx, 1, __ATOMIC_RELAXED);
-	if (new_bucket_idx >= map->extra_size) {
-		return -1;
-	}
+	map->extra_free_idx += 1;
 
 	ttlmap_bucket_t *new_bucket = &extra[new_bucket_idx];
 	// NOTE: Free extra buckets are already zero-initialized
 	// (they are zeroed at creation and during clear calls).
 	new_bucket->next = 0;
 
-	// Allocate new key.
-	int64_t idx = ttlmap_next_free_key(map);
-	if (idx == -1) {
-		// No more space for keys.
-		return -1;
-	}
-
-	// Store key and value.
-	uint8_t *new_key = ttlmap_get_key(map, (uint32_t)idx);
-	uint8_t *value_ptr = ttlmap_get_value(map, idx);
-	memcpy(new_key, key, map->key_size);
-	memcpy(value_ptr, value, map->value_size);
-
 	// Initialize new bucket with the key.
 	new_bucket->sig[0] = sig;
-	new_bucket->idx[0] = (uint32_t)idx;
+	new_bucket->idx[0] = new_idx;
 	new_bucket->deadline[0] = deadline;
-
 	last_bucket->next = new_bucket_idx;
 
+	if (locking) {
+		rwlock_write_unlock(lock);
+	}
 	// Update counters.
 	chain_length++;
 	ttlmap_update_counters(
 		map, worker_idx, chain_length, 1, new_bucket->deadline[0]
 	);
 
-	return idx;
+	return new_idx;
 }
 
 static inline void
@@ -893,13 +990,18 @@ ttlmap_clear(ttlmap_t *map) {
 	}
 
 	// 3. Reset extra bucket free index.
-	map->extra_free_idx = 1;
+	map->extra_free_idx = 0;
 
 	// 4. Reset key cursor.
 	map->key_cursor = 0;
 
 	// 5. Reset counters.
-	memset(map->counters, 0, sizeof(ttlmap_counter_t) * map->worker_count);
+	memset(map->wdata, 0, sizeof(ttlmap_worker_data_t) * map->worker_count);
+
+	// 6. Reset free lists
+	for (int i = 0; i < map->worker_count; i++) {
+		map->wdata[i].free_list_head = map->index_mask + 1;
+	}
 }
 
 /**
@@ -913,15 +1015,10 @@ ttlmap_put_safe(
 	uint16_t worker_idx,
 	uint64_t now,
 	uint64_t ttl,
-	const void *key,
-	const void *value
+	uint32_t new_idx,
+	const void *key
 ) {
-	rwlock_t *lock = NULL;
-	int result = ttlmap_put(map, worker_idx, now, ttl, key, value, &lock);
-	if (lock) {
-		rwlock_write_unlock(lock);
-	}
-	return result;
+	return ttlmap_put(map, worker_idx, now, ttl, new_idx, key, true);
 }
 
 // Global function registry - statically initialized.
