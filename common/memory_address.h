@@ -48,3 +48,23 @@
 	do {                                                                   \
 		SET_OFFSET_OF(PTR1, ADDR_OF(PTR2));                            \
 	} while (0)
+
+/*
+#define ATOMIC_ADDR_OF(OFFSET)                                                 \
+	__extension__({                                                        \
+		typeof(*OFFSET) _offset = atomic_load_explicit(                \
+			(_Atomic(typeof(*OFFSET)) *)OFFSET,                    \
+			memory_order_acquire                                   \
+		);                                                             \
+		(typeof(_offset))((uintptr_t)_offset +                         \
+				  (uintptr_t)(_offset ? (OFFSET) : NULL));     \
+	})
+
+#define ATOMIC_SET_OFFSET_OF(PTR, ADDR)                                        \
+	atomic_store_explicit(                                                 \
+		(_Atomic(typeof(*PTR)) *)PTR,                                  \
+		(typeof(ADDR))((uintptr_t)(ADDR) -                             \
+			       (uintptr_t)((ADDR) ? (PTR) : NULL)),            \
+		memory_order_release                                           \
+	)
+*/

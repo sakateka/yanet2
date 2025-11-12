@@ -2,7 +2,7 @@ CARGO ?= $(shell which cargo)
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
-MODULES := common inspect decap dscp forward pipeline function nat64 pdump counters acl
+MODULES := common inspect decap dscp forward pipeline function nat64 pdump counters acl fwstate
 BINARIES := yanet-cli $(addprefix yanet-cli-,$(MODULES))
 TARGETS := $(addprefix build/,$(BINARIES))
 

@@ -47,6 +47,11 @@ func (m *SharedMemory) Detach() error {
 	return nil
 }
 
+// AsRawPtr returns the raw pointer to the shared memory.
+func (m *SharedMemory) AsRawPtr() unsafe.Pointer {
+	return unsafe.Pointer(m.ptr)
+}
+
 // DPConfig gets configuration of the dataplane instance from shared memory.
 func (m *SharedMemory) DPConfig(instanceIdx uint32) *DPConfig {
 	ptr := C.yanet_shm_dp_config(m.ptr, C.uint32_t(instanceIdx))
@@ -98,6 +103,10 @@ type DPConfig struct {
 
 func (m *DPConfig) NumaIdx() uint32 {
 	return uint32(C.dataplane_instance_numa_idx(m.ptr))
+}
+
+func (m *DPConfig) WorkerCount() uint32 {
+	return uint32(C.dataplane_instance_worker_count(m.ptr))
 }
 
 // Modules returns a list of dataplane modules available.

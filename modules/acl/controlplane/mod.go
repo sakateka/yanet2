@@ -3,16 +3,18 @@ package acl
 import (
 	"fmt"
 
-	"github.com/yanet-platform/yanet2/controlplane/ffi"
-	"github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+
+	"github.com/yanet-platform/yanet2/controlplane/ffi"
+	"github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb"
 )
 
 const agentName = "acl"
 const serviceName = "aclpb.AclService"
 
-// AclModule implements module for Acl control
+// ACLModule is a control-plane component for ACL (Access Control List) module
+// with integrated firewall state management
 type AclModule struct {
 	cfg     *Config
 	shm     *ffi.SharedMemory
@@ -41,7 +43,8 @@ func NewAclModule(cfg *Config, log *zap.SugaredLogger) (*AclModule, error) {
 		return nil, fmt.Errorf("failed to attach agents: %w", err)
 	}
 
-	service := NewAclService(agents, log)
+	// Create ACL service - gateway endpoint will be set via SetGatewayEndpoint
+	service := NewAclService(shm, agents, log)
 
 	return &AclModule{
 		cfg:     cfg,
@@ -77,5 +80,13 @@ func (m *AclModule) Close() error {
 	if err := m.shm.Detach(); err != nil {
 		m.log.Warnw("failed to detach shared memory", "error", err)
 	}
+
 	return nil
+}
+
+// SetGatewayEndpoint implements the GatewayAwareModule interface
+// This is called by the gateway runner to provide the gateway endpoint for inter-module communication
+func (m *AclModule) SetGatewayEndpoint(endpoint string) {
+	m.service.SetGatewayEndpoint(endpoint)
+	m.log.Infow("gateway endpoint configured", zap.String("endpoint", endpoint))
 }

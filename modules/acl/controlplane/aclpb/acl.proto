@@ -8,11 +8,47 @@ option go_package = "github.com/yanet-platform/yanet2/modules/"
 		    "acl/controlplane/aclpb;aclpb";
 
 service AclService {
+	// List all ACL configurations across instances
+	rpc ListConfigs(ListConfigsRequest) returns (ListConfigsResponse);
+	// Show specific ACL configuration
+	rpc ShowConfig(ShowConfigRequest) returns (ShowConfigResponse);
 	// Updates the complete Acl configuration with a new set of rules
 	rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
 	// Allows to delete acl config if it is not referenced
 	// by any pipeline.
 	rpc DeleteConfig(DeleteConfigRequest) returns (DeleteConfigResponse);
+
+	// Synchronize fwstate config from gateway and update module
+	// configuration
+	rpc SyncFWStateConfig(SyncFWStateConfigRequest)
+		returns (SyncFWStateConfigResponse);
+}
+
+message ListConfigsRequest {
+}
+
+message ListConfigsResponse {
+	repeated InstanceConfigs instance_configs = 1;
+}
+
+message InstanceConfigs {
+	uint32 instance = 1;
+	repeated string configs = 2;
+}
+
+message ShowConfigRequest {
+	commonpb.TargetModule target = 1;
+}
+
+message ShowConfigResponse {
+	uint32 instance = 1;
+	Config config = 2;
+}
+
+message Config {
+	repeated Rule rules = 1;
+	uint64 fw4state_offset = 2; // IPv4 firewall state map offset
+	uint64 fw6state_offset = 3; // IPv6 firewall state map offset
 }
 
 message UpdateConfigRequest {
@@ -74,6 +110,7 @@ enum ActionKind {
 	ACTION_KIND_DENY = 1;
 	ACTION_KIND_COUNT = 2;
 	ACTION_KIND_CHECK_STATE = 3;
+	ACTION_KIND_CREATE_STATE = 4;
 }
 
 // Delete config with specified name.
@@ -85,4 +122,13 @@ message DeleteConfigRequest {
 
 message DeleteConfigResponse {
 	bool deleted = 1;
+
+message SyncFWStateConfigRequest {
+	commonpb.TargetModule target = 1;
+    // Name of the fwstate config to sync from
+	string fwstate_config_name = 2;
+}
+
+message SyncFWStateConfigResponse {
+	string status = 1; // Status message indicating success or failure
 }

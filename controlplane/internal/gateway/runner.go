@@ -25,6 +25,12 @@ type BuiltInModule interface {
 	Close() error
 }
 
+// GatewayAwareModule is an optional interface that built-in modules can implement
+// to receive the gateway endpoint for inter-module communication
+type GatewayAwareModule interface {
+	SetGatewayEndpoint(endpoint string)
+}
+
 type BackgroundBuiltInModule interface {
 	Run(ctx context.Context) error
 }
@@ -41,6 +47,11 @@ func NewBuiltInModuleRunner(
 	gatewayEndpoint string,
 	log *zap.SugaredLogger,
 ) *BuiltInModuleRunner {
+	// If the module implements GatewayAwareModule, provide it with the gateway endpoint
+	if gwAware, ok := module.(GatewayAwareModule); ok {
+		gwAware.SetGatewayEndpoint(gatewayEndpoint)
+	}
+
 	return &BuiltInModuleRunner{
 		module:          module,
 		gatewayEndpoint: gatewayEndpoint,
