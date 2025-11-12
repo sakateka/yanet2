@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package aclpb;
+
+import "common/proto/target.proto";
+
+option go_package = "github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb;aclpb";
+
+// ACL Service for managing Access Control Lists
+service AclService {
+	// List all ACL configurations across instances
+	rpc ListConfigs(ListConfigsRequest) returns (ListConfigsResponse);
+
+	// Show specific ACL configuration
+	rpc ShowConfig(ShowConfigRequest) returns (ShowConfigResponse);
+
+	// Compile ACL rules (stub implementation)
+	rpc CompileRules(CompileRulesRequest) returns (CompileRulesResponse);
+
+	// Synchronize fwstate config from gateway and update module
+	// configuration
+	rpc SyncFWStateConfig(SyncFWStateConfigRequest)
+		returns (SyncFWStateConfigResponse);
+}
+
+message ListConfigsRequest {
+}
+
+message ListConfigsResponse {
+	repeated InstanceConfigs instance_configs = 1;
+}
+
+message InstanceConfigs {
+	uint32 instance = 1;
+	repeated string configs = 2;
+}
+
+message ShowConfigRequest {
+	commonpb.TargetModule target = 1;
+}
+
+message ShowConfigResponse {
+	uint32 instance = 1;
+	Config config = 2;
+}
+
+message Config {
+	repeated Rule rules = 1;    // Stub: will be implemented later
+	uint64 fw4state_offset = 2; // IPv4 firewall state map offset (hex)
+	uint64 fw6state_offset = 3; // IPv6 firewall state map offset (hex)
+}
+
+message CompileRulesRequest {
+	commonpb.TargetModule target = 1;
+	repeated Rule rules = 2;
+}
+
+message CompileRulesResponse {
+	string status = 1; // Stub: "not implemented"
+}
+
+// Stub rule definition - to be expanded when filter is implemented
+message Rule {
+	uint32 id = 1;
+	string action = 2; // "accept", "drop", "create_state", "check_state"
+	// Filter conditions will be added here when filter is implemented
+}
+
+message SyncFWStateConfigRequest {
+	commonpb.TargetModule target = 1;
+	string fwstate_config_name =
+		2; // Name of the fwstate config to sync from
+}
+
+message SyncFWStateConfigResponse {
+	string status = 1; // Status message indicating success or failure
+}

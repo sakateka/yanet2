@@ -5,6 +5,9 @@ struct test_data {
 	uint16_t size;
 };
 
+void
+testing_init_mbuf(struct rte_mbuf *m, struct test_data data, uint16_t buf_len);
+
 struct packet_front *
 testing_packet_front(
 	struct test_data payload[],

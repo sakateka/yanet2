@@ -8,10 +8,12 @@ import (
 
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/controlplane/internal/gateway"
+	acl "github.com/yanet-platform/yanet2/modules/acl/controlplane"
 	balancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
 	decap "github.com/yanet-platform/yanet2/modules/decap/controlplane"
 	dscp "github.com/yanet-platform/yanet2/modules/dscp/controlplane"
 	forward "github.com/yanet-platform/yanet2/modules/forward/controlplane"
+	fwstate "github.com/yanet-platform/yanet2/modules/fwstate/controlplane"
 	nat64 "github.com/yanet-platform/yanet2/modules/nat64/controlplane"
 	pdump "github.com/yanet-platform/yanet2/modules/pdump/controlplane"
 	route "github.com/yanet-platform/yanet2/modules/route/controlplane"
@@ -87,6 +89,11 @@ func NewDirector(cfg *Config, options ...DirectorOption) (*Director, error) {
 		return nil, fmt.Errorf("failed to initialize route built-in module: %w", err)
 	}
 
+	aclModule, err := acl.NewACLModule(cfg.Modules.ACL, log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize acl built-in module: %w", err)
+	}
+
 	decapModule, err := decap.NewDecapModule(cfg.Modules.Decap, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize decap built-in module: %w", err)
@@ -115,6 +122,10 @@ func NewDirector(cfg *Config, options ...DirectorOption) (*Director, error) {
 	balancerModule, err := balancer.NewBalancerModule(cfg.Modules.Balancer, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize balancer built-in module: %w", err)
+	}
+	fwstateModule, err := fwstate.NewFwStateModule(cfg.Modules.FWState, log)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize fwstate built-in module: %w", err)
 	}
 
 	plainDevice, err := plain.NewDevicePlainDevice(cfg.Devices.Plain, log)
@@ -150,6 +161,12 @@ func NewDirector(cfg *Config, options ...DirectorOption) (*Director, error) {
 		),
 		gateway.WithBuiltInModule(
 			balancerModule,
+		),
+		gateway.WithBuiltInModule(
+			aclModule,
+		),
+		gateway.WithBuiltInModule(
+			fwstateModule,
 		),
 		gateway.WithBuiltInDevice(
 			plainDevice,

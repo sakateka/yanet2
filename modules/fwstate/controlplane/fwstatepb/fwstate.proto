@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package fwstatepb;
+
+import "common/proto/target.proto";
+
+option go_package = "github.com/yanet-platform/yanet2/modules/fwstate/controlplane/fwstatepb;fwstatepb";
+
+// Firewall state map configuration
+message MapConfig {
+	uint32 index_size = 1; // Size of the hash table index
+	// Number of extra buckets for collision handling
+	uint32 extra_bucket_count = 2;
+}
+
+// Firewall state synchronization configuration
+message SyncConfig {
+	bytes src_addr = 1;	      // IPv6 source address (16 bytes)
+	bytes dst_ether = 2;	      // Destination MAC address (6 bytes)
+	bytes dst_addr_multicast = 3; // Multicast IPv6 address (16 bytes)
+	uint32 port_multicast = 4;    // Multicast port
+	bytes dst_addr_unicast = 5;   // Unicast IPv6 address (16 bytes)
+	uint32 port_unicast = 6;      // Unicast port
+
+	// Connection timeouts
+	uint64 tcp_syn_ack = 10; // TCP SYN-ACK timeout in nanoseconds
+	uint64 tcp_syn = 11;	 // TCP SYN timeout in nanoseconds
+	uint64 tcp_fin = 12;	 // TCP FIN timeout in nanoseconds
+	uint64 tcp = 13;	 // TCP established timeout in nanoseconds
+	uint64 udp = 14;	 // UDP timeout in nanoseconds
+	uint64 default = 15;	 // Default timeout in nanoseconds
+}
+
+// FwState configuration
+message Config {
+	MapConfig map_config = 1;
+	SyncConfig sync_config = 2;
+	uint64 fw4state_offset = 3; // IPv4 firewall state map offset (hex)
+	uint64 fw6state_offset = 4; // IPv6 firewall state map offset (hex)
+	uint64 fw4state_size =
+		5; // IPv4 firewall state map size (number of entries)
+	uint64 fw6state_size =
+		6; // IPv6 firewall state map size (number of entries)
+}
+
+// Request to list all fwstate configurations
+message ListConfigsRequest {
+}
+
+// Instance-specific configurations
+message InstanceConfigs {
+	uint32 instance = 1;
+	repeated string configs = 2;
+}
+
+// Response with all fwstate configurations
+message ListConfigsResponse {
+	repeated InstanceConfigs instance_configs = 1;
+}
+
+// Request to show a specific fwstate configuration
+message ShowConfigRequest {
+	commonpb.TargetModule target = 1;
+}
+
+// Response with a specific fwstate configuration
+message ShowConfigResponse {
+	uint32 instance = 1;
+	Config config = 2;
+}
+
+// Request to set fwstate configuration
+message SetConfigRequest {
+	commonpb.TargetModule target = 1;
+	MapConfig map_config = 2;
+	SyncConfig sync_config = 3;
+}
+
+// Response after setting fwstate configuration
+message SetConfigResponse {
+}
+
+// Request to get fwstate config with global offsets for sharing with other
+// modules
+message GetFwStateConfigRequest {
+	commonpb.TargetModule target = 1;
+}
+
+// Response with fwstate config containing global offsets from shm base
+message GetFwStateConfigResponse {
+	uint64 fw4state_offset = 1; // Offset of IPv4 state map from shm base
+	uint64 fw6state_offset = 2; // Offset of IPv6 state map from shm base
+	SyncConfig sync_config = 3; // Sync configuration (by value)
+}
+
+// FwState service for managing firewall state
+service FwStateService {
+	// List all fwstate configurations
+	rpc ListConfigs(ListConfigsRequest) returns (ListConfigsResponse);
+
+	// Show a specific fwstate configuration
+	rpc ShowConfig(ShowConfigRequest) returns (ShowConfigResponse);
+
+	// Configure firewall state (sync and timeouts)
+	rpc SetConfig(SetConfigRequest) returns (SetConfigResponse);
+
+	// Get fwstate config with global offsets for sharing with other modules
+	// (e.g., ACL)
+	rpc GetFwStateConfig(GetFwStateConfigRequest)
+		returns (GetFwStateConfigResponse);
+}

@@ -13,3 +13,8 @@ worker_packet_alloc(struct dp_worker *dp_worker) {
 
 	return packet;
 }
+
+void
+worker_packet_free(struct packet *packet) {
+	rte_pktmbuf_free(packet->mbuf);
+}

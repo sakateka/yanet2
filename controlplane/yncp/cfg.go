@@ -8,10 +8,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/yanet-platform/yanet2/controlplane/internal/gateway"
+	acl "github.com/yanet-platform/yanet2/modules/acl/controlplane"
 	balancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
 	decap "github.com/yanet-platform/yanet2/modules/decap/controlplane"
 	dscp "github.com/yanet-platform/yanet2/modules/dscp/controlplane"
 	forward "github.com/yanet-platform/yanet2/modules/forward/controlplane"
+	fwstate "github.com/yanet-platform/yanet2/modules/fwstate/controlplane"
 	nat64 "github.com/yanet-platform/yanet2/modules/nat64/controlplane"
 	pdump "github.com/yanet-platform/yanet2/modules/pdump/controlplane"
 	route "github.com/yanet-platform/yanet2/modules/route/controlplane"
@@ -50,6 +52,8 @@ func DefaultConfig() *Config {
 			NAT64:    nat64.DefaultConfig(),
 			Pdump:    pdump.DefaultConfig(),
 			Balancer: balancer.DefaultConfig(),
+			ACL:      acl.DefaultConfig(),
+			FWState:  fwstate.DefaultConfig(),
 		},
 		Devices: DevicesConfig{
 			Plain: plain.DefaultConfig(),
@@ -101,6 +105,12 @@ type ModulesConfig struct {
 
 	// Balancer is the configuration for the balancer module.
 	Balancer *balancer.Config `yaml:"balancer"`
+
+	// ACL is the configuration for the ACL module.
+	ACL *acl.Config `yaml:"acl"`
+
+	// FWState is the configuration for the FWState module.
+	FWState *fwstate.Config `yaml:"fwstate"`
 }
 
 type DevicesConfig struct {
@@ -150,6 +160,12 @@ func (m *ModulesConfig) Validate() error {
 	}
 	if m.Balancer == nil {
 		return fmt.Errorf("balancer module is not configured")
+	}
+	if m.ACL == nil {
+		return fmt.Errorf("acl module is not configured")
+	}
+	if m.FWState == nil {
+		return fmt.Errorf("fwstate module is not configured")
 	}
 	return nil
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "fwstate/config.h"
 #include <stdint.h>
 
 struct agent;
@@ -18,4 +19,11 @@ acl_module_compile(
 	struct cp_module *cp_module,
 	struct filter_rule *actions,
 	uint32_t action_count
+);
+
+int
+acl_module_set_fwstate_config(
+	struct cp_module *cp_module,
+	void *shm,
+	struct fwstate_config fwstate_cfg
 );

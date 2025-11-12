@@ -4,3 +4,4 @@ subdir('logging')
 subdir('counters')
 subdir('dataplane')
 subdir('controlplane')
+subdir('fwstate') # depends on dataplane lib

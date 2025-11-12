@@ -2,7 +2,7 @@
 #include "module.h"
 #include <rte_mbuf.h>
 
-static void
+void
 testing_init_mbuf(struct rte_mbuf *m, struct test_data data, uint16_t buf_len) {
 	m->priv_size = 0;
 	m->buf_len = buf_len;
