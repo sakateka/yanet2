@@ -29,7 +29,7 @@
 
 // Function registry for cross-process compatibility.
 // NOLINTBEGIN(readability-identifier-naming)
-typedef enum : uint16_t {
+typedef enum {
 	FWMAP_UNINITIALIZED = 0,
 	FWMAP_HASH_FNV1A,
 	FWMAP_KEY_EQUAL_DEFAULT,
@@ -126,12 +126,12 @@ typedef struct fwmap {
 	uint32_t values_chunk_cnt;
 
 	// Indices into the function registry
-	fwmap_func_id_t hash_fn_id;
-	fwmap_func_id_t key_equal_fn_id;
-	fwmap_func_id_t copy_key_fn_id;
-	fwmap_func_id_t copy_value_fn_id;
-	fwmap_func_id_t merge_value_fn_id;
-	fwmap_func_id_t rand_fn_id;
+	uint16_t hash_fn_id;
+	uint16_t key_equal_fn_id;
+	uint16_t copy_key_fn_id;
+	uint16_t copy_value_fn_id;
+	uint16_t merge_value_fn_id;
+	uint16_t rand_fn_id;
 
 	uint32_t extra_free_idx;
 	uint32_t extra_size;

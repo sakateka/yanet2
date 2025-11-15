@@ -29,7 +29,7 @@ struct fw6_state_key {
 	uint8_t dst_addr[16];
 };
 
-enum fw_state_tcp_flags : uint8_t {
+enum fw_state_tcp_flags {
 	// NOLINTBEGIN(readability-identifier-naming)
 	FWSTATE_FIN = 0x01,
 	FWSTATE_SYN = 0x02,
