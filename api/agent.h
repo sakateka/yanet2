@@ -124,7 +124,7 @@ agent_detach(struct agent *agent);
 //
 // @return Handle to the dataplane configuration
 struct dp_config *
-agent_get_dp_config(struct agent *agent);
+agent_dp_config(struct agent *agent);
 
 int
 agent_update_modules(

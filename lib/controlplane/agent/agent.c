@@ -258,7 +258,7 @@ agent_detach(struct agent *agent) {
 }
 
 struct dp_config *
-agent_get_dp_config(struct agent *agent) {
+agent_dp_config(struct agent *agent) {
 	return ADDR_OF(&agent->dp_config);
 }
 
