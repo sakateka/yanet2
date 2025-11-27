@@ -7,7 +7,7 @@
 #include "lib/dataplane/config/zone.h"
 #include "lib/logging/log.h"
 
-#include "common/ttlmap.h"
+#include "common/ttlmap/ttlmap.h"
 #include <stdatomic.h>
 #include <string.h>
 
