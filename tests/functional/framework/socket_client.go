@@ -340,9 +340,9 @@ func (sc *SocketClient) ReceivePacket(timeout time.Duration) ([]byte, error) {
 		// Parse the packet to check SrcMAC
 		packetInfo, err := parser.ParsePacket(packetData)
 		if err != nil {
-			sc.log.Warnf("Failed to parse packet: %v", err)
-			// Continue reading packets
-			continue
+			// If packet parsing fails, return it anyway (may be intentionally invalid)
+			sc.log.Warnf("Failed to parse packet (may be intentionally invalid), returning anyway: %v", err)
+			return packetData, nil
 		}
 
 		// Check if the packet has the correct SrcMAC
@@ -374,7 +374,9 @@ func (sc *SocketClient) ReceivePacket(timeout time.Duration) ([]byte, error) {
 //	}()
 func (sc *SocketClient) Close() error {
 	if sc.conn != nil {
-		return sc.conn.Close()
+		err := sc.conn.Close()
+		sc.conn = nil // Make Close() idempotent - safe to call multiple times
+		return err
 	}
 	return nil
 }

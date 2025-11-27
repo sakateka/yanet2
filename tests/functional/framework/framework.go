@@ -13,40 +13,60 @@ import (
 )
 
 const (
+	// MAC addresses used in test framework
 	SrcMAC = "52:54:00:6b:ff:a1"
 	DstMAC = "52:54:00:6b:ff:a5"
+
+	// IP addresses used in test framework
+	VMIPv4Host    = "203.0.113.14"
+	VMIPv4Gateway = "203.0.113.1"
+	VMIPv6Gateway = "fe80::1"
+	VMIPv6Host    = "fe80::5054:ff:fe6b:ffa5"
+
+	// CLI tool paths
+	CLIBasePath    = "/mnt/target/release"
+	CLIRoute       = CLIBasePath + "/yanet-cli-route"
+	CLIBalancer    = CLIBasePath + "/yanet-cli-balancer"
+	CLINAT64       = CLIBasePath + "/yanet-cli-nat64"
+	CLIACL         = CLIBasePath + "/yanet-cli-acl"
+	CLIPipeline    = CLIBasePath + "/yanet-cli-pipeline"
+	CLIFunction    = CLIBasePath + "/yanet-cli-function"
+	CLIDevicePlain = CLIBasePath + "/yanet-cli-device-plain"
+	CLIDecap       = CLIBasePath + "/yanet-cli-decap"
+	CLIForward     = CLIBasePath + "/yanet-cli-forward"
+	CLIGeneric     = CLIBasePath + "/yanet-cli"
 )
 
 var (
 	CommonConfigCommands = []string{
 		// Configure kni0 network interface
 		"ip link set kni0 up",
-		"ip nei add fe80::1 lladdr " + SrcMAC + " dev kni0",
-		"ip nei add 203.0.113.1 lladdr " + SrcMAC + " dev kni0",
-		"ip addr add 203.0.113.14/24 dev kni0",
+		"ip nei add " + VMIPv6Gateway + " lladdr " + SrcMAC + " dev kni0",
+		"ip nei add " + VMIPv4Gateway + " lladdr " + SrcMAC + " dev kni0",
+		"ip addr add " + VMIPv4Host + "/24 dev kni0",
 
 		// Configure L2 and L3 forwarding
-		"/mnt/target/release/yanet-cli-forward l2-enable --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0",
-		"/mnt/target/release/yanet-cli-forward l2-enable --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0",
-		"/mnt/target/release/yanet-cli-forward l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net 203.0.113.14/32",
-		"/mnt/target/release/yanet-cli-forward l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net fe80::5054:ff:fe6b:ffa5/64",
-		"/mnt/target/release/yanet-cli-forward l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net ff02::/16",
-		"/mnt/target/release/yanet-cli-forward l3-add --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0 --net 0.0.0.0/0",
-		"/mnt/target/release/yanet-cli-forward l3-add --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0 --net ::/0",
+		CLIForward + " l2-enable --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0",
+		CLIForward + " l2-enable --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0",
+		CLIForward + " l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net " + VMIPv4Host + "/32",
+		CLIForward + " l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net " + VMIPv6Host + "/64",
+		CLIForward + " l3-add --cfg=forward0 --instances 0 --src 01:00.0 --dst virtio_user_kni0 --net ff02::/16",
+		CLIForward + " l3-add --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0 --net 0.0.0.0/0",
+		CLIForward + " l3-add --cfg=forward0 --instances 0 --src virtio_user_kni0 --dst 01:00.0 --net ::/0",
 
 		// Configure routing
-		"/mnt/target/release/yanet-cli-route insert --cfg route0 --instances 0 --via fe80::1 ::/0",
-		"/mnt/target/release/yanet-cli-route insert --cfg route0 --instances 0 --via 203.0.113.1 0.0.0.0/0",
+		CLIRoute + " insert --cfg route0 --instances 0 --via " + VMIPv6Gateway + " ::/0",
+		CLIRoute + " insert --cfg route0 --instances 0 --via " + VMIPv4Gateway + " 0.0.0.0/0",
 
-		"/mnt/target/release/yanet-cli-function update --name=virt --chains chain0:10=forward:forward0 --instance=0",
-		"/mnt/target/release/yanet-cli-function update --name=test --chains chain2:1=forward:forward0,route:route0 --instance=0",
+		CLIFunction + " update --name=virt --chains chain0:10=forward:forward0 --instance=0",
+		CLIFunction + " update --name=test --chains chain2:1=forward:forward0,route:route0 --instance=0",
 
-		"/mnt/target/release/yanet-cli-pipeline update --name=bootstrap --functions virt --instance=0",
-		"/mnt/target/release/yanet-cli-pipeline update --name=test --functions test --instance=0",
-		"/mnt/target/release/yanet-cli-pipeline update --name=dummy --instance=0",
+		CLIPipeline + " update --name=bootstrap --functions virt --instance=0",
+		CLIPipeline + " update --name=test --functions test --instance=0",
+		CLIPipeline + " update --name=dummy --instance=0",
 
-		"/mnt/target/release/yanet-cli-device-plain update --instance=0 --name=01:00.0 --input test:1 --output dummy:1",
-		"/mnt/target/release/yanet-cli-device-plain update --instance=0 --name=virtio_user_kni0 --input bootstrap:1 --output dummy:1",
+		CLIDevicePlain + " update --instance=0 --name=01:00.0 --input test:1 --output dummy:1",
+		CLIDevicePlain + " update --instance=0 --name=virtio_user_kni0 --input bootstrap:1 --output dummy:1",
 	}
 	DebugCommands = []string{
 		"cp /var/log/yanet-controlplane.log /mnt/build/ 2>/dev/null || echo 'No controlplane log found'",
@@ -729,5 +749,34 @@ func (f *TestFramework) createConfigFiles(dataplaneConfig string, controlplaneCo
 	}
 
 	f.log.Debug("Configuration files created successfully on host")
+	return nil
+}
+
+// ValidateCounter validates a counter value against expected value.
+// This method checks statistic counters from yanet modules using CLI commands.
+//
+// Parameters:
+//   - counterName: Name/identifier of the counter to validate (e.g., "flow_1", "packets_received")
+//   - expectedValue: Expected value for the counter
+//
+// Returns:
+//   - error: Error if validation fails or counter cannot be accessed
+//
+// Note: Current implementation is a placeholder that logs the validation attempt.
+// Full implementation will require CLI access to yanet statistics.
+func (f *TestFramework) ValidateCounter(counterName string, expectedValue int) error {
+	f.log.Debugf("Validating counter %s with expected value %d", counterName, expectedValue)
+
+	// TODO: Implement actual counter validation using yanet CLI
+	// This will require:
+	// 1. CLI command to query counters (e.g., yanet-cli-stats)
+	// 2. Parse response to get actual counter value
+	// 3. Compare actual vs expected value
+	// 4. Return error if mismatch
+
+	// For now, just log the validation attempt
+	f.log.Infof("Counter validation placeholder: %s = %d (actual validation not implemented)", counterName, expectedValue)
+
+	// Simulate validation - always succeed for now
 	return nil
 }

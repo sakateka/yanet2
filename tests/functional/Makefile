@@ -20,7 +20,7 @@ else
 	endif
 endif
 
-.PHONY: all test clean prepare-vm check-deps test-enhanced test-basic debug-vm debug-dry-run test-login
+.PHONY: all test clean prepare-vm check-deps test-enhanced test-basic debug-vm debug-dry-run test-login convert convert-one test-converted clean-converted
 
 # Default target
 all: test
@@ -69,6 +69,36 @@ clean-all: clean
 	@echo "Cleaning all artifacts including downloaded images..."
 	rm -f $(UBUNTU_IMAGE)
 	@echo "Full clean completed"
+
+# Convert tests from yanet1
+MIGRATION_DIR = ../migration
+YANET1_ROOT ?= ../../../yanet1
+
+convert:
+	@echo "Converting all yanet1 tests..."
+	cd $(MIGRATION_DIR) && $(MAKE) convert YANET1_ROOT=$(YANET1_ROOT)
+
+convert-one:
+	@if [ -z "$(TEST)" ]; then \
+		echo "Error: specify TEST=<test_name>"; \
+		echo "Example: make convert-one TEST=016_route"; \
+		exit 1; \
+	fi
+	@echo "Converting test $(TEST)..."
+	cd $(MIGRATION_DIR) && $(MAKE) convert-one TEST=$(TEST) YANET1_ROOT=$(YANET1_ROOT)
+
+# Run converted tests
+test-converted: prepare-vm
+	@echo "Running converted yanet1 tests..."
+	@if [ ! -d "converted" ] || [ -z "$$(ls -A converted/*.go 2>/dev/null)" ]; then \
+		echo "No converted tests found. Run 'make convert' or 'make convert-one TEST=name' first."; \
+		exit 1; \
+	fi
+ifdef TEST
+	go test -v -run "$(TEST)" ./converted/
+else
+	go test -v -run "^Test.*" ./converted/
+endif
 
 # Create QEMU image
 $(QEMU_IMAGE): $(UBUNTU_IMAGE) $(CLOUD_INIT_AUTOLOGIN_ISO)
@@ -173,4 +203,9 @@ help:
 	@echo "  UBUNTU_IMAGE: $(UBUNTU_IMAGE)"
 	@echo "  CLOUD_INIT_AUTOLOGIN_ISO: $(CLOUD_INIT_AUTOLOGIN_ISO)"
 	@echo ""
-
+	@echo "Converted tests (yanet1 → yanet2 migration):"
+	@echo "  convert           - Convert all yanet1 tests"
+	@echo "  convert-one TEST=X - Convert single test"
+	@echo "  test-converted    - Run converted tests"
+	@echo "  clean-converted   - Remove converted tests"
+	@echo ""
