@@ -6,6 +6,8 @@ package mock
 #cgo CFLAGS: -I../../lib
 #cgo CFLAGS: -I../../build/subprojects/dpdk/lib
 #cgo CFLAGS: -I../../build/mock
+
+#cgo LDFLAGS: -v
 #cgo LDFLAGS: -L../../build/modules/balancer/dataplane -lbalancer_dp
 #cgo LDFLAGS: -L../../build/modules/decap/dataplane -ldecap_dp
 #cgo LDFLAGS: -L../../build/modules/dscp/dataplane -ldscp_dp
@@ -16,6 +18,7 @@ package mock
 #cgo LDFLAGS: -L../../build/modules/pdump/dataplane -lpdump_dp
 #cgo LDFLAGS: -L../../build/devices/plain/dataplane -lplain_dp
 #cgo LDFLAGS: -L../../build/devices/vlan/dataplane -lvlan_dp
+
 #cgo LDFLAGS: -L../../build/mock -lyanet_mock
 #cgo LDFLAGS: -L../../build/lib/dataplane/pipeline -lpipeline
 #cgo LDFLAGS: -L../../build/lib/logging  -llogging
@@ -24,6 +27,7 @@ package mock
 #cgo LDFLAGS: -L../../build/filter -lfilter
 #cgo LDFLAGS: -lnuma
 #cgo LDFLAGS: -ldl
+#cgo LDFLAGS: -Wl,-E
 
 #include <dlfcn.h>
 #include <stdlib.h>
@@ -33,6 +37,33 @@ package mock
 
 #include "mock.h"
 #include "config.h"
+
+void
+keep_refs(void **ptrs) {
+	extern struct module *new_module_balancer(void);
+	extern struct module *new_module_decap(void);
+	extern struct module *new_module_dscp(void);
+	extern struct module *new_module_acl(void);
+	extern struct module *new_module_forward(void);
+	extern struct module *new_module_route(void);
+	extern struct module *new_module_nat64(void);
+	extern struct module *new_module_pdump(void);
+
+	extern struct device *new_device_plain(void);
+	extern struct device *new_device_vlan(void);
+
+	ptrs[0] = (void *)new_module_balancer;
+	ptrs[1] = (void *)new_module_decap;
+	ptrs[2] = (void *)new_module_dscp;
+	ptrs[3] = (void *)new_module_acl;
+	ptrs[4] = (void *)new_module_forward;
+	ptrs[5] = (void *)new_module_route;
+	ptrs[6] = (void *)new_module_nat64;
+	ptrs[7] = (void *)new_module_pdump;
+	ptrs[8] = (void *)new_device_plain;
+	ptrs[9] = (void *)new_device_vlan;
+}
+
 */
 import "C"
 import (
@@ -49,6 +80,7 @@ import (
 
 ////////////////////////////////////////////////////////////////////////////////
 
+/*
 func openAggregator() (unsafe.Pointer, error) {
 	path := C.CString("../../build/mock/libdataplane_aggregator.so")
 	defer C.free(unsafe.Pointer(path))
@@ -60,6 +92,7 @@ func openAggregator() (unsafe.Pointer, error) {
 
 	return h, nil
 }
+*/
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -69,10 +102,13 @@ type YanetMock struct {
 }
 
 func NewYanetMock(config *YanetMockConfig) (*YanetMock, error) {
-	h, err := openAggregator()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open aggregator: %v", err)
-	}
+	var h unsafe.Pointer
+	/*
+		h, err := openAggregator()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open aggregator: %v", err)
+		}
+	*/
 
 	cConfig := C.struct_yanet_mock_config{}
 	C.memset(unsafe.Pointer(&cConfig), 0, C.size_t(unsafe.Sizeof(cConfig)))
@@ -102,7 +138,7 @@ func NewYanetMock(config *YanetMockConfig) (*YanetMock, error) {
 }
 
 func (mock *YanetMock) Free() {
-	C.dlclose(mock.aggregator)
+	// C.dlclose(mock.aggregator)
 	C.yanet_mock_free(&mock.inner)
 }
 
