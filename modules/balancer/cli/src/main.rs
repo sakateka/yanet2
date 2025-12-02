@@ -1,5 +1,6 @@
 mod cfg;
 mod cmd;
+mod info;
 mod rpc;
 mod service;
 

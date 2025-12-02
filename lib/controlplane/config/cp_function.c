@@ -10,7 +10,7 @@
 static inline uint64_t
 cp_function_alloc_size(uint64_t chain_count) {
 	return sizeof(struct cp_function) +
-	       sizeof(struct cp_function_chain *) * chain_count;
+	       sizeof(struct cp_function_chain) * chain_count;
 }
 
 struct cp_function *
@@ -20,16 +20,15 @@ cp_function_create(
 	struct cp_config_gen *cp_config_gen,
 	struct cp_function_config *cp_function_config
 ) {
-	struct cp_function *new_function = (struct cp_function *)memory_balloc(
-		memory_context,
-		cp_function_alloc_size(cp_function_config->chain_count)
-	);
+	const size_t alloc_size =
+		cp_function_alloc_size(cp_function_config->chain_count);
+	struct cp_function *new_function =
+		(struct cp_function *)memory_balloc(memory_context, alloc_size);
 	if (new_function == NULL) {
 		return NULL;
 	}
-	memset(new_function,
-	       0,
-	       cp_function_alloc_size(cp_function_config->chain_count));
+
+	memset(new_function, 0, alloc_size);
 
 	registry_item_init(&new_function->config_item);
 

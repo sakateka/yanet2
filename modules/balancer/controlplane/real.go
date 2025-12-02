@@ -1,4 +1,4 @@
-package balancer
+package mbalancer
 
 import (
 	"fmt"
@@ -8,19 +8,22 @@ import (
 	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
 )
 
-// Real server description
+// Description of real related to the current module configuration
 type Real struct {
-	Weight uint16
+	Config      RealConfig
+	RegistryIdx uint64
+}
 
+// Config of the real.
+type RealConfig struct {
+	Weight  uint16
 	DstAddr netip.Addr
-
 	SrcAddr netip.Addr
 	SrcMask netip.Addr
-
 	Enabled bool
 }
 
-func NewRealFromProto(proto *balancerpb.Real) (*Real, error) {
+func NewRealFromProto(proto *balancerpb.Real) (*RealConfig, error) {
 	dstAddr, err := netip.ParseAddr(string(proto.DstAddr))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse destination address: %w", err)
@@ -49,7 +52,7 @@ func NewRealFromProto(proto *balancerpb.Real) (*Real, error) {
 		return nil, fmt.Errorf("incorrect weight: 0")
 	}
 
-	return &Real{
+	return &RealConfig{
 		Weight:  uint16(proto.Weight),
 		DstAddr: dstAddr,
 		SrcAddr: srcAddr,
@@ -58,7 +61,7 @@ func NewRealFromProto(proto *balancerpb.Real) (*Real, error) {
 	}, nil
 }
 
-func (real *Real) IntoProto() *balancerpb.Real {
+func (real *RealConfig) IntoProto() *balancerpb.Real {
 	return &balancerpb.Real{
 		Weight:  uint32(real.Weight),
 		DstAddr: []byte(real.DstAddr.String()),

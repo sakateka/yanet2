@@ -1,4 +1,4 @@
-package balancer
+package mbalancer
 
 import (
 	"context"
@@ -77,7 +77,14 @@ func (service *BalancerService) EnableBalancing(
 		return nil, fmt.Errorf("failed to parse config: %v", err)
 	}
 
-	instance, err := NewModuleInstance(service.agents[inst], name, config, req.SessionTableSize)
+	timeouts := NewSessionsTimeoutsFromProto(req.SessionsTimeouts)
+	instance, err := NewModuleInstance(
+		service.agents[inst],
+		name,
+		config,
+		req.SessionTableSize,
+		timeouts,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new balancer instance: %v", err)
 	}
@@ -142,7 +149,16 @@ func (service *BalancerService) UpdateReals(
 		return nil, fmt.Errorf("module [name=%s, inst=%d] not exists", name, inst)
 	}
 
-	if err = instance.UpdateReals(req.Updates, req.Buffer); err != nil {
+	updates := make([]*RealUpdate, 0, len(req.Updates))
+	for idx, update := range req.Updates {
+		if parsed, err := NewRealUpdateFromProto(update); err != nil {
+			return nil, fmt.Errorf("failed to parse update %d: %v", idx, err)
+		} else {
+			updates = append(updates, parsed)
+		}
+	}
+
+	if err = instance.UpdateReals(updates, req.Buffer); err != nil {
 		return nil, fmt.Errorf("failed to handle real updates: %v", err)
 	}
 	return &balancerpb.UpdateRealsResponse{}, nil
@@ -178,6 +194,63 @@ func (service *BalancerService) FlushRealUpdates(
 	return &balancerpb.FlushRealUpdatesResponse{
 		UpdatesFlushed: flushed,
 	}, nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func (service *BalancerService) StateInfo(
+	ctx context.Context,
+	req *balancerpb.StateInfoRequest,
+) (*balancerpb.StateInfoResponse, error) {
+	name, inst, err := req.GetTarget().Validate(uint32(len(service.agents)))
+	if err != nil {
+		return nil, fmt.Errorf("incorrect target module: %v", err)
+	}
+
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	key := moduleKey{name: name, dataplaneInstance: inst}
+	instance, exists := service.instances[key]
+
+	if !exists {
+		return nil, fmt.Errorf("module [name=%s, inst=%d] not exists", name, inst)
+	}
+
+	stateInfo, err := instance.StateInfo()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state info: %v", err)
+	}
+
+	return &balancerpb.StateInfoResponse{
+		Info: stateInfo.IntoProto(),
+	}, nil
+}
+
+func (service *BalancerService) ConfigInfo(
+	ctx context.Context,
+	req *balancerpb.ConfigInfoRequest,
+) (*balancerpb.ConfigInfoResponse, error) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+
+	key := moduleKey{name: req.Config, dataplaneInstance: req.DataplaneInstance}
+	instance, exists := service.instances[key]
+
+	if !exists {
+		return nil, fmt.Errorf(
+			"module [name=%s, inst=%d] not exists",
+			req.Config,
+			req.DataplaneInstance,
+		)
+	}
+
+	configInfo, err := instance.ConfigInfo(req.Device, req.Pipeline, req.Function, req.Chain)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get state info: %v", err)
+	}
+
+	return &balancerpb.ConfigInfoResponse{Info: configInfo.IntoProto()}, nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -234,11 +307,10 @@ func (service *BalancerService) ListConfigs(
 	}, nil
 }
 
-////////////////////////////////////////////////////////////////////////////////
-
 // Make periodical check for the session table of all balancer instances.
 // Periodically try to extend tables if it is needed and free unused data.
-func (service *BalancerService) MakeChecks(ctx context.Context, period time.Duration) error {
+// Also, periodically update WLC.
+func (service *BalancerService) Background(ctx context.Context, period time.Duration) error {
 	ticker := time.NewTicker(period)
 	defer ticker.Stop()
 
@@ -251,9 +323,25 @@ func (service *BalancerService) MakeChecks(ctx context.Context, period time.Dura
 
 		service.mu.Lock()
 
-		for m, value := range service.instances {
-			if err := value.CheckSessionTable(); err != nil {
-				service.log.Errorf("failed to check session table for module [name=%s, instance=%d]", m.name, m.dataplaneInstance)
+		for m, instance := range service.instances {
+			// check session table
+			if err := instance.CheckSessionTable(); err != nil {
+				service.log.Errorf(
+					"failed to check session table for module [name=%s, instance=%d]: %s",
+					m.name,
+					m.dataplaneInstance,
+					err,
+				)
+			}
+
+			// update wlc
+			if err := instance.UpdateWlc(); err != nil {
+				service.log.Errorf(
+					"failed to update wlc for module [name=%s, instance=%d]: %s",
+					m.name,
+					m.dataplaneInstance,
+					err,
+				)
 			}
 		}
 

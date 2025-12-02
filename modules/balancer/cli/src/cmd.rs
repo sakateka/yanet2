@@ -89,23 +89,33 @@ pub struct EnableRealCmd {
     pub real_weight: Option<u16>,
 }
 
-impl From<EnableRealCmd> for balancerpb::UpdateRealsRequest {
-    fn from(cmd: EnableRealCmd) -> Self {
-        Self {
+impl TryFrom<EnableRealCmd> for balancerpb::UpdateRealsRequest {
+    type Error = String;
+    fn try_from(cmd: EnableRealCmd) -> Result<Self, Self::Error> {
+        let proto = cmd.proto.to_lowercase();
+        let proto = match proto.as_str() {
+            "tcp" => balancerpb::TransportProto::Tcp,
+            "udp" => balancerpb::TransportProto::Udp,
+            _ => return Err(format!("unexpected proto: {}", cmd.proto)),
+        };
+
+        let result = Self {
             target: Some(commonpb::TargetModule {
                 config_name: cmd.config_name,
                 dataplane_instance: cmd.instance,
             }),
             updates: vec![balancerpb::RealUpdate {
                 virtual_ip: cmd.virtual_ip.into(),
-                proto: cmd.proto,
+                proto: proto as i32,
                 port: cmd.virtual_port as u32,
                 real_ip: cmd.real_ip.into(),
                 weight: cmd.real_weight.unwrap_or(0) as u32,
                 enable: true,
             }],
             buffer: true,
-        }
+        };
+
+        Ok(result)
     }
 }
 
@@ -145,23 +155,31 @@ pub struct DisableRealCmd {
     pub real_weight: Option<u16>,
 }
 
-impl From<DisableRealCmd> for balancerpb::UpdateRealsRequest {
-    fn from(cmd: DisableRealCmd) -> Self {
-        Self {
+impl TryFrom<DisableRealCmd> for balancerpb::UpdateRealsRequest {
+    type Error = String;
+    fn try_from(cmd: DisableRealCmd) -> Result<Self, Self::Error> {
+        let proto = cmd.proto.to_lowercase();
+        let proto = match proto.as_str() {
+            "tcp" => balancerpb::TransportProto::Tcp,
+            "udp" => balancerpb::TransportProto::Udp,
+            _ => return Err(format!("unexpected proto: {}", cmd.proto)),
+        };
+
+        Ok(Self {
             target: Some(commonpb::TargetModule {
                 config_name: cmd.config_name,
                 dataplane_instance: cmd.instance,
             }),
             updates: vec![balancerpb::RealUpdate {
                 virtual_ip: cmd.virtual_ip.into(),
-                proto: cmd.proto,
+                proto: proto as i32,
                 port: cmd.virtual_port as u32,
                 real_ip: cmd.real_ip.into(),
                 weight: cmd.real_weight.unwrap_or(0) as u32,
                 enable: false,
             }],
             buffer: true,
-        }
+        })
     }
 }
 
@@ -203,9 +221,59 @@ pub struct RealCmds {
     pub mode: RealMode,
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct StateInfoCmd {
+    /// Name of the module config.
+    #[arg(long = "cfg", short = 'c')]
+    pub config_name: String,
+
+    /// Index of the dataplane instance.
+    #[arg(long, short, required = false, default_value_t = 0)]
+    pub instance: u32,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct ConfigInfoCmd {
+    /// Index of the dataplane instance.
+    #[arg(long, short, required = false, default_value_t = 0)]
+    pub instance: u32,
+
+    #[arg(long = "cfg", short = 'c')]
+    pub config_name: String,
+
+    #[arg(long)]
+    pub device: Option<String>,
+
+    #[arg(long)]
+    pub pipeline: Option<String>,
+
+    #[arg(long)]
+    pub function: Option<String>,
+
+    #[arg(long)]
+    pub chain: Option<String>,
+}
+
+#[derive(Debug, Clone, Parser)]
+#[command(flatten_help = true)]
+pub enum InfoMode {
+    State(StateInfoCmd),
+    Config(ConfigInfoCmd),
+}
+
+/// Allows to print statistics about balancer.
+#[derive(Debug, Clone, Parser)]
+pub struct InfoCmds {
+    #[clap(subcommand)]
+    pub mode: InfoMode,
+}
+
 #[derive(Debug, Clone, Parser)]
 pub enum Mode {
     Enable(EnableBalancingCmd),
     ShowConfig(ShowConfigCmd),
     Real(RealCmds),
+    Info(InfoCmds),
 }

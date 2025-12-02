@@ -1,8 +1,33 @@
-use std::{error::Error, string::FromUtf8Error};
+use std::{
+    error::Error,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    string::FromUtf8Error,
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::rpc::balancerpb;
+
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Net {
+    addr: String,
+    size: u32,
+}
+
+impl From<Net> for balancerpb::Subnet {
+    fn from(value: Net) -> Self {
+        let net: IpAddr = value.addr.parse().unwrap();
+        Self {
+            addr: match net {
+                IpAddr::V4(ipv4) => ipv4.octets().into(),
+                IpAddr::V6(ipv6) => ipv6.octets().into(),
+            },
+            size: value.size,
+        }
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -41,6 +66,8 @@ impl TryFrom<balancerpb::Real> for Real {
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct VsFlags {
     gre: bool,
@@ -49,51 +76,154 @@ struct VsFlags {
     pure_l3: bool,
 }
 
+impl From<balancerpb::VsFlags> for VsFlags {
+    fn from(flags: balancerpb::VsFlags) -> Self {
+        Self {
+            gre: flags.gre,
+            ops: flags.ops,
+            fix_mss: flags.fix_mss,
+            pure_l3: flags.pure_l3,
+        }
+    }
+}
+
+impl From<VsFlags> for balancerpb::VsFlags {
+    fn from(flags: VsFlags) -> Self {
+        Self {
+            gre: flags.gre,
+            ops: flags.ops,
+            fix_mss: flags.fix_mss,
+            pure_l3: flags.pure_l3,
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Debug, Serialize, Deserialize)]
 struct VirtualService {
     ip: String,
     proto: String,
     port: u16,
+    scheduler: String,
     flags: VsFlags,
     allowed_srcs: Vec<String>,
     reals: Vec<Real>,
 }
 
-impl From<VirtualService> for balancerpb::VirtualService {
-    fn from(vs: VirtualService) -> Self {
-        Self {
+impl TryFrom<VirtualService> for balancerpb::VirtualService {
+    type Error = String;
+    fn try_from(vs: VirtualService) -> Result<Self, Self::Error> {
+        let proto = vs.proto.to_lowercase();
+        let proto = if proto == "tcp" {
+            balancerpb::TransportProto::Tcp
+        } else if proto == "udp" {
+            balancerpb::TransportProto::Udp
+        } else {
+            return Err("invalid transport protocol".to_string());
+        };
+
+        let scheduler = vs.scheduler.to_lowercase();
+        let scheduler = if scheduler == "wrr" {
+            balancerpb::VsScheduler::Wrr
+        } else if scheduler == "prr" {
+            balancerpb::VsScheduler::Prr
+        } else {
+            return Err("invalid scheduler".to_string());
+        };
+
+        let allowed_srcs: Result<Vec<balancerpb::Subnet>, String> = vs
+            .allowed_srcs
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mut split = s.split('/');
+                let addr = split.next().unwrap();
+                let size = split.next().unwrap();
+                if split.next().is_some() {
+                    return Err(format!("invalid allowed src specified: {}", i + 1));
+                }
+                let Ok(size) = size.parse() else {
+                    return Err(format!("invalid allowed src subnet size specified: {}", i + 1));
+                };
+                let Ok(net) = addr.parse::<IpAddr>() else {
+                    return Err(format!("failed to parse address for subnet: {}", i + 1));
+                };
+                let addr = match net {
+                    IpAddr::V4(ipv4) => ipv4.octets().into(),
+                    IpAddr::V6(ipv6) => ipv6.octets().into(),
+                };
+                Ok(balancerpb::Subnet { addr, size })
+            })
+            .collect();
+        let allowed_srcs = allowed_srcs?;
+
+        Ok(Self {
             addr: vs.ip.into_bytes(),
             port: vs.port as u32,
-            proto: vs.proto,
-            allowed_srcs: vs.allowed_srcs,
+            proto: proto as i32,
+            allowed_srcs,
             reals: vs.reals.into_iter().map(Into::into).collect(),
-            gre: vs.flags.gre,
-            fix_mss: vs.flags.fix_mss,
-            ops: vs.flags.ops,
-            pure_l3: vs.flags.pure_l3,
-        }
+            flags: Some(vs.flags.into()),
+            scheduler: scheduler as i32,
+        })
     }
 }
 
 impl TryFrom<balancerpb::VirtualService> for VirtualService {
     type Error = FromUtf8Error;
     fn try_from(vs: balancerpb::VirtualService) -> Result<Self, Self::Error> {
+        // get proto
+        let proto = match vs.proto() {
+            balancerpb::TransportProto::Tcp => "tcp",
+            balancerpb::TransportProto::Udp => "udp",
+        }
+        .to_string();
+
+        // get scheduler
+        let scheduler = match vs.scheduler() {
+            balancerpb::VsScheduler::Wrr => "wrr",
+            balancerpb::VsScheduler::Prr => "prr",
+            balancerpb::VsScheduler::Wlc => "wlc",
+        }
+        .to_string();
+
+        // get allowed packet sources
+        let allowed_srcs = vs
+            .allowed_srcs
+            .into_iter()
+            .map(|s| {
+                let net: IpAddr = match s.addr.len() {
+                    4 => {
+                        let bytes: [u8; 4] = s.addr.try_into().unwrap();
+                        IpAddr::V4(Ipv4Addr::from(bytes))
+                    }
+                    16 => {
+                        let bytes: [u8; 16] = s.addr.try_into().unwrap();
+                        IpAddr::V6(Ipv6Addr::from(bytes))
+                    }
+                    _ => panic!("got bad subnet address, {:?}", s.addr),
+                };
+                net.to_string()
+            })
+            .collect();
+
+        // get reals
+
+        let reals = vs
+            .reals
+            .into_iter()
+            .map(TryFrom::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Self {
             ip: String::from_utf8(vs.addr)?,
-            proto: vs.proto,
+            proto,
             port: vs.port as u16,
-            flags: VsFlags {
-                gre: vs.gre,
-                ops: vs.ops,
-                fix_mss: vs.fix_mss,
-                pure_l3: vs.pure_l3,
-            },
-            allowed_srcs: vs.allowed_srcs,
-            reals: vs
-                .reals
-                .into_iter()
-                .map(TryFrom::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
+            flags: vs.flags.unwrap().into(),
+            allowed_srcs,
+            reals,
+            scheduler,
         })
     }
 }
@@ -138,16 +268,16 @@ impl From<balancerpb::SessionsTimeouts> for SessionsTimeouts {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BalancerConfig {
-    timeouts: SessionsTimeouts,
     vs: Vec<VirtualService>,
 }
 
-impl From<BalancerConfig> for balancerpb::BalancerInstanceConfig {
-    fn from(cfg: BalancerConfig) -> Self {
-        Self {
-            sessions_timeouts: Some(cfg.timeouts.into()),
-            virtual_services: cfg.vs.into_iter().map(Into::into).collect(),
-        }
+impl TryFrom<BalancerConfig> for balancerpb::BalancerInstanceConfig {
+    type Error = String;
+    fn try_from(cfg: BalancerConfig) -> Result<Self, Self::Error> {
+        let vs: Result<Vec<balancerpb::VirtualService>, Self::Error> =
+            cfg.vs.into_iter().map(TryInto::try_into).collect();
+        let vs = vs?;
+        Ok(Self { virtual_services: vs })
     }
 }
 
@@ -155,10 +285,6 @@ impl TryFrom<balancerpb::BalancerInstanceConfig> for BalancerConfig {
     type Error = Box<dyn Error>;
     fn try_from(cfg: balancerpb::BalancerInstanceConfig) -> Result<Self, Self::Error> {
         Ok(Self {
-            timeouts: cfg
-                .sessions_timeouts
-                .ok_or("sessions timeouts not specified")?
-                .into(),
             vs: cfg
                 .virtual_services
                 .into_iter()
@@ -184,17 +310,12 @@ mod tests {
 
     #[test]
     fn basic() {
-        let config = r#"timeouts:
-  tcp_syn_ack: 10
-  tcp_syn: 10
-  tcp_fin: 10
-  tcp: 20
-  udp: 30
-  default: 60
+        let config = r#"
 vs:
   - ip: "195.13.22.16"
     proto: "TCP"
     port: 5005
+    scheduler: "prr"
     flags:
       gre: false
       ops: false
@@ -211,17 +332,6 @@ vs:
 "#;
 
         let cfg: BalancerConfig = serde_yaml::from_str(config).unwrap();
-        assert_eq!(
-            cfg.timeouts,
-            SessionsTimeouts {
-                tcp_syn_ack: 10,
-                tcp_syn: 10,
-                tcp_fin: 10,
-                tcp: 20,
-                udp: 30,
-                default: 60
-            }
-        );
         assert_eq!(cfg.vs.len(), 1);
 
         let vs = &cfg.vs[0];
@@ -234,6 +344,7 @@ vs:
                 pure_l3: false
             }
         );
+        assert_eq!(vs.scheduler, "prr");
         assert_eq!(vs.port, 5005);
         assert_eq!(vs.proto, "TCP");
         assert_eq!(vs.allowed_srcs.len(), 1);

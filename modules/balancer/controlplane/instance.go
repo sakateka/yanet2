@@ -1,9 +1,7 @@
-package balancer
+package mbalancer
 
 import (
 	"fmt"
-	"math"
-	"net/netip"
 
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
@@ -44,36 +42,31 @@ func (timeouts *SessionsTimeouts) IntoProto() *balancerpb.SessionsTimeouts {
 ////////////////////////////////////////////////////////////////////////////////
 
 // Config of the current balancer instance.
-// One ModuleInstanceConfig corresponds to one balancer_module_config.
+// One ModuleInstanceConfig corresponds to one `C.balancer_module_config`.
 type ModuleInstanceConfig struct {
-	Services        []VirtualService
-	SessionTimeouts SessionsTimeouts
+	Services []VirtualServiceConfig
 }
 
 func NewModuleInstanceConfig(
 	proto *balancerpb.BalancerInstanceConfig,
 ) (*ModuleInstanceConfig, error) {
-	services := make([]VirtualService, 0)
+	services := make([]VirtualServiceConfig, 0)
 	for idx, vs := range proto.VirtualServices {
-		service, err := NewVirtualServiceFromProto(vs)
+		service, err := NewVirtualServiceConfigFromProto(vs)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse virtual service no. %d: %w", idx, err)
 		}
 		services = append(services, *service)
 	}
-	timeouts := NewSessionsTimeoutsFromProto(proto.SessionsTimeouts)
 	return &ModuleInstanceConfig{
-		Services:        services,
-		SessionTimeouts: *timeouts,
+		Services: services,
 	}, nil
 }
 
 func (config *ModuleInstanceConfig) Clone() *ModuleInstanceConfig {
 	services := config.Services
-	timeouts := config.SessionTimeouts
 	return &ModuleInstanceConfig{
-		Services:        services,
-		SessionTimeouts: timeouts,
+		Services: services,
 	}
 }
 
@@ -83,65 +76,8 @@ func (config *ModuleInstanceConfig) IntoProto() *balancerpb.BalancerInstanceConf
 		vs = append(vs, service.IntoProto())
 	}
 	return &balancerpb.BalancerInstanceConfig{
-		SessionsTimeouts: config.SessionTimeouts.IntoProto(),
-		VirtualServices:  vs,
+		VirtualServices: vs,
 	}
-}
-
-func (config *ModuleInstanceConfig) FindReal(vip *netip.Addr, realIp *netip.Addr, port uint16) *Real {
-	for service_idx := range config.Services {
-		service := &config.Services[service_idx]
-		if service.Address == *vip && (port == service.Port || (service.Flags.PureL3 && port == 0)) {
-			for idx := range service.Reals {
-				real := &service.Reals[idx]
-				if real.DstAddr == *realIp {
-					return real
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (config *ModuleInstanceConfig) ValidateRealUpdate(
-	update *balancerpb.RealUpdate,
-) (*RealUpdate, error) {
-	if update.Weight > math.MaxUint16 {
-		return nil, fmt.Errorf("real weight can not exceed %d", math.MaxUint16)
-	}
-	vip, err := netip.ParseAddr(string(update.VirtualIp))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse virtual ip: %w", err)
-	}
-	realIp, err := netip.ParseAddr(string(update.RealIp))
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse real ip: %w", err)
-	}
-	if real := config.FindReal(&vip, &realIp, uint16(update.Port)); real == nil {
-		return nil, fmt.Errorf("real with address %s not found on virtual service %s:%d", realIp, vip, update.Port)
-	} else {
-		update := RealUpdate{
-			VirtualIp: vip,
-			Proto:     update.Proto,
-			Port:      uint16(update.Port),
-			RealIp:    realIp,
-			Enable:    update.Enable,
-			Weight:    update.Weight,
-		}
-		return &update, nil
-	}
-}
-
-func (config *ModuleInstanceConfig) UpdateReal(update *RealUpdate) error {
-	real := config.FindReal(&update.VirtualIp, &update.RealIp, update.Port)
-	if real == nil {
-		return fmt.Errorf("failed to find real")
-	}
-	real.Enabled = update.Enable
-	if update.Weight != 0 {
-		real.Weight = uint16(update.Weight)
-	}
-	return nil
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -156,19 +92,25 @@ func (config *ModuleInstanceConfig) UpdateReal(update *RealUpdate) error {
 type ModuleInstance struct {
 	agent *ffi.Agent
 
-	// name of the `cp_module`
+	// name of the `cp_module`, balancer0 for example
 	name string
 
 	config *ModuleInstanceConfig
 
-	// instance owns session table
-	sessionTable SessionTable
+	vs []VirtualService
+
+	// instance owns session table, service registry and wlc info
+	state BalancerState
 
 	// `cp_module`
 	moduleConfig ModuleConfig
 
 	// buffer of real updates
 	realUpdateBuffer RealUpdateBuffer
+}
+
+func (instance *ModuleInstance) VirtualServices() []VirtualService {
+	return instance.vs
 }
 
 // Create new balancer module instance.
@@ -178,12 +120,14 @@ func NewModuleInstance(
 	name string,
 	config *ModuleInstanceConfig,
 	sessionTableSize uint64,
+	timeouts *SessionsTimeouts,
 ) (*ModuleInstance, error) {
-	sessionTable, err := NewSessionTable(agent, sessionTableSize)
+	vs := make([]VirtualService, 0)
+	state, err := NewState(agent, sessionTableSize, timeouts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create session table: %w", err)
+		return nil, fmt.Errorf("failed to create state: %w", err)
 	}
-	moduleConfig, err := NewModuleConfig(agent, &sessionTable, config, name)
+	moduleConfig, err := state.NewModuleConfig(agent, config, name, &vs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cp module: %w", err)
 	}
@@ -194,15 +138,39 @@ func NewModuleInstance(
 		agent:            agent,
 		name:             name,
 		config:           config,
-		sessionTable:     sessionTable,
 		moduleConfig:     moduleConfig,
+		state:            state,
 		realUpdateBuffer: NewRealUpdateBuffer(),
+		vs:               vs,
 	}, nil
 }
 
 func (instance *ModuleInstance) Free() {
-	FreeSessionTable(&instance.sessionTable)
-	FreeModuleConfig(&instance.moduleConfig)
+	instance.state.Free()
+	instance.moduleConfig.Free()
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func (instance *ModuleInstance) StateInfo() (*StateInfo, error) {
+	return instance.state.Info()
+}
+
+func (instance *ModuleInstance) ConfigInfo(
+	device string,
+	pipeline string,
+	function string,
+	chain string,
+) (*ConfigInfo, error) {
+	// todo: check if device, pipeline, function or chain is empty and traverse all variants then
+	return instance.Info(
+		instance.agent.DPConfig(),
+		device,
+		pipeline,
+		function,
+		chain,
+		instance.name,
+	)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -212,11 +180,12 @@ func (instance *ModuleInstance) Free() {
 // Clears update reals buffer.
 // Insert created config into dataplane registry.
 func (instance *ModuleInstance) UpdateConfig(config *ModuleInstanceConfig) error {
-	moduleConfig, err := NewModuleConfig(
+	instance.vs = make([]VirtualService, 0)
+	moduleConfig, err := instance.state.NewModuleConfig(
 		instance.agent,
-		&instance.sessionTable,
 		config,
 		instance.name,
+		&instance.vs,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create cp module: %w", err)
@@ -224,6 +193,7 @@ func (instance *ModuleInstance) UpdateConfig(config *ModuleInstanceConfig) error
 	if err = moduleConfig.InsertIntoRegistry(instance.agent); err != nil {
 		return fmt.Errorf("failed to insert updated config into dataplane registry: %w", err)
 	}
+	instance.config = config
 	instance.moduleConfig = moduleConfig
 	instance.realUpdateBuffer.Clear()
 	return nil
@@ -245,25 +215,19 @@ func (instance *ModuleInstance) GetConfig() *ModuleInstanceConfig {
 // If `buffer` flag is specified, append updates to buffer.
 // Else, make provided updates and CLEAR update buffer (without applying).
 func (instance *ModuleInstance) UpdateReals(
-	updates []*balancerpb.RealUpdate,
+	updates []*RealUpdate,
 	buffer bool,
 ) error {
-	validated := make([]*RealUpdate, 0)
 	for idx, update := range updates {
-		validated_update, err := instance.config.ValidateRealUpdate(update)
-		if err != nil {
-			return fmt.Errorf("update request no. %d is invalid: %w", idx+1, err)
+		if err := instance.config.ValidateRealUpdate(update); err != nil {
+			return fmt.Errorf("update request no. %d is invalid: %w", idx, err)
 		}
-		if validated_update == nil {
-			return fmt.Errorf("update request no. %d is invalid", idx+1)
-		}
-		validated = append(validated, validated_update)
 	}
 	if buffer {
-		instance.realUpdateBuffer.Append(validated)
+		instance.realUpdateBuffer.Append(updates)
 	} else {
 		newConfig := instance.config.Clone()
-		for idx, update := range validated {
+		for idx, update := range updates {
 			if err := newConfig.UpdateReal(update); err != nil {
 				return fmt.Errorf("failed to make update for real no. %d: %s", idx+1, err)
 			}
@@ -297,12 +261,10 @@ func (instance *ModuleInstance) FlushRealUpdatesBuffer() (uint32, error) {
 
 // Extend session table if it is filled enough and free unused data.
 func (instance *ModuleInstance) CheckSessionTable() error {
-	err := ExtendSessionTable(&instance.sessionTable, false)
-	if err != nil {
+	if err := instance.state.ExtendSessionTable(false); err != nil {
 		return fmt.Errorf("failed to extend session table: %w", err)
 	}
-	err = FreeUnusedInSessionTable(&instance.sessionTable)
-	if err != nil {
+	if err := instance.state.FreeUnusedInSessionTable(); err != nil {
 		return fmt.Errorf("failed to free unused data in session table: %w", err)
 	}
 	return nil
@@ -310,9 +272,94 @@ func (instance *ModuleInstance) CheckSessionTable() error {
 
 // Force session table extension (for example, if there are many warnings about table overflow)
 func (instance *ModuleInstance) ForceExtendSessionTable() error {
-	err := ExtendSessionTable(&instance.sessionTable, false)
-	if err != nil {
+	if err := instance.state.ExtendSessionTable(true); err != nil {
 		return fmt.Errorf("failed to extend session table: %w", err)
 	}
 	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+func (instance *ModuleInstance) UpdateWlc() error {
+	var updated bool = false
+	for idx := range instance.vs {
+		vs := &instance.vs[idx]
+		if vs.Wlc != nil {
+			for realIdx := range vs.Reals {
+				real := &vs.Reals[realIdx]
+				if real.Config.Enabled {
+					currentConnections, err := instance.state.RealActiveSessionCount(
+						uint64(real.RegistryIdx),
+					)
+					if err != nil {
+						return fmt.Errorf(
+							"failed to get active session count for real %d: %w",
+							real.RegistryIdx,
+							err,
+						)
+					}
+					vs.Wlc.UpdateActiveConnections(uint64(real.RegistryIdx), currentConnections)
+				}
+			}
+			if vs.Wlc.RecalculateWlcWeights() {
+				updated = true
+			}
+		}
+	}
+	if updated {
+		config := instance.config
+		instance.UpdateConfig(config)
+	}
+	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+// todo: traverse over all devices, pipelines, functions, chains and names
+func (balancer *ModuleInstance) Info(
+	dpConfig *ffi.DPConfig,
+	device string,
+	pipeline string,
+	function string,
+	chain string,
+	name string,
+) (*ConfigInfo, error) {
+	counters := dpConfig.ModuleCounters(device, pipeline, function, chain, "balancer", name)
+	configInfo := ConfigInfo{
+		Vs: make([]ConfigVsInfo, 0, len(balancer.vs)),
+	}
+	for vsIdx := range balancer.vs {
+		vs := &balancer.vs[vsIdx]
+		vsCounters := findVsCounters(vs, counters)
+		if vsCounters == nil {
+			return nil, fmt.Errorf("failed to find counters for vs %d", vs.RegistryIdx)
+		}
+		vsInfo := ConfigVsInfo{
+			Address:    vs.Info.Address,
+			Port:       vs.Info.Port,
+			Proto:      vs.Info.Proto,
+			AllowedSrc: vs.Info.AllowedSrc,
+			Reals:      make([]ConfigRealInfo, 0, len(vs.Reals)),
+			Flags:      vs.Info.Flags,
+			Stats:      vsStatsFromCounters(vsCounters.Values),
+		}
+		for realIdx := range len(vs.Reals) {
+			real := &vs.Reals[realIdx]
+			realCounters := findRealCounters(real, counters)
+			if realCounters == nil {
+				return nil, fmt.Errorf("failed to find counters for real %d", real.RegistryIdx)
+			}
+			realInfo := ConfigRealInfo{
+				Weight:  real.Config.Weight,
+				DstAddr: real.Config.DstAddr,
+				SrcAddr: real.Config.SrcAddr,
+				SrcMask: real.Config.SrcMask,
+				Enabled: real.Config.Enabled,
+				Stats:   realStatsFromCounters(realCounters.Values),
+			}
+			vsInfo.Reals = append(vsInfo.Reals, realInfo)
+		}
+		configInfo.Vs = append(configInfo.Vs, vsInfo)
+	}
+	return &configInfo, nil
 }

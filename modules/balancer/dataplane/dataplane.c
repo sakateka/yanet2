@@ -3,15 +3,17 @@
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
+#include "common/memory_address.h"
 #include "controlplane/config/econtext.h"
+#include "ctx.h"
 #include "dataplane.h"
 #include "dataplane/config/zone.h"
+#include "lookup.h"
 #include "meta.h"
 #include "modules/balancer/dataplane/module.h"
 #include "real.h"
 #include "select.h"
 #include "tunnel.h"
-#include "vs.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -23,15 +25,22 @@ void
 handle_packets(
 	struct balancer_module_config *config,
 	struct packet_front *packet_front,
+	struct module_ectx *ectx,
 	uint32_t worker_idx,
 	uint32_t now
 ) {
+	struct packet_ctx ctx;
+	packet_ctx_setup(&ctx, worker_idx, ectx, config);
+
 	struct packet *packet;
 	while ((packet = packet_list_pop(&packet_front->input)) != NULL) {
+		// set incoming packet
+		packet_ctx_incoming_packet(&ctx, packet);
+
 		// 1. Lookup single virtual service for which packet is
 		// dirrected to
 
-		struct virtual_service *vs = vs_lookup(config, packet);
+		struct virtual_service *vs = vs_lookup(&ctx, config, packet);
 
 		if (vs == NULL) { // not found virtual service
 			packet_front_drop(packet_front, packet);
@@ -51,7 +60,7 @@ handle_packets(
 		// 3. Select real packet for which packet will be forwarded
 
 		struct real *rs =
-			select_real(config, now, worker_idx, vs, &meta);
+			select_real(&ctx, config, now, worker_idx, vs, &meta);
 		if (rs == NULL) { // failed to select real
 			packet_front_drop(packet_front, packet);
 			continue;
@@ -60,10 +69,7 @@ handle_packets(
 		// 4. Tunnel packet to forward in to the selected real
 
 		res = tunnel_packet(vs->flags, rs, packet);
-		if (res != 0) { // failed to tunnel packet
-			packet_front_drop(packet_front, packet);
-			continue;
-		}
+		assert(res == 0);
 
 		// 5. Pass packet to the next module
 
@@ -88,7 +94,7 @@ balancer_handle_packets(
 
 	uint32_t worker_idx = dp_worker->idx;
 
-	handle_packets(config, packet_front, worker_idx, now);
+	handle_packets(config, packet_front, module_ectx, worker_idx, now);
 }
 
 struct module *

@@ -1,6 +1,4 @@
-subdir('utils')
+# subdir('utils')
 subdir('ring')
-subdir('session_table')
-subdir('packet_handler')
-subdir('shm')
+# subdir('shm')
 subdir('balancer')

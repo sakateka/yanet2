@@ -1,6 +1,7 @@
 #include "module.h"
+#include "counter.h"
+#include "lookup.h"
 
-#include "common/container_of.h"
 #include "common/lpm.h"
 #include "common/memory.h"
 #include "common/memory_address.h"
@@ -12,7 +13,6 @@
 #include "../dataplane/real.h"
 #include "../dataplane/vs.h"
 
-#include "modules/balancer/dataplane/session.h"
 #include "ring.h"
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -29,10 +29,9 @@ struct cp_module *
 balancer_module_config_create(
 	struct agent *agent,
 	const char *name,
-	struct balancer_session_table *session_table,
+	struct balancer_state *state,
 	size_t vs_count,
-	struct balancer_vs_config **vs_configs,
-	struct balancer_sessions_timeouts *sessions_timeouts
+	struct balancer_vs_config **vs_configs
 ) {
 	struct balancer_module_config *balancer_config =
 		(struct balancer_module_config *)memory_balloc(
@@ -54,11 +53,8 @@ balancer_module_config_create(
 		goto free_config;
 	}
 
-	// Set sessions timeouts
-	balancer_config->timeouts = *sessions_timeouts;
-
-	// Set session table
-	SET_OFFSET_OF(&balancer_config->session_table, session_table);
+	// Set balancer state
+	SET_OFFSET_OF(&balancer_config->state, state);
 
 	// Set default values to safe free on error
 	balancer_config->vs_count = 0;
@@ -69,6 +65,14 @@ balancer_module_config_create(
 	if (ret < 0) {
 		goto free_config;
 	}
+
+	// init module config counters
+
+	balancer_config->counter_id = counter_registry_register(
+		&balancer_config->cp_module.counter_registry,
+		"balancer_counter",
+		MODULE_CONFIG_COUNTER_SIZE
+	);
 
 	return &balancer_config->cp_module;
 
@@ -88,6 +92,9 @@ balancer_module_config_free(struct cp_module *config) {
 
 	for (size_t i = 0; i < balancer_config->vs_count; ++i) {
 		struct virtual_service *vs = ADDR_OF(&balancer_config->vs) + i;
+		if (!(vs->flags & VS_PRESENT_IN_CONFIG_FLAG)) {
+			continue;
+		}
 		lpm_free(&vs->src_filter);
 		ring_free(&vs->real_ring);
 	}
