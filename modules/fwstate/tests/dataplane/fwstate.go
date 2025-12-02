@@ -44,13 +44,14 @@ addr_of(void **field) {
 */
 import "C"
 import (
+	"fmt"
 	"net/netip"
 	"runtime"
 	"unsafe"
 
 	"github.com/gopacket/gopacket"
 
-	"github.com/yanet-platform/yanet2/tests/go/common"
+	"github.com/yanet-platform/yanet2/common/go/dataplane"
 )
 
 func memCtxCreate() *C.struct_memory_context {
@@ -122,7 +123,7 @@ func fwstateModuleConfig(memCtx *C.struct_memory_context) *C.struct_fwstate_modu
 	// Configure sync settings
 	// Multicast IPv6 address: ff02::1
 	multicastAddr := [16]C.uint8_t{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		cfg.sync_config.dst_addr_multicast[i] = multicastAddr[i]
 	}
 	cfg.sync_config.port_multicast = C.uint16_t(0x0f27) // 9999 in network byte order
@@ -138,19 +139,22 @@ func fwstateModuleConfig(memCtx *C.struct_memory_context) *C.struct_fwstate_modu
 	return m
 }
 
-func fwstateHandlePackets(mc *C.struct_fwstate_module_config, packets ...gopacket.Packet) common.PacketFrontResult {
-	payload := common.PacketsToPaylod(packets)
-	pf := common.PacketFrontFromPayload(payload)
-	common.ParsePackets(pf)
+func fwstateHandlePackets(mc *C.struct_fwstate_module_config, packets ...gopacket.Packet) (*dataplane.PacketFrontPayload, error) {
+	pinner := runtime.Pinner{}
+	defer pinner.Unpin()
+
+	pf, err := dataplane.NewPacketFrontFromPackets(&pinner, packets...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create packet front: %w", err)
+	}
 
 	// Create a dummy dp_worker
 	dpWorker := &C.struct_dp_worker{
 		idx: 0,
 	}
-
 	C.test_fwstate_handle_packets(dpWorker, &mc.cp_module, (*C.struct_packet_front)(unsafe.Pointer(pf)))
-	result := common.PacketFrontToPayload(pf)
-	return result
+	result := pf.Payload()
+	return &result, nil
 }
 
 // createSyncFrame creates a properly formatted fw_state_sync_frame
@@ -167,12 +171,12 @@ func createSyncFrame(proto uint8, addrType uint8, srcPort uint16, dstPort uint16
 
 	// Copy IPv6 addresses if provided
 	if len(dstIP6) == 16 {
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			framePtr.dst_ip6[i] = C.uint8_t(dstIP6[i])
 		}
 	}
 	if len(srcIP6) == 16 {
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			framePtr.src_ip6[i] = C.uint8_t(srcIP6[i])
 		}
 	}
@@ -206,8 +210,8 @@ func CheckStateExists(
 	defer pinner.Unpin()
 
 	if isIPv6 {
-		cfg_real := (*C.struct_fwstate_config)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(cfg))))
-		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfg_real.fw6state))))
+		cfgReal := (*C.struct_fwstate_config)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(cfg))))
+		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfgReal.fw6state))))
 		key6 := C.struct_fw6_state_key{}
 
 		key6.proto = C.uint16_t(proto)
@@ -226,8 +230,8 @@ func CheckStateExists(
 		keyPtr = unsafe.Pointer(&key6)
 
 	} else {
-		cfg_real := (*C.struct_fwstate_config)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(cfg))))
-		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfg_real.fw4state))))
+		cfgReal := (*C.struct_fwstate_config)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(cfg))))
+		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfgReal.fw4state))))
 		key4 := C.struct_fw4_state_key{}
 
 		key4.proto = C.uint16_t(proto)

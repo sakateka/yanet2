@@ -15,13 +15,14 @@
 #include "common/memory.h"
 #include "common/memory_address.h"
 #include "dataplane/module/module.h"
-#include "dataplane/module/testing.h"
 #include "dataplane/packet/packet.h"
 #include "lib/fwstate/config.h"
 #include "lib/fwstate/fwmap.h"
 #include "lib/fwstate/types.h"
 #include "modules/fwstate/dataplane/config.h"
 #include "modules/fwstate/dataplane/dataplane.h"
+
+#include "lib/utils/packet.h"
 
 #define ARENA_SIZE (64 << 20)
 #define MAX_SYNC_PACKETS 16
@@ -60,10 +61,13 @@ worker_packet_alloc(struct dp_worker *worker) {
 			    &fuzz_params.sync_packets[i].in_use, &expected, true
 		    )) {
 			struct rte_mbuf *m = fuzz_params.sync_packets[i].mbuf;
-			struct test_data empty_data = {
-				.payload = NULL, .size = 0
+			struct packet_data empty = {
+				.data = NULL,
+				.size = 0,
+				.rx_device_id = 0,
+				.tx_device_id = 0,
 			};
-			testing_init_mbuf(m, empty_data, MBUF_MAX_SIZE);
+			init_mbuf(m, &empty, MBUF_MAX_SIZE);
 
 			struct packet *p = mbuf_to_packet(m);
 			memset(p, 0, sizeof(struct packet));
@@ -312,7 +316,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { // NOLINT
 	// Reset sync packets before processing
 	reset_sync_packets();
 
-	struct test_data payload[1];
+	struct packet_data payload = {0};
 	uint8_t packet_buffer[MBUF_MAX_SIZE];
 
 	// If input size is a multiple of sync frame size (56 bytes),
@@ -325,23 +329,25 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { // NOLINT
 					sizeof(struct rte_udp_hdr);
 
 		build_sync_packet(packet_buffer, data, size);
-		payload[0].payload = packet_buffer;
-		payload[0].size = hdr_size + size;
+		payload.data = packet_buffer;
+		payload.size = hdr_size + size;
 	} else {
 		// Use raw fuzzer input for other packet types
-		payload[0].payload = data;
-		payload[0].size = size;
+		payload.data = data;
+		payload.size = size;
 	}
 
-	struct packet_front *pf = testing_packet_front(
-		payload,
-		fuzz_params.payload_arena,
-		sizeof(struct packet_front) + MBUF_MAX_SIZE * 4,
+	struct packet_front pf;
+	packet_front_init(&pf);
+	fill_packet_list_arena(
+		&pf.input,
 		1,
-		MBUF_MAX_SIZE
+		&payload,
+		MBUF_MAX_SIZE,
+		fuzz_params.payload_arena,
+		MBUF_MAX_SIZE * 4
 	);
-
-	parse_packet(pf->input.first);
+	parse_packet(pf.input.first);
 	struct module_ectx module_ectx;
 	SET_OFFSET_OF(&module_ectx.cp_module, fuzz_params.cp_module);
 
@@ -349,11 +355,11 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { // NOLINT
 	struct dp_worker worker = {.idx = 0};
 
 	// Process packet through fwstate module
-	fuzz_params.module->handler(&worker, &module_ectx, pf);
+	fuzz_params.module->handler(&worker, &module_ectx, &pf);
 
 	// Free any sync packets that were added to output
 	struct packet *packet;
-	while ((packet = packet_list_pop(&pf->output)) != NULL) {
+	while ((packet = packet_list_pop(&pf.output)) != NULL) {
 		worker_packet_free(packet);
 	}
 

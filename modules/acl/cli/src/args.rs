@@ -2,8 +2,33 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 pub enum ModeCmd {
+    Delete(DeleteCmd),
+    Update(UpdateCmd),
     Show(ShowConfigCmd),
     SyncFwstateConfig(SyncFwstateConfigCmd),
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct DeleteCmd {
+    /// The name of the module to delete
+    #[arg(long = "cfg", short)]
+    pub config_name: String,
+    /// Dataplane instances from which to delete config
+    #[arg(long, short, required = true)]
+    pub instance: u32,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct UpdateCmd {
+    /// The name of the module to operate on.
+    #[arg(long = "cfg", short)]
+    pub config_name: String,
+    /// Dataplane instances where the changes should be applied.
+    #[arg(long, short, required = true)]
+    pub instance: u32,
+    /// Ruleset file name.
+    #[arg(required = true, long = "rules", value_name = "rules")]
+    pub rules: String,
 }
 
 #[derive(Debug, Clone, Parser)]

@@ -8,15 +8,16 @@ import (
 	"github.com/gopacket/gopacket/layers"
 	"github.com/stretchr/testify/require"
 
-	"github.com/yanet-platform/yanet2/tests/go/common"
+	"github.com/yanet-platform/yanet2/common/go/xerror"
+	"github.com/yanet-platform/yanet2/common/go/xpacket"
 )
 
 // createSyncPacket creates a firewall state sync packet
 // with VLAN + IPv6 + UDP + sync frame structure
 func createSyncPacket(t *testing.T, isExternal bool, proto uint8) gopacket.Packet {
 	eth := layers.Ethernet{
-		SrcMAC:       common.Unwrap(net.ParseMAC("02:00:00:00:00:00")),
-		DstMAC:       common.Unwrap(net.ParseMAC("33:33:00:00:00:01")), // Multicast
+		SrcMAC:       xerror.Unwrap(net.ParseMAC("02:00:00:00:00:00")),
+		DstMAC:       xerror.Unwrap(net.ParseMAC("33:33:00:00:00:01")), // Multicast
 		EthernetType: layers.EthernetTypeDot1Q,
 	}
 
@@ -53,7 +54,7 @@ func createSyncPacket(t *testing.T, isExternal bool, proto uint8) gopacket.Packe
 
 	payload := gopacket.Payload(syncFrame)
 
-	return common.LayersToPacket(t, &eth, &vlan, &ip6, &udp, &payload)
+	return xpacket.LayersToPacket(t, &eth, &vlan, &ip6, &udp, &payload)
 }
 
 func TestFWStateInternalPacket(t *testing.T) {
@@ -64,7 +65,7 @@ func TestFWStateInternalPacket(t *testing.T) {
 	memCtx := memCtxCreate()
 	defer memCtxDestroy(memCtx)
 	m := fwstateModuleConfig(memCtx)
-	result := fwstateHandlePackets(m, pkt)
+	result := xerror.Unwrap(fwstateHandlePackets(m, pkt))
 
 	// Internal packets should be in output
 	require.NotEmpty(t, result.Output, "Internal packet should be forwarded")
@@ -79,7 +80,7 @@ func TestFWStateExternalPacket(t *testing.T) {
 	memCtx := memCtxCreate()
 	defer memCtxDestroy(memCtx)
 	m := fwstateModuleConfig(memCtx)
-	result := fwstateHandlePackets(m, pkt)
+	result := xerror.Unwrap(fwstateHandlePackets(m, pkt))
 
 	// External packets should be dropped
 	require.Empty(t, result.Output, "External packet should not be forwarded")
@@ -89,8 +90,8 @@ func TestFWStateExternalPacket(t *testing.T) {
 func TestFWStateNonSyncPacket(t *testing.T) {
 	// Create a regular (non-sync) packet
 	eth := layers.Ethernet{
-		SrcMAC:       common.Unwrap(net.ParseMAC("00:00:00:00:00:01")),
-		DstMAC:       common.Unwrap(net.ParseMAC("00:11:22:33:44:55")),
+		SrcMAC:       xerror.Unwrap(net.ParseMAC("00:00:00:00:00:01")),
+		DstMAC:       xerror.Unwrap(net.ParseMAC("00:11:22:33:44:55")),
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 
@@ -109,13 +110,13 @@ func TestFWStateNonSyncPacket(t *testing.T) {
 	udp.SetNetworkLayerForChecksum(&ip4)
 
 	payload := gopacket.Payload([]byte("test data"))
-	pkt := common.LayersToPacket(t, &eth, &ip4, &udp, &payload)
+	pkt := xpacket.LayersToPacket(t, &eth, &ip4, &udp, &payload)
 	t.Log("Non-sync packet:", pkt)
 
 	memCtx := memCtxCreate()
 	defer memCtxDestroy(memCtx)
 	m := fwstateModuleConfig(memCtx)
-	result := fwstateHandlePackets(m, pkt)
+	result := xerror.Unwrap(fwstateHandlePackets(m, pkt))
 
 	// Non-sync packets should pass through
 	require.NotEmpty(t, result.Output, "Non-sync packet should pass through")
@@ -131,7 +132,7 @@ func TestFWStateStateCreation(t *testing.T) {
 	memCtx := memCtxCreate()
 	defer memCtxDestroy(memCtx)
 	m := fwstateModuleConfig(memCtx)
-	result := fwstateHandlePackets(m, pkt)
+	result := xerror.Unwrap(fwstateHandlePackets(m, pkt))
 
 	// Verify packet was processed
 	require.NotEmpty(t, result.Output, "Internal packet should be forwarded")

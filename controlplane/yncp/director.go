@@ -89,11 +89,6 @@ func NewDirector(cfg *Config, options ...DirectorOption) (*Director, error) {
 		return nil, fmt.Errorf("failed to initialize route built-in module: %w", err)
 	}
 
-	aclModule, err := acl.NewACLModule(cfg.Modules.ACL, log)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize acl built-in module: %w", err)
-	}
-
 	decapModule, err := decap.NewDecapModule(cfg.Modules.Decap, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize decap built-in module: %w", err)

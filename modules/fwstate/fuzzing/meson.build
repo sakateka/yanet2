@@ -1,9 +1,9 @@
 fuzz_targets = {
   'fwstate': [
-    lib_testing_module_dp_dep,
     lib_packet_dp_dep,
     lib_fwstate_dp_dep,
     lib_fwstate_dep,
+    lib_lib_utils_dep,
   ],
 }
 

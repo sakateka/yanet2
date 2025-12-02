@@ -13,14 +13,11 @@ use serde::{Deserialize, Serialize};
 use ptree::TreeBuilder;
 
 use aclpb::{
-    DeleteConfigRequest,
-    // ListConfigsRequest, ShowConfigRequest, ShowConfigResponse,
-    SyncFwStateConfigRequest,
-    UpdateConfigRequest,
-    acl_service_client::AclServiceClient,
+    DeleteConfigRequest, ListConfigsRequest, ShowConfigRequest, ShowConfigResponse, SyncFwStateConfigRequest,
+    UpdateConfigRequest, acl_service_client::AclServiceClient,
 };
 
-use args::{ModeCmd, OutputFormat, ShowConfigCmd, SyncFwstateConfigCmd};
+use args::{DeleteCmd, ModeCmd, OutputFormat, ShowConfigCmd, SyncFwstateConfigCmd, UpdateCmd};
 
 mod args;
 
@@ -53,42 +50,13 @@ pub struct Cmd {
     pub verbose: u8,
 }
 
-#[derive(Debug, Clone, Parser)]
-pub enum ModeCmd {
-    Delete(DeleteCmd),
-    Update(UpdateCmd),
-}
-
-#[derive(Debug, Clone, Parser)]
-pub struct DeleteCmd {
-    /// The name of the module to delete
-    #[arg(long = "cfg", short)]
-    pub config_name: String,
-    /// Dataplane instances from which to delete config
-    #[arg(long, short, required = true)]
-    pub instance: u32,
-}
-
-#[derive(Debug, Clone, Parser)]
-pub struct UpdateCmd {
-    /// The name of the module to operate on.
-    #[arg(long = "cfg", short)]
-    pub config_name: String,
-    /// Dataplane instances where the changes should be applied.
-    #[arg(long, short, required = true)]
-    pub instance: u32,
-    /// Ruleset file name.
-    #[arg(required = true, long = "rules", value_name = "rules")]
-    pub rules: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct VlanRange {
     from: u32,
     to: u32,
 }
 
-impl From<VlanRange> for code::VlanRange {
+impl From<VlanRange> for aclpb::VlanRange {
     fn from(r: VlanRange) -> Self {
         Self { from: r.from, to: r.to }
     }
@@ -100,7 +68,7 @@ struct Net {
     prefix: u32,
 }
 
-impl From<Net> for code::IpNet {
+impl From<Net> for aclpb::IpNet {
     fn from(value: Net) -> Self {
         let net: IpAddr = value.addr.parse().unwrap();
         Self {
@@ -119,19 +87,19 @@ struct Range {
     to: u32,
 }
 
-impl From<Range> for code::PortRange {
+impl From<Range> for aclpb::PortRange {
     fn from(r: Range) -> Self {
         Self { from: r.from, to: r.to }
     }
 }
 
-impl From<Range> for code::ProtoRange {
+impl From<Range> for aclpb::ProtoRange {
     fn from(r: Range) -> Self {
         Self { from: r.from, to: r.to }
     }
 }
 
-impl From<Range> for code::VlanRange {
+impl From<Range> for aclpb::VlanRange {
     fn from(r: Range) -> Self {
         Self { from: r.from, to: r.to }
     }
@@ -156,7 +124,7 @@ struct ACLRule {
     action: ActionKind,
 }
 
-impl From<ACLRule> for code::Rule {
+impl From<ACLRule> for aclpb::Rule {
     fn from(acl_rule: ACLRule) -> Self {
         Self {
             counter: acl_rule.counter,
@@ -169,8 +137,8 @@ impl From<ACLRule> for code::Rule {
             proto_ranges: acl_rule.proto_ranges.into_iter().map(|m| m.into()).collect(),
             keep_state: false,
             action: match acl_rule.action {
-                ActionKind::Allow => code::ActionKind::Pass,
-                ActionKind::Deny => code::ActionKind::Deny,
+                ActionKind::Allow => aclpb::ActionKind::Pass,
+                ActionKind::Deny => aclpb::ActionKind::Deny,
             }
             .into(),
         }
@@ -184,7 +152,7 @@ pub struct ACLConfig {
     rules: Vec<ACLRule>,
 }
 
-impl From<ACLConfig> for Vec<code::Rule> {
+impl From<ACLConfig> for Vec<aclpb::Rule> {
     fn from(config: ACLConfig) -> Self {
         config.rules.into_iter().map(From::from).collect()
     }
@@ -230,13 +198,13 @@ impl ACLService {
 
     pub async fn update_config(&mut self, cmd: UpdateCmd) -> Result<(), Box<dyn Error>> {
         let config = ACLConfig::from_file(&cmd.rules)?;
-        let rules: Vec<code::Rule> = config.into();
+        let rules: Vec<aclpb::Rule> = config.into();
         let request = UpdateConfigRequest {
             target: Some(TargetModule {
                 config_name: cmd.config_name.clone(),
                 dataplane_instance: cmd.instance,
             }),
-            rules: rules,
+            rules,
         };
         log::trace!("UpdateConfigRequest: {request:?}");
         let response = self.client.update_config(request).await?.into_inner();
@@ -334,6 +302,7 @@ async fn run(cmd: Cmd) -> Result<(), Box<dyn Error>> {
     match cmd.mode {
         ModeCmd::Delete(cmd) => service.delete_config(cmd).await,
         ModeCmd::Update(cmd) => service.update_config(cmd).await,
+        ModeCmd::Show(_) => todo!(),
         ModeCmd::SyncFwstateConfig(cmd) => service.sync_fwstate_config(cmd).await,
     }
 }
@@ -379,7 +348,10 @@ pub fn print_tree(configs: Vec<ShowConfigResponse>) -> Result<(), Box<dyn Error>
             if !config.rules.is_empty() {
                 tree.begin_child("Rules".to_string());
                 for rule in &config.rules {
-                    tree.add_empty_child(format!("Rule {}: action={}", rule.id, rule.action));
+                    tree.add_empty_child(format!(
+                        "Rule src={:?} dst={:?}: action={}",
+                        rule.srcs, rule.dsts, rule.action
+                    ));
                 }
                 tree.end_child();
             }

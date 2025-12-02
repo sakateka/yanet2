@@ -86,9 +86,9 @@ func TestWlc(t *testing.T) {
 		timeouts:         &timeouts,
 		sessionTableSize: 10000,
 	})
-	defer setup.Free()
-
 	require.NoError(t, err, "failed to setup test")
+
+	defer setup.Free()
 
 	mock := setup.mock
 	balancer := setup.balancer

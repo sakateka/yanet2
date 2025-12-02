@@ -307,7 +307,7 @@ func (s *AclService) ShowConfig(
 
 	if config, ok := s.configs[key]; ok {
 		pbConfig := &aclpb.Config{
-			Rules: make([]*aclpb.Rule, len(config.rules)),
+			Rules: make([]*aclpb.Rule, 0 /*len(config.rules)*/),
 		}
 
 		/*
