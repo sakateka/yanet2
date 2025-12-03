@@ -14,14 +14,18 @@ type Config struct {
 
 	// MemoryRequirements specifies the memory requirements for the module
 	MemoryRequirements datasize.ByteSize `yaml:"memory_requirements"`
+
+	// GatewayEndpoint is the address of the gateway service
+	GatewayEndpoint string `yaml:"gateway_endpoint"`
 }
 
 // DefaultConfig returns a default configuration for the FwState module
 func DefaultConfig() *Config {
 	return &Config{
-		Endpoint:           "[::1]:50052",
+		Endpoint:           "[::1]:0",
 		MemoryPath:         "/dev/hugepages/yanet",
 		MemoryRequirements: 64 * datasize.MB,
+		GatewayEndpoint:    "[::1]:8080",
 	}
 }
 

@@ -44,13 +44,6 @@ func NewAclService(shm *ffi.SharedMemory, agents []*ffi.Agent, log *zap.SugaredL
 	}
 }
 
-// SetGatewayEndpoint sets the gateway endpoint for inter-module communication
-func (s *AclService) SetGatewayEndpoint(endpoint string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.gatewayEndpoint = endpoint
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 type instanceKey struct {

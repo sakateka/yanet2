@@ -43,8 +43,9 @@ func NewAclModule(cfg *Config, log *zap.SugaredLogger) (*AclModule, error) {
 		return nil, fmt.Errorf("failed to attach agents: %w", err)
 	}
 
-	// Create ACL service - gateway endpoint will be set via SetGatewayEndpoint
+	// Create ACL service
 	service := NewAclService(shm, agents, log)
+	service.gatewayEndpoint = cfg.GatewayEndpoint
 
 	return &AclModule{
 		cfg:     cfg,
@@ -82,11 +83,4 @@ func (m *AclModule) Close() error {
 	}
 
 	return nil
-}
-
-// SetGatewayEndpoint implements the GatewayAwareModule interface
-// This is called by the gateway runner to provide the gateway endpoint for inter-module communication
-func (m *AclModule) SetGatewayEndpoint(endpoint string) {
-	m.service.SetGatewayEndpoint(endpoint)
-	m.log.Infow("gateway endpoint configured", zap.String("endpoint", endpoint))
 }
