@@ -140,6 +140,11 @@ fwstate_check_state(
 	uint64_t now,
 	enum sync_packet_direction *sync_required
 ) {
+	if (fwstate == NULL) {
+		*sync_required = SYNC_NONE;
+		return false;
+	}
+
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
 
 	uint64_t deadline = now;
