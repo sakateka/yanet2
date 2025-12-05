@@ -81,7 +81,6 @@ subdir('dataplane')
 subdir('mock')
 subdir('sock-send')
 subdir('tests')
-subdir('coordinator')
 
 # Define a default test setup that excludes large tests
 add_test_setup(
