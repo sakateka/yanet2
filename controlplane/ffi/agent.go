@@ -2,6 +2,8 @@ package ffi
 
 //#cgo CFLAGS: -I../../ -I../../lib
 //#cgo LDFLAGS: -L../../build/lib/controlplane/agent -lagent
+//#cgo LDFLAGS: -L../../build/lib/controlplane/diag -ldiag
+//#cgo LDFLAGS: -L../../build/common/tls_stack -ltls_stack
 //#cgo LDFLAGS: -L../../build/lib/controlplane/config -lconfig_cp
 //#cgo LDFLAGS: -L../../build/lib/counters/ -lcounters
 //#cgo LDFLAGS: -L../../build/lib/dataplane/config -lconfig_dp
@@ -69,6 +71,42 @@ func (m *Agent) CleanUp() error {
 	return err
 }
 
+// TakeError retrieves and clears the last error from the agent's diagnostic system.
+// It takes ownership of the error message from the C layer and returns it as a Go error.
+//
+// Returns:
+//   - nil if there is no error
+//   - An error containing the diagnostic message if an error occurred
+//   - An ENOMEM error if memory allocation failed while capturing the error
+func (m *Agent) TakeError() error {
+	cMsg, err := C.agent_take_error(m.ptr)
+	if cMsg == nil && err == nil {
+		return nil
+	}
+	if err != nil {
+		// then, it is enomem
+		return err
+	}
+
+	// Copy the C string to Go string before freeing
+	goMsg := C.GoString(cMsg)
+
+	// Free the C string - agent_take_error transfers ownership to the caller
+	C.free(unsafe.Pointer(cMsg))
+
+	return fmt.Errorf("%s", goMsg)
+}
+
+// CleanError clears any error stored in the agent's diagnostic system without
+// retrieving it. This is useful when you want to discard an error without
+// processing it.
+//
+// Unlike TakeError, this method does not return the error message and simply
+// resets the diagnostic state.
+func (m *Agent) CleanError() {
+	C.agent_clean_error(m.ptr)
+}
+
 func (m *Agent) AsRawPtr() unsafe.Pointer {
 	return unsafe.Pointer(m.ptr)
 }
@@ -95,11 +133,11 @@ func (m *Agent) UpdateModules(modules []ModuleConfig) error {
 		C.size_t(len(modules)),
 		&configs[0],
 	)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update modules: %w", err)
-	}
-	if rc != 0 {
-		return fmt.Errorf("failed to update modules: %d code", rc)
 	}
 
 	return nil
@@ -126,11 +164,11 @@ func (m *Agent) UpdateFunction(functionConfig FunctionConfig) error {
 		1,
 		&functions[0],
 	)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update function: %w", err)
-	}
-	if rc != 0 {
-		return fmt.Errorf("failed to update function: %d code", rc)
 	}
 
 	return nil
@@ -152,11 +190,11 @@ func (m *Agent) UpdatePipeline(pipelineConfig PipelineConfig) error {
 		1,
 		&pipelines[0],
 	)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update pipelines: %w", err)
-	}
-	if rc != 0 {
-		return fmt.Errorf("failed to update pipelines: %d code", rc)
 	}
 
 	return nil
@@ -236,11 +274,11 @@ func (m *Agent) UpdateDevices(devices []ShmDeviceConfig) error {
 		C.size_t(len(devices)),
 		&configs[0],
 	)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return fmt.Errorf("failed to update devices: %w", err)
-	}
-	if rc != 0 {
-		return fmt.Errorf("failed to update devices: %d code", rc)
 	}
 
 	return nil
@@ -256,11 +294,11 @@ func (m *Agent) DeleteFunction(name string) error {
 	defer C.free(unsafe.Pointer(cName))
 
 	rc, err := C.agent_delete_function(m.ptr, cName)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return err
-	}
-	if rc != 0 {
-		return fmt.Errorf("error code: %d", rc)
 	}
 
 	return nil
@@ -271,11 +309,11 @@ func (m *Agent) DeletePipeline(name string) error {
 	defer C.free(unsafe.Pointer(cName))
 
 	rc, err := C.agent_delete_pipeline(m.ptr, cName)
+	if rc != 0 {
+		return m.TakeError()
+	}
 	if err != nil {
 		return err
-	}
-	if rc != 0 {
-		return fmt.Errorf("error code: %d", rc)
 	}
 
 	return nil
