@@ -1,10 +1,13 @@
-use clap::{ArgAction, Parser};
+//! CLI command definitions
 
+use clap::{ArgAction, Parser, ValueEnum};
 use crate::rpc::{balancerpb, commonpb};
 
 ////////////////////////////////////////////////////////////////////////////////
+// Main Command
+////////////////////////////////////////////////////////////////////////////////
 
-/// Command line interface of the Balancer Module.
+/// Balancer module CLI
 #[derive(Debug, Clone, Parser)]
 #[command(version, about)]
 #[command(flatten_help = true)]
@@ -12,186 +15,177 @@ pub struct Cmd {
     #[clap(subcommand)]
     pub mode: Mode,
 
-    /// GRPC endpoint to send request.
+    /// gRPC endpoint to send request
     #[clap(long, default_value = "grpc://[::1]:8080", global = true)]
     pub endpoint: String,
 
-    /// Log verbosity level.
+    /// Log verbosity level
     #[clap(short, action = ArgAction::Count, global = true)]
     pub verbosity: u8,
 }
 
-/// Allows to enable balancer module with specified name.
-#[derive(Debug, Clone, Parser)]
-pub struct EnableBalancingCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
+////////////////////////////////////////////////////////////////////////////////
+// Output Format
+////////////////////////////////////////////////////////////////////////////////
 
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
-    pub instance: u32,
-
-    /// Path to the file with virtual services configuration.
-    #[arg(long = "services", short, required = true)]
-    pub services_path: String,
-
-    /// Number of sessions to reserve in the sessions table.
-    #[arg(long = "reserve", required = false, default_value_t = 256)]
-    pub sessions_table_reserve: u64,
+/// Output format options
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum OutputFormat {
+    /// JSON format
+    Json,
+    /// Tree structure
+    Tree,
+    /// Table format (default)
+    Table,
 }
 
-/// Allows to show module config with specified name.
-#[derive(Debug, Clone, Parser)]
-pub struct ShowConfigCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
-
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
-    pub instance: u32,
-}
-
-/// Allows to schedule enable of the real server.
-#[derive(Debug, Clone, Parser)]
-pub struct EnableRealCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
-
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
-    pub instance: u32,
-
-    /// Ip of the virtual service.
-    #[arg(long, required = true)]
-    pub virtual_ip: String,
-
-    /// Proto of the virtual service
-    #[arg(long, required = true)]
-    pub proto: String,
-
-    /// Port of the virtual service
-    #[arg(long, required = true)]
-    pub virtual_port: u16,
-
-    /// Ip of the real server
-    #[arg(long, short, required = true)]
-    pub real_ip: String,
-
-    /// Port of the real server
-    #[arg(long, required = false, default_value_t = 0)]
-    #[allow(unused)]
-    pub real_port: u16,
-
-    #[arg(long, required = false, default_value = None)]
-    pub real_weight: Option<u16>,
-}
-
-impl TryFrom<EnableRealCmd> for balancerpb::UpdateRealsRequest {
-    type Error = String;
-    fn try_from(cmd: EnableRealCmd) -> Result<Self, Self::Error> {
-        let proto = cmd.proto.to_lowercase();
-        let proto = match proto.as_str() {
-            "tcp" => balancerpb::TransportProto::Tcp,
-            "udp" => balancerpb::TransportProto::Udp,
-            _ => return Err(format!("unexpected proto: {}", cmd.proto)),
-        };
-
-        let result = Self {
-            target: Some(commonpb::TargetModule {
-                config_name: cmd.config_name,
-                dataplane_instance: cmd.instance,
-            }),
-            updates: vec![balancerpb::RealUpdate {
-                virtual_ip: cmd.virtual_ip.into(),
-                proto: proto as i32,
-                port: cmd.virtual_port as u32,
-                real_ip: cmd.real_ip.into(),
-                weight: cmd.real_weight.unwrap_or(0) as u32,
-                enable: true,
-            }],
-            buffer: true,
-        };
-
-        Ok(result)
+impl From<OutputFormat> for crate::output::OutputFormat {
+    fn from(format: OutputFormat) -> Self {
+        match format {
+            OutputFormat::Json => crate::output::OutputFormat::Json,
+            OutputFormat::Tree => crate::output::OutputFormat::Tree,
+            OutputFormat::Table => crate::output::OutputFormat::Table,
+        }
     }
 }
 
-/// Allows to schedule enable of the real server.
-#[derive(Debug, Clone, Parser)]
-pub struct DisableRealCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
+////////////////////////////////////////////////////////////////////////////////
+// Commands
+////////////////////////////////////////////////////////////////////////////////
 
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
+#[derive(Debug, Clone, Parser)]
+pub enum Mode {
+    /// Update balancer configuration from YAML file
+    UpdateConfig(UpdateConfigCmd),
+    /// Manage real servers
+    Reals(RealsCmd),
+    /// Show balancer configuration
+    ShowConfig(ShowConfigCmd),
+    /// List all balancer configurations
+    ListConfigs(ListConfigsCmd),
+    /// Show configuration statistics
+    ConfigStats(ConfigStatsCmd),
+    /// Show state information
+    StateInfo(StateInfoCmd),
+    /// Show active sessions information
+    SessionsInfo(SessionsInfoCmd),
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// UpdateConfig Command
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct UpdateConfigCmd {
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
+
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
     pub instance: u32,
 
-    /// Ip of the virtual service.
-    #[arg(long, required = true)]
+    /// Path to the YAML configuration file
+    #[arg(long, short = 'f')]
+    pub config_file: String,
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Reals Commands
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct RealsCmd {
+    #[clap(subcommand)]
+    pub mode: RealsMode,
+}
+
+#[derive(Debug, Clone, Parser)]
+pub enum RealsMode {
+    /// Update a real server (always buffered)
+    Update(UpdateRealCmd),
+    /// Flush buffered real updates
+    Flush(FlushRealUpdatesCmd),
+}
+
+#[derive(Debug, Clone, Parser)]
+pub struct UpdateRealCmd {
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
+
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
+    pub instance: u32,
+
+    /// IP of the virtual service
+    #[arg(long)]
     pub virtual_ip: String,
 
-    /// Proto of the virtual service
-    #[arg(long, required = true)]
+    /// Protocol of the virtual service (tcp/udp)
+    #[arg(long)]
     pub proto: String,
 
     /// Port of the virtual service
-    #[arg(long, required = true)]
+    #[arg(long)]
     pub virtual_port: u16,
 
-    /// Ip of the real server
-    #[arg(long, short, required = true)]
+    /// IP of the real server
+    #[arg(long, short)]
     pub real_ip: String,
 
-    /// Port of the real server
-    #[arg(long, required = false, default_value_t = 0)]
-    #[allow(unused)]
-    pub real_port: u16,
+    /// Enable the real server
+    #[arg(long, conflicts_with = "disable")]
+    pub enable: bool,
 
-    #[arg(long, required = false, default_value = None)]
-    pub real_weight: Option<u16>,
+    /// Disable the real server
+    #[arg(long, conflicts_with = "enable")]
+    pub disable: bool,
+
+    /// Optional new weight for the real server
+    #[arg(long)]
+    pub weight: Option<u32>,
 }
 
-impl TryFrom<DisableRealCmd> for balancerpb::UpdateRealsRequest {
+impl TryFrom<UpdateRealCmd> for balancerpb::UpdateRealsRequest {
     type Error = String;
-    fn try_from(cmd: DisableRealCmd) -> Result<Self, Self::Error> {
-        let proto = cmd.proto.to_lowercase();
-        let proto = match proto.as_str() {
+
+    fn try_from(cmd: UpdateRealCmd) -> Result<Self, Self::Error> {
+        let proto = match cmd.proto.to_lowercase().as_str() {
             "tcp" => balancerpb::TransportProto::Tcp,
             "udp" => balancerpb::TransportProto::Udp,
-            _ => return Err(format!("unexpected proto: {}", cmd.proto)),
+            _ => return Err(format!("invalid proto: {}", cmd.proto)),
         };
+
+        // If neither enable nor disable is specified, default to enable
+        let enable = !cmd.disable;
 
         Ok(Self {
             target: Some(commonpb::TargetModule {
-                config_name: cmd.config_name,
+                config_name: cmd.name,
                 dataplane_instance: cmd.instance,
             }),
             updates: vec![balancerpb::RealUpdate {
-                virtual_ip: cmd.virtual_ip.into(),
+                virtual_ip: cmd.virtual_ip.into_bytes(),
                 proto: proto as i32,
                 port: cmd.virtual_port as u32,
-                real_ip: cmd.real_ip.into(),
-                weight: cmd.real_weight.unwrap_or(0) as u32,
-                enable: false,
+                real_ip: cmd.real_ip.into_bytes(),
+                enable,
+                weight: cmd.weight.unwrap_or(0),
             }],
-            buffer: true,
+            buffer: true, // Always buffer
         })
     }
 }
 
-/// Allows to flush scheduled updates of the real servers.
 #[derive(Debug, Clone, Parser)]
 pub struct FlushRealUpdatesCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
 
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
     pub instance: u32,
 }
 
@@ -199,81 +193,161 @@ impl From<FlushRealUpdatesCmd> for balancerpb::FlushRealUpdatesRequest {
     fn from(cmd: FlushRealUpdatesCmd) -> Self {
         Self {
             target: Some(commonpb::TargetModule {
-                config_name: cmd.config_name,
+                config_name: cmd.name,
                 dataplane_instance: cmd.instance,
             }),
         }
     }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// ShowConfig Command
+////////////////////////////////////////////////////////////////////////////////
+
 #[derive(Debug, Clone, Parser)]
-#[command(flatten_help = true)]
-pub enum RealMode {
-    Enable(EnableRealCmd),
-    Disable(DisableRealCmd),
-    Flush(FlushRealUpdatesCmd),
+pub struct ShowConfigCmd {
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
+
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
+    pub instance: u32,
+
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
 }
 
-/// Allows to enable and disable reals.
-#[derive(Debug, Clone, Parser)]
-pub struct RealCmds {
-    #[clap(subcommand)]
-    pub mode: RealMode,
+impl From<&ShowConfigCmd> for balancerpb::ShowConfigRequest {
+    fn from(cmd: &ShowConfigCmd) -> Self {
+        Self {
+            target: Some(commonpb::TargetModule {
+                config_name: cmd.name.clone(),
+                dataplane_instance: cmd.instance,
+            }),
+        }
+    }
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// ListConfigs Command
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct ListConfigsCmd {
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// ConfigStats Command
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct ConfigStatsCmd {
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
+
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
+    pub instance: u32,
+
+    /// Device name
+    #[arg(long)]
+    pub device: String,
+
+    /// Pipeline name
+    #[arg(long)]
+    pub pipeline: String,
+
+    /// Function name
+    #[arg(long)]
+    pub function: String,
+
+    /// Chain name
+    #[arg(long)]
+    pub chain: String,
+
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+}
+
+impl From<&ConfigStatsCmd> for balancerpb::ConfigStatsRequest {
+    fn from(cmd: &ConfigStatsCmd) -> Self {
+        Self {
+            target: Some(commonpb::TargetModule {
+                config_name: cmd.name.clone(),
+                dataplane_instance: cmd.instance,
+            }),
+            dataplane_instance: cmd.instance,
+            device: cmd.device.clone(),
+            pipeline: cmd.pipeline.clone(),
+            function: cmd.function.clone(),
+            chain: cmd.chain.clone(),
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// StateInfo Command
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Parser)]
 pub struct StateInfoCmd {
-    /// Name of the module config.
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
 
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
-    pub instance: u32,
-}
-
-#[derive(Debug, Clone, Parser)]
-pub struct ConfigInfoCmd {
-    /// Index of the dataplane instance.
-    #[arg(long, short, required = false, default_value_t = 0)]
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
     pub instance: u32,
 
-    #[arg(long = "cfg", short = 'c')]
-    pub config_name: String,
-
-    #[arg(long)]
-    pub device: Option<String>,
-
-    #[arg(long)]
-    pub pipeline: Option<String>,
-
-    #[arg(long)]
-    pub function: Option<String>,
-
-    #[arg(long)]
-    pub chain: Option<String>,
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
 }
 
-#[derive(Debug, Clone, Parser)]
-#[command(flatten_help = true)]
-pub enum InfoMode {
-    State(StateInfoCmd),
-    Config(ConfigInfoCmd),
+impl From<&StateInfoCmd> for balancerpb::StateInfoRequest {
+    fn from(cmd: &StateInfoCmd) -> Self {
+        Self {
+            target: Some(commonpb::TargetModule {
+                config_name: cmd.name.clone(),
+                dataplane_instance: cmd.instance,
+            }),
+        }
+    }
 }
 
-/// Allows to print statistics about balancer.
-#[derive(Debug, Clone, Parser)]
-pub struct InfoCmds {
-    #[clap(subcommand)]
-    pub mode: InfoMode,
-}
+////////////////////////////////////////////////////////////////////////////////
+// SessionsInfo Command
+////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, Parser)]
-pub enum Mode {
-    Enable(EnableBalancingCmd),
-    ShowConfig(ShowConfigCmd),
-    Real(RealCmds),
-    Info(InfoCmds),
+pub struct SessionsInfoCmd {
+    /// Name of the module config
+    #[arg(long, short = 'n')]
+    pub name: String,
+
+    /// Index of the dataplane instance
+    #[arg(long, short, default_value_t = 0)]
+    pub instance: u32,
+
+    /// Output format
+    #[clap(long, value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+}
+
+impl From<&SessionsInfoCmd> for balancerpb::SessionsInfoRequest {
+    fn from(cmd: &SessionsInfoCmd) -> Self {
+        Self {
+            target: Some(commonpb::TargetModule {
+                config_name: cmd.name.clone(),
+                dataplane_instance: cmd.instance,
+            }),
+        }
+    }
 }

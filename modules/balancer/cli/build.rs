@@ -3,12 +3,18 @@ use core::error::Error;
 pub fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=../../../common/commonpb/target.proto");
     println!("cargo:rerun-if-changed=../controlplane/balancerpb/balancer.proto");
+    println!("cargo:rerun-if-changed=../controlplane/balancerpb/info.proto");
+    println!("cargo:rerun-if-changed=../controlplane/balancerpb/module.proto");
+    println!("cargo:rerun-if-changed=../controlplane/balancerpb/stats.proto");
 
     tonic_build::configure()
-        .emit_rerun_if_changed(true)
+        .emit_rerun_if_changed(false)
         .build_server(false)
         .compile_protos(
-            &["common/commonpb/target.proto", "balancerpb/balancer.proto"],
+            &[
+                "common/commonpb/target.proto",
+                "balancerpb/balancer.proto",
+            ],
             &["../../..", "../controlplane"],
         )?;
 

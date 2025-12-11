@@ -18,7 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yanet-platform/yanet2/common/go/xerror"
 	"github.com/yanet-platform/yanet2/common/go/xpacket"
-	mbalancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancer"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/module"
 	"github.com/yanet-platform/yanet2/tests/functional/framework"
 )
 
@@ -317,7 +318,7 @@ func InsertOrUpdateMSS(
 
 func ValidatePacket(
 	t *testing.T,
-	config *mbalancer.ModuleInstanceConfig,
+	config *balancer.ModuleConfig,
 	originalGoPacket gopacket.Packet,
 	resultPacket *framework.PacketInfo,
 ) {
@@ -378,11 +379,11 @@ func ValidatePacket(
 
 	// get packet proto
 
-	var packetProto mbalancer.TransportProto
+	var packetProto module.Proto
 	if originPacketProto.LayerType() == layers.LayerTypeTCP {
-		packetProto = mbalancer.Tcp
+		packetProto = module.ProtoTcp
 	} else if originPacketProto.LayerType() == layers.LayerTypeUDP {
-		packetProto = mbalancer.Udp
+		packetProto = module.ProtoUdp
 	} else {
 		t.Errorf("invalid packet protocol: %s", originPacketProto.String())
 		return
@@ -390,16 +391,16 @@ func ValidatePacket(
 
 	// todo: check tcp layers (MSS matters if FixMSS flag is enabled)
 
-	for idx := range config.Services {
-		service := &config.Services[idx]
+	for idx := range config.VirtualServices {
+		service := &config.VirtualServices[idx]
 		if reflect.DeepEqual(
-			net.IP(service.Info.Address.AsSlice()),
+			net.IP(service.Identifier.Ip.AsSlice()),
 			originalPacket.DstIP,
-		) && (service.Info.Port == originalPacket.DstPort || service.Info.Flags.PureL3) && service.Info.Proto == packetProto {
+		) && (service.Identifier.Port == originalPacket.DstPort || service.Flags.PureL3) && service.Identifier.Proto == packetProto {
 			// found service
-			if service.Info.Flags.GRE {
+			if service.Flags.GRE {
 				expectedTunnelType := "gre-ip4"
-				if service.Info.Address.Is6() {
+				if service.Identifier.Ip.Is6() {
 					expectedTunnelType = "gre-ip6"
 				}
 				assert.Equal(
@@ -411,7 +412,7 @@ func ValidatePacket(
 			}
 
 			// todo: check tcp layers (if FixMSS enabled)
-			if service.Info.Flags.FixMSS {
+			if service.Flags.FixMSS {
 				originalMSS, err := xpacket.PacketMSS(originalGoPacket)
 				hadMSS := err == nil
 
@@ -432,13 +433,18 @@ func ValidatePacket(
 				} else {
 					expectedMSS = 536
 				}
-				assert.Equal(t, expectedMSS, resultMSS, "incorrect mss after fix")
+				assert.Equal(
+					t,
+					expectedMSS,
+					resultMSS,
+					"incorrect mss after fix",
+				)
 			}
 
 			for realIdx := range service.Reals {
 				real := &service.Reals[realIdx]
 				if reflect.DeepEqual(
-					net.IP(real.DstAddr.AsSlice()),
+					net.IP(real.Identifier.Ip.AsSlice()),
 					resultPacket.DstIP,
 				) { // found real
 					assert.True(t, real.Enabled, "send packet to disabled real")
@@ -463,24 +469,24 @@ func ValidatePacket(
 
 func ValidateStateInfo(
 	t *testing.T,
-	info *mbalancer.StateInfo,
-	virtualServices []mbalancer.VirtualService,
+	info *module.BalancerInfo,
+	virtualServices []module.VirtualService,
 ) {
 	t.Helper()
 	for vsIdx := range virtualServices {
 		vs := &virtualServices[vsIdx]
-		summaryActiveSession := uint64(0)
+		summaryActiveSession := uint(0)
 		summaryPackets := uint64(0)
 		for realIdx := range vs.Reals {
 			real := &vs.Reals[realIdx]
-			summaryActiveSession += info.RealInfo[real.RegistryIdx].ActiveSessions
-			summaryPackets += info.RealInfo[realIdx].Stats.SendPackets
+			summaryActiveSession += info.RealInfo[real.RegistryIdx].ActiveSessions.Value
+			summaryPackets += info.RealInfo[realIdx].Stats.Packets
 		}
 
 		vsInfo := info.VsInfo[vs.RegistryIdx]
 		assert.Equalf(
 			t,
-			vsInfo.ActiveSessions,
+			vsInfo.ActiveSessions.Value,
 			summaryActiveSession,
 			"summary active sessions mismatch for vs %d",
 			vsIdx,

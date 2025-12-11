@@ -140,7 +140,10 @@ __ttlmap_bucket_count(size_t kv_entries) { // NOLINT
 	size_t buckets = (kv_entries + __TTLMAP_BUCKET_ENTRIES - 1) /
 			 __TTLMAP_BUCKET_ENTRIES;
 	size_t max_bit = 63 - __builtin_clzll(buckets);
-	size_t res = 1ull << (max_bit + 1);
+	if (buckets != (1ull << max_bit)) {
+		++max_bit;
+	}
+	size_t res = 1ull << max_bit;
 	return res;
 }
 
@@ -189,4 +192,30 @@ __ttlmap_bucket_count(size_t kv_entries) { // NOLINT
 			}                                                      \
 		}                                                              \
 		__count;                                                       \
+	})
+
+#define __TTLMAP_BUCKET_ITER(                                                  \
+	map_ptr, bucket_id, key_type, value_type, now, cb, data                \
+)                                                                              \
+	__extension__({                                                        \
+		int __result = 0;                                              \
+		void *__addr = __TTLMAP_BUCKET_FIND_WITH_ID(                   \
+			map_ptr, bucket_id, key_type, value_type               \
+		);                                                             \
+		__TTLMAP_BUCKET_DECLARE(key_type, value_type);                 \
+		__bucket_t *__bucket = (__bucket_t *)__addr;                   \
+		__ttlmap_lock(&__bucket->lock);                                \
+		for (size_t __i = 0; __i < __TTLMAP_BUCKET_ENTRIES; ++__i) {   \
+			if (__bucket->entries[__i].deadline > (now)) {         \
+				if ((cb)(&__bucket->entries[__i].key,          \
+					 &__bucket->entries[__i].value,        \
+					 (data))) {                            \
+					__ttlmap_unlock(&__bucket->lock);      \
+					__result = 1;                          \
+					break;                                 \
+				}                                              \
+			}                                                      \
+		}                                                              \
+		__ttlmap_unlock(&__bucket->lock);                              \
+		__result;                                                      \
 	})

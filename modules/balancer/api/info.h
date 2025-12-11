@@ -1,59 +1,26 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common/network.h"
+
+#include "stats.h"
+
 ////////////////////////////////////////////////////////////////////////////////
+
+/// Info about balancer state.
 
 // Balancer state
 struct balancer_state;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// Represents virtual service statistics.
-struct balancer_vs_stats {
-	// number of packets send to vs
-	uint64_t incoming_packets;
-
-	// number of bytes send to vs
-	uint64_t incoming_bytes;
-
-	// number of packets dropped because src address not allowed
-	uint64_t packet_src_not_allowed;
-
-	// failed to select real for the packet, because
-	// all reals are disabled
-	uint64_t no_reals;
-
-	// number of packets sent to real for which
-	// session was not created
-	uint64_t ops_packets;
-
-	// failed to create session because of session table overflow
-	uint64_t session_table_overflow;
-
-	// real with which session established is disabled
-	// and packet wont be rescheduled
-	uint64_t real_is_disabled;
-
-	// there is no established session for packet
-	// and packet does not start new session
-	uint64_t packet_not_rescheduled;
-
-	// number of sessions with virtual service
-	uint64_t created_sessions;
-
-	// number of packets successfully send to the selected real
-	uint64_t outgoing_packets;
-
-	// number of bytes successfully send to the selected real
-	uint64_t outgoing_bytes;
-};
-
 /// Persistent config-independent info about virtual service
-struct balancer_vs_info {
+struct balancer_virtual_service_info {
 	// ip
-	uint8_t ip[16];
+	uint8_t ip[NET6_LEN];
 	int ip_proto; // IPPROTO_IPV4 or IPPROTO_IPV6
 
 	// port of the virtual service
@@ -62,9 +29,6 @@ struct balancer_vs_info {
 
 	// virtual service transport protocol
 	int transport_proto; // IPPROTO_TCP or IPPROTO_UDP
-
-	// number of active session
-	size_t active_sessions;
 
 	// last packet timestamp
 	uint32_t last_packet_timestamp;
@@ -75,42 +39,33 @@ struct balancer_vs_info {
 
 struct balancer_virtual_services_info {
 	size_t count;
-	struct balancer_vs_info *info;
+	struct balancer_virtual_service_info *info;
 };
 
 /// Fills virtual services info.
 /// @returns -1 on error.
 int
-balancer_fill_vs_info(
+balancer_fill_virtual_services_info(
 	struct balancer_state *state,
 	struct balancer_virtual_services_info *info
 );
 
+/// Fills virtual service info.
+/// @returns -1 on error.
+int
+balancer_fill_virtual_service_info(
+	struct balancer_state *state,
+	size_t virtual_service_idx,
+	struct balancer_virtual_service_info *info
+);
+
 void
-balancer_free_vs_info(
+balancer_free_virtual_services_info(
 	struct balancer_state *state,
 	struct balancer_virtual_services_info *info
 );
 
 ////////////////////////////////////////////////////////////////////////////////
-
-// Represents real statistics.
-struct balancer_real_stats {
-	// number of packets which arrived when real was disabled
-	uint64_t disabled;
-
-	// number of ops packets
-	uint64_t ops_packets;
-
-	// number of sessions created with real
-	uint64_t created_sessions;
-
-	// number of packets send to real
-	uint64_t packets;
-
-	// number of bytes send to real
-	uint64_t bytes;
-};
 
 /// Persistent config-independent info about real
 struct balancer_real_info {
@@ -128,9 +83,6 @@ struct balancer_real_info {
 
 	// virtual service transport protocol
 	int transport_proto; // IPPROTO_TCP or IPPROTO_UDP
-
-	// number of active connections
-	size_t active_sessions;
 
 	// last packet timestamp
 	uint32_t last_packet_timestamp;
@@ -163,4 +115,62 @@ balancer_fill_real_info(
 void
 balancer_free_reals_info(
 	struct balancer_state *state, struct balancer_reals_info *info
+);
+
+////////////////////////////////////////////////////////////////////////////////
+
+// Info about balancer state.
+struct balancer_info {
+	// Statistics of the balancer.
+	struct balancer_stats stats;
+
+	// Info about virtual services.
+	struct balancer_virtual_services_info virtual_services;
+
+	// Info about real services.
+	struct balancer_reals_info reals;
+};
+
+int
+balancer_fill_info(struct balancer_state *state, struct balancer_info *info);
+
+void
+balancer_free_info(struct balancer_state *state, struct balancer_info *info);
+
+////////////////////////////////////////////////////////////////////////////////
+
+// Info about balancer session between
+// client and reals server.
+struct balancer_session_info {
+	uint32_t vs_id;
+
+	uint8_t client_ip[16];
+	uint16_t client_port;
+
+	uint32_t real_id;
+	uint32_t create_timestamp;
+	uint32_t last_packet_timestamp;
+	uint32_t timeout;
+};
+
+// Info about balancer sessions with
+// possible duplicates.
+struct balancer_sessions_info {
+	size_t count;
+	struct balancer_session_info *sessions;
+};
+
+// Fill info about active sessions with possible duplicates.
+int
+balancer_fill_sessions_info(
+	struct balancer_state *state,
+	struct balancer_sessions_info *info,
+	uint32_t now,
+	bool count_only
+);
+
+// Free info about active sessions.
+void
+balancer_free_sessions_info(
+	struct balancer_state *state, struct balancer_sessions_info *info
 );

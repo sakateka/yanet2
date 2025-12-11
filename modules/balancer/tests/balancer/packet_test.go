@@ -11,8 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/yanet-platform/yanet2/common/go/xpacket"
 	mock "github.com/yanet-platform/yanet2/mock/go"
-	mbalancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
+	balancermod "github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancer"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/module"
 	"github.com/yanet-platform/yanet2/tests/functional/framework"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 // test gre, fix mss, encap, not standard packets
@@ -21,10 +24,10 @@ import (
 
 ////////////////////////////////////////////////////////////////////////////////
 
-func allCombinationsConfig() (*mbalancer.ModuleInstanceConfig, *mbalancer.SessionsTimeouts) {
-	serviceConfigs := make([]mbalancer.VirtualServiceConfig, 0, 2*2*2*2*2)
+func allCombinationsConfig() (*balancerpb.ModuleConfig, *balancerpb.SessionsTimeouts) {
+	serviceConfigs := make([]*balancerpb.VirtualService, 0, 2*2*2*2*2)
 	for _, vsAddrVersion := range []int{4, 6} {
-		for _, proto := range []mbalancer.TransportProto{mbalancer.Tcp, mbalancer.Udp} {
+		for _, proto := range []balancerpb.TransportProto{balancerpb.TransportProto_TCP, balancerpb.TransportProto_UDP} {
 			for _, greEnabled := range []bool{false, true} {
 				for _, fixMssEnabled := range []bool{false, true} {
 					for _, realAddr := range []netip.Addr{IpAddr("10.1.1.1"), IpAddr("fe80::1")} {
@@ -37,39 +40,57 @@ func allCombinationsConfig() (*mbalancer.ModuleInstanceConfig, *mbalancer.Sessio
 							)
 							allowed = IpPrefix("ffff::0/16")
 						}
-						serviceConfig := mbalancer.VirtualServiceConfig{
-							Info: mbalancer.VirtualServiceInfo{
-								Address: vsAddr,
-								Proto:   proto,
-								Port:    8080,
-								AllowedSrc: []netip.Prefix{
-									allowed,
-								},
-								Flags: mbalancer.VsFlags{
-									GRE:    greEnabled,
-									OPS:    false,
-									PureL3: false,
-									FixMSS: fixMssEnabled,
+						serviceConfig := &balancerpb.VirtualService{
+							Addr:  vsAddr.AsSlice(),
+							Proto: proto,
+							Port:  8080,
+							AllowedSrcs: []*balancerpb.Subnet{
+								{
+									Addr: allowed.Addr().AsSlice(),
+									Size: uint32(allowed.Bits()),
 								},
 							},
-							Reals: []mbalancer.RealConfig{
+							Flags: &balancerpb.VsFlags{
+								Gre:    greEnabled,
+								Ops:    false,
+								PureL3: false,
+								FixMss: fixMssEnabled,
+							},
+							Scheduler: balancerpb.VsScheduler_PRR,
+							Reals: []*balancerpb.Real{
 								{
 									Weight:  1,
-									DstAddr: realAddr,
-									SrcAddr: realAddr,
-									SrcMask: realAddr,
+									DstAddr: realAddr.AsSlice(),
+									SrcAddr: realAddr.AsSlice(),
+									SrcMask: realAddr.AsSlice(),
 									Enabled: true,
 								},
-							}}
+							},
+						}
 						serviceConfigs = append(serviceConfigs, serviceConfig)
 					}
 				}
 			}
 		}
 	}
-	return &mbalancer.ModuleInstanceConfig{
-			Services: serviceConfigs,
-		}, &mbalancer.SessionsTimeouts{
+	return &balancerpb.ModuleConfig{
+			SourceAddressV4: IpAddr("5.5.5.5").AsSlice(),
+			SourceAddressV6: IpAddr("fe80::5").AsSlice(),
+			VirtualServices: serviceConfigs,
+			SessionsTimeouts: &balancerpb.SessionsTimeouts{
+				TcpSynAck: 10,
+				TcpSyn:    10,
+				TcpFin:    10,
+				Tcp:       10,
+				Udp:       10,
+				Default:   10,
+			},
+			Wlc: &balancerpb.WlcConfig{
+				WlcPower:      10,
+				MaxRealWeight: 1000,
+				UpdatePeriod:  durationpb.New(0),
+			},
+		}, &balancerpb.SessionsTimeouts{
 			TcpSynAck: 10,
 			TcpSyn:    10,
 			TcpFin:    10,
@@ -82,11 +103,14 @@ func allCombinationsConfig() (*mbalancer.ModuleInstanceConfig, *mbalancer.Sessio
 ////////////////////////////////////////////////////////////////////////////////
 
 func allCombinationsTestConfig() *TestConfig {
-	balancerConfig, timeouts := allCombinationsConfig()
+	moduleConfig, _ := allCombinationsConfig()
 	return &TestConfig{
-		balancer:         balancerConfig,
-		timeouts:         timeouts,
-		sessionTableSize: 1024,
+		moduleConfig: moduleConfig,
+		stateConfig: &balancerpb.ModuleStateConfig{
+			SessionTableCapacity:      100,
+			SessionTableScanPeriod:    durationpb.New(0),
+			SessionTableMaxLoadFactor: 0.5,
+		},
 	}
 }
 
@@ -111,7 +135,7 @@ func clientIpv6() netip.Addr {
 
 type VsSelector struct {
 	VsIp   int // 4 or 6
-	Proto  mbalancer.TransportProto
+	Proto  balancerpb.TransportProto
 	Gre    bool
 	FixMSS bool
 	RealIp int // 4 or 6
@@ -128,32 +152,34 @@ func (vs *VsSelector) Json() string {
 func SendAndValidatePacket(
 	t *testing.T,
 	mock *mock.YanetMock,
-	b *mbalancer.ModuleInstance,
+	b *balancermod.Balancer,
 	options *PacketOptions,
 	selector VsSelector,
-) (*framework.PacketInfo, *mbalancer.VirtualServiceConfig) {
-	virtualServices := b.GetConfig().Services
+) (*framework.PacketInfo, *balancerpb.VirtualService) {
+	virtualServices := b.GetModuleConfig().VirtualServices
 	for vsIdx := range virtualServices {
 		vs := &virtualServices[vsIdx]
-		vsInfo := vs.Info
-		if (vsInfo.Address.Is4() && selector.VsIp == 4) ||
-			(vsInfo.Address.Is6() && selector.VsIp == 6) {
-			if vsInfo.Proto == selector.Proto {
-				flags := &vsInfo.Flags
+		vsAddr := vs.Identifier.Ip
+		if (vsAddr.Is4() && selector.VsIp == 4) ||
+			(vsAddr.Is6() && selector.VsIp == 6) {
+			if vs.Identifier.Proto == module.Proto(selector.Proto) {
+				flags := vs.Flags
 				if flags.FixMSS == selector.FixMSS &&
 					flags.GRE == selector.Gre {
 					real := &vs.Reals[0]
-					if (real.DstAddr.Is4() && selector.RealIp == 4) ||
-						(real.DstAddr.Is6() && selector.RealIp == 6) {
-						// found
+					realAddr := real.Identifier.Ip
+					if (realAddr.Is4() && selector.RealIp == 4) ||
+						(realAddr.Is6() && selector.RealIp == 6) {
+						// found - convert to proto
+						protoVs := vsToProto(vs)
 						resultPacket := SendPacketToVsAndValidate(
 							t,
 							mock,
 							b,
 							options,
-							vs,
+							protoVs,
 						)
-						return resultPacket, vs
+						return resultPacket, protoVs
 					}
 				}
 			}
@@ -163,6 +189,39 @@ func SendAndValidatePacket(
 	return nil, nil
 }
 
+func vsToProto(vs *module.VirtualService) *balancerpb.VirtualService {
+	reals := make([]*balancerpb.Real, 0, len(vs.Reals))
+	for i := range vs.Reals {
+		real := &vs.Reals[i]
+		reals = append(reals, &balancerpb.Real{
+			Weight:  uint32(real.Weight),
+			DstAddr: real.Identifier.Ip.AsSlice(),
+			SrcAddr: real.SrcAddr.AsSlice(),
+			SrcMask: real.SrcMask.AsSlice(),
+			Enabled: real.Enabled,
+		})
+	}
+
+	allowedSrcs := make([]*balancerpb.Subnet, 0, len(vs.AllowedSources))
+	for i := range vs.AllowedSources {
+		prefix := vs.AllowedSources[i]
+		allowedSrcs = append(allowedSrcs, &balancerpb.Subnet{
+			Addr: prefix.Addr().AsSlice(),
+			Size: uint32(prefix.Bits()),
+		})
+	}
+
+	return &balancerpb.VirtualService{
+		Addr:        vs.Identifier.Ip.AsSlice(),
+		Port:        uint32(vs.Identifier.Port),
+		Proto:       vs.Identifier.Proto.IntoProto(),
+		Scheduler:   vs.Scheduler.IntoProto(),
+		AllowedSrcs: allowedSrcs,
+		Reals:       reals,
+		Flags:       vs.Flags.IntoProto(),
+	}
+}
+
 type PacketOptions struct {
 	MSS uint16
 }
@@ -170,25 +229,31 @@ type PacketOptions struct {
 func SendPacketToVsAndValidate(
 	t *testing.T,
 	mock *mock.YanetMock,
-	balancer *mbalancer.ModuleInstance,
+	balancer *balancermod.Balancer,
 	options *PacketOptions,
-	vs *mbalancer.VirtualServiceConfig,
+	vs *balancerpb.VirtualService,
 ) *framework.PacketInfo {
 	clientAddr := clientIpv4()
-	if vs.Info.Address.Is6() {
+	vsAddr, _ := netip.AddrFromSlice(vs.Addr)
+	if vsAddr.Is6() {
 		clientAddr = clientIpv6()
 	}
 	clientPort := uint16(40441)
 
-	vsAddr := vs.Info.Address
-	vsPort := vs.Info.Port
+	vsPort := uint16(vs.Port)
 
 	tcp := &layers.TCP{SYN: true}
-	if vs.Info.Proto == mbalancer.Udp {
+	if vs.Proto == balancerpb.TransportProto_UDP {
 		tcp = nil
 	}
-	layers := MakePacketLayers(clientAddr, clientPort, vsAddr, vsPort, tcp)
-	packet := xpacket.LayersToPacket(t, layers...)
+	packetLayers := MakePacketLayers(
+		clientAddr,
+		clientPort,
+		vsAddr,
+		vsPort,
+		tcp,
+	)
+	packet := xpacket.LayersToPacket(t, packetLayers...)
 	if tcp != nil && options != nil {
 		p, err := InsertOrUpdateMSS(packet, options.MSS)
 		require.Nil(t, err, "failed to insert mss")
@@ -201,7 +266,7 @@ func SendPacketToVsAndValidate(
 
 	if len(result.Output) > 0 {
 		resultPacket := result.Output[0]
-		ValidatePacket(t, balancer.GetConfig(), packet, resultPacket)
+		ValidatePacket(t, balancer.GetModuleConfig(), packet, resultPacket)
 		return resultPacket
 	} else {
 		return nil
@@ -220,7 +285,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 	// test packet encapsulation without GRE and MSS
 
 	t.Run("Encap", func(t *testing.T) {
-		for _, proto := range []mbalancer.TransportProto{mbalancer.Tcp, mbalancer.Udp} {
+		for _, proto := range []balancerpb.TransportProto{balancerpb.TransportProto_TCP, balancerpb.TransportProto_UDP} {
 			for _, vsIp := range []int{4, 6} {
 				for _, realIp := range []int{4, 6} {
 					selector := VsSelector{
@@ -234,7 +299,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 						"send packet: vsIp=%d, realIp=%d, proto=%s",
 						selector.VsIp,
 						selector.RealIp,
-						selector.Proto.IntoProto().String(),
+						selector.Proto.String(),
 					)
 
 					result, vs := SendAndValidatePacket(
@@ -255,7 +320,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 	// test GRE tunneling
 
 	t.Run("GRE", func(t *testing.T) {
-		for _, proto := range []mbalancer.TransportProto{mbalancer.Tcp, mbalancer.Udp} {
+		for _, proto := range []balancerpb.TransportProto{balancerpb.TransportProto_TCP, balancerpb.TransportProto_UDP} {
 			for _, vsIp := range []int{4, 6} {
 				for _, realIp := range []int{4, 6} {
 					selector := VsSelector{
@@ -270,10 +335,16 @@ func TestPacketEncapGreMSS(t *testing.T) {
 						"send packet to GRE service: vsIp=%d, realIp=%d, proto=%s",
 						selector.VsIp,
 						selector.RealIp,
-						selector.Proto.IntoProto().String(),
+						selector.Proto.String(),
 					)
 
-					result, vs := SendAndValidatePacket(t, mock, balancer, nil, selector)
+					result, vs := SendAndValidatePacket(
+						t,
+						mock,
+						balancer,
+						nil,
+						selector,
+					)
 
 					assert.NotNil(t, result)
 					assert.NotNil(t, vs)
@@ -283,7 +354,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 					}
 
 					if vs != nil {
-						assert.True(t, vs.Info.Flags.GRE)
+						assert.True(t, vs.Flags.Gre)
 					}
 				}
 			}
@@ -297,7 +368,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 			for _, realIp := range []int{4, 6} {
 				selector := VsSelector{
 					VsIp:   6,
-					Proto:  mbalancer.Tcp,
+					Proto:  balancerpb.TransportProto_TCP,
 					RealIp: realIp,
 					Gre:    false,
 					FixMSS: true,
@@ -306,7 +377,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 					"send packet: vsIp=%d, realIp=%d, proto=%s, mss=%d",
 					selector.VsIp,
 					selector.RealIp,
-					selector.Proto.IntoProto().String(),
+					selector.Proto.String(),
 					mss,
 				)
 
@@ -338,7 +409,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 			for _, realIp := range []int{4, 6} {
 				selector := VsSelector{
 					VsIp:   6,
-					Proto:  mbalancer.Tcp,
+					Proto:  balancerpb.TransportProto_TCP,
 					RealIp: realIp,
 					Gre:    true,
 					FixMSS: true,
@@ -347,7 +418,7 @@ func TestPacketEncapGreMSS(t *testing.T) {
 					"send packet to GRE service: vsIp=%d, realIp=%d, proto=%s, mss=%d",
 					selector.VsIp,
 					selector.RealIp,
-					selector.Proto.IntoProto().String(),
+					selector.Proto.String(),
 					mss,
 				)
 

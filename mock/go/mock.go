@@ -81,6 +81,8 @@ import (
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// Never move this object in memory after
+// construction!
 type YanetMock struct {
 	inner C.struct_yanet_mock
 }
@@ -102,16 +104,16 @@ func NewYanetMock(config *YanetMockConfig) (*YanetMock, error) {
 		)
 	}
 
-	mock := new(YanetMock)
-	mock.inner = C.struct_yanet_mock{}
-	ec, err := C.yanet_mock_init(&mock.inner, &cConfig, nil)
+	// Allocate YanetMock on heap first, then initialize inner in-place
+	yanetMock := &YanetMock{}
+	ec, err := C.yanet_mock_init(&yanetMock.inner, &cConfig, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init mock: %w", err)
 	}
 	if ec != C.int(0) {
 		return nil, fmt.Errorf("failed to init mock: ec=%d", ec)
 	}
-	return mock, nil
+	return yanetMock, nil
 }
 
 func (mock *YanetMock) Free() {
@@ -177,7 +179,14 @@ func (mock *YanetMock) SetCurrentTime(time time.Time) {
 	C.yanet_mock_set_current_time(&mock.inner, &ts)
 }
 
-func (mock *YanetMock) GetCurrentTime() time.Time {
+func (mock *YanetMock) AdvanceTime(duration time.Duration) time.Time {
+	now := mock.CurrentTime()
+	now = now.Add(duration)
+	mock.SetCurrentTime(now)
+	return now
+}
+
+func (mock *YanetMock) CurrentTime() time.Time {
 	ts := C.yanet_mock_current_time(&mock.inner)
 	return time.Unix(int64(ts.tv_sec), int64(ts.tv_nsec))
 }

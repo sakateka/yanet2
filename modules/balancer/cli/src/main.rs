@@ -1,12 +1,13 @@
-mod cfg;
 mod cmd;
-mod info;
+mod entities;
+mod json_output;
+mod output;
 mod rpc;
 mod service;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::CompleteEnv;
-use core::error::Error;
+use std::error::Error;
 use ync::logging;
 
 use crate::{cmd::Cmd, service::BalancerService};

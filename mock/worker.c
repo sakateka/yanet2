@@ -2,8 +2,56 @@
 #include "common/memory_address.h"
 
 #include "../../lib/controlplane/config/zone.h"
+#include "dataplane/config/zone.h"
 #include "dataplane/pipeline/pipeline.h"
+#include "dataplane/time/clock.h"
 #include "packet.h"
+#include "utils/mbuf.h"
+#include <stdlib.h>
+
+////////////////////////////////////////////////////////////////////////////////
+
+// Mock dp worker library.
+
+struct packet *
+worker_clone_packet(struct dp_worker *dp_worker, struct packet *packet) {
+	(void)dp_worker;
+	struct rte_mbuf *src_mbuf = packet->mbuf;
+	size_t data_len = rte_pktmbuf_data_len(src_mbuf);
+	size_t buf_len = RTE_PKTMBUF_HEADROOM + data_len;
+	const size_t align = alignof(struct rte_mbuf);
+	if (buf_len % align != 0) {
+		buf_len += align - buf_len % align;
+	}
+	size_t total_size = sizeof(struct rte_mbuf) + buf_len;
+	struct rte_mbuf *mbuf = aligned_alloc(align, total_size);
+	if (mbuf == NULL) {
+		return NULL;
+	}
+
+	// Initialize the mbuf structure
+	memset(mbuf, 0, sizeof(struct rte_mbuf));
+	mbuf->buf_addr = ((char *)mbuf) + sizeof(struct rte_mbuf);
+	mbuf->buf_len = buf_len;
+	mbuf->data_off = RTE_PKTMBUF_HEADROOM;
+	mbuf->refcnt = 1;
+	mbuf->nb_segs = 1;
+	mbuf->port = src_mbuf->port;
+	mbuf->next = NULL;
+
+	// Copy layer length fields explicitly
+	mbuf->l2_len = src_mbuf->l2_len;
+	mbuf->l3_len = src_mbuf->l3_len;
+	mbuf->l4_len = src_mbuf->l4_len;
+
+	struct packet *packet_clone = mbuf_to_packet(mbuf);
+	rte_memcpy(packet_clone, packet, sizeof(struct packet));
+	packet_clone->mbuf = mbuf;
+	packet_clone->next = NULL;
+
+	mbuf_copy(packet_clone->mbuf, src_mbuf);
+	return packet_clone;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 

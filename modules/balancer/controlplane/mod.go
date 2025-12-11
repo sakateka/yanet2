@@ -1,12 +1,11 @@
-package mbalancer
+package controlplane
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/service"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -18,12 +17,15 @@ const agentName = "balancer"
 type BalancerModule struct {
 	cfg     *Config
 	shm     *ffi.SharedMemory
-	agents  []*ffi.Agent
-	service *BalancerService
+	agents  []ffi.Agent
+	service *service.BalancerService
 	log     *zap.SugaredLogger
 }
 
-func NewBalancerModule(cfg *Config, log *zap.SugaredLogger) (*BalancerModule, error) {
+func NewBalancerModule(
+	cfg *Config,
+	log *zap.SugaredLogger,
+) (*BalancerModule, error) {
 	log = log.With(zap.String("module", "balancerpb.BalancerService"))
 
 	shm, err := ffi.AttachSharedMemory(cfg.MemoryPath)
@@ -38,12 +40,25 @@ func NewBalancerModule(cfg *Config, log *zap.SugaredLogger) (*BalancerModule, er
 		zap.Stringer("size", cfg.MemoryRequirements),
 	)
 
-	agents, err := shm.AgentsAttach(agentName, instances, uint(cfg.MemoryRequirements))
-	if err != nil {
-		return nil, fmt.Errorf("failed to attach agent to shared memory: %w", err)
+	agents := make([]ffi.Agent, 0, len(instances))
+	for _, instanceIdx := range instances {
+		agent, err := shm.AgentAttach(
+			agentName,
+			instanceIdx,
+			uint(cfg.MemoryRequirements),
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to attach agent to shared memory on instances[%d]: %w",
+				instanceIdx,
+				err,
+			)
+		}
+
+		agents = append(agents, *agent)
 	}
 
-	service := NewBalancerService(agents, log)
+	service := service.NewBalancerService(agents, log)
 
 	return &BalancerModule{
 		cfg:     cfg,
@@ -67,7 +82,7 @@ func (m *BalancerModule) ServicesNames() []string {
 }
 
 func (m *BalancerModule) RegisterService(server *grpc.Server) {
-	balancerpb.RegisterBalancerServiceServer(server, m.service)
+	balancerpb.RegisterBalancerServer(server, m.service)
 }
 
 func (m *BalancerModule) Close() error {
@@ -82,12 +97,11 @@ func (m *BalancerModule) Close() error {
 	}
 
 	if err := m.shm.Detach(); err != nil {
-		m.log.Warnw("failed to detach from shared memory mapping", zap.Error(err))
+		m.log.Warnw(
+			"failed to detach from shared memory mapping",
+			zap.Error(err),
+		)
 	}
 
 	return nil
-}
-
-func (m *BalancerModule) Run(ctx context.Context) error {
-	return m.service.Background(ctx, 500*time.Millisecond)
 }

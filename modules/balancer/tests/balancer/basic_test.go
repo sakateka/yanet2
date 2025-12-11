@@ -1,14 +1,15 @@
 package balancer
 
 import (
-	"net/netip"
 	"testing"
 
 	"github.com/gopacket/gopacket/layers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/yanet-platform/yanet2/common/go/xpacket"
-	mbalancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/module"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -19,57 +20,82 @@ func TestBalancerBasics(t *testing.T) {
 	realAddr := IpAddr("2.2.2.2")
 	clientIp := IpAddr("3.3.3.3")
 
-	// make balancer config
+	// make balancer config using protobuf
 
-	config := mbalancer.ModuleInstanceConfig{
-		Services: []mbalancer.VirtualServiceConfig{
+	config := &balancerpb.ModuleConfig{
+		SourceAddressV4: IpAddr("5.5.5.5").AsSlice(),
+		SourceAddressV6: IpAddr("fe80::5").AsSlice(),
+		VirtualServices: []*balancerpb.VirtualService{
 			{
-				Info: mbalancer.VirtualServiceInfo{
-					Address:    vsIp,
-					Port:       vsPort,
-					Proto:      mbalancer.Tcp,
-					AllowedSrc: []netip.Prefix{IpPrefix("3.3.3.0/24")},
-					Scheduler:  mbalancer.VsSchedulerPRR,
-				},
-				Reals: []mbalancer.RealConfig{
+				Addr:  vsIp.AsSlice(),
+				Port:  uint32(vsPort),
+				Proto: balancerpb.TransportProto_TCP,
+				AllowedSrcs: []*balancerpb.Subnet{
 					{
-						DstAddr: realAddr,
+						Addr: IpAddr("3.3.3.0").AsSlice(),
+						Size: 24,
+					},
+				},
+				Scheduler: balancerpb.VsScheduler_PRR,
+				Flags: &balancerpb.VsFlags{
+					Gre:    false,
+					FixMss: false,
+					Ops:    false,
+					PureL3: false,
+				},
+				Reals: []*balancerpb.Real{
+					{
+						DstAddr: realAddr.AsSlice(),
 						Weight:  1,
-						SrcAddr: IpAddr("4.4.4.4"),
-						SrcMask: IpAddr("4.4.4.4"),
+						SrcAddr: IpAddr("4.4.4.4").AsSlice(),
+						SrcMask: IpAddr("4.4.4.4").AsSlice(),
 						Enabled: true,
 					},
 				},
 			},
 		},
+		SessionsTimeouts: &balancerpb.SessionsTimeouts{
+			TcpSynAck: 60,
+			TcpSyn:    60,
+			TcpFin:    60,
+			Tcp:       60,
+			Udp:       60,
+			Default:   60,
+		},
+		Wlc: &balancerpb.WlcConfig{
+			WlcPower:      10,
+			MaxRealWeight: 1000,
+			UpdatePeriod:  durationpb.New(0),
+		},
 	}
 
-	// setup timeouts
-
-	timeouts := mbalancer.SessionsTimeouts{
-		TcpSynAck: 60,
-		TcpSyn:    60,
-		TcpFin:    60,
-		Tcp:       60,
-		Udp:       60,
-		Default:   60,
+	stateConfig := &balancerpb.ModuleStateConfig{
+		SessionTableCapacity:      100,
+		SessionTableScanPeriod:    durationpb.New(0),
+		SessionTableMaxLoadFactor: 0.8,
 	}
 
 	// setup test
 
 	setup, err := SetupTest(&TestConfig{
-		balancer:         &config,
-		timeouts:         &timeouts,
-		sessionTableSize: 10,
+		moduleConfig: config,
+		stateConfig:  stateConfig,
 	})
 	require.NoError(t, err)
+	defer setup.Free()
 
 	mock := setup.mock
 	balancer := setup.balancer
 
 	// send packet and expect response
 
-	packetLayers := MakeTCPPacket(clientIp, 1000, vsIp, vsPort, &layers.TCP{SYN: true})
+	packetLayers := MakeTCPPacket(
+		clientIp,
+		1000,
+		vsIp,
+		vsPort,
+		&layers.TCP{SYN: true},
+	)
 	packet := xpacket.LayersToPacket(t, packetLayers...)
 	result, err := mock.HandlePackets(packet)
 	require.NoError(t, err)
@@ -78,11 +104,11 @@ func TestBalancerBasics(t *testing.T) {
 
 	// validate response packet
 	response := result.Output[0]
-	ValidatePacket(t, balancer.GetConfig(), packet, response)
+	ValidatePacket(t, balancer.GetModuleConfig(), packet, response)
 
 	// check info and counters
 
-	expectedVsStats := mbalancer.VsStats{
+	expectedVsStats := module.VsStats{
 		IncomingPackets: 1,
 		OutgoingPackets: 1,
 
@@ -97,44 +123,43 @@ func TestBalancerBasics(t *testing.T) {
 		OutgoingBytes: uint64(len(packet.Data())),
 	}
 
-	expectedRealStats := mbalancer.RealStats{
-		RealDisabledPackets: 0,
-		OpsPackets:          0,
-		CreatedSessions:     1,
-		SendPackets:         1,
-		SendBytes:           uint64(len(packet.Data())),
+	expectedRealStats := module.RealStats{
+		PacketsRealDisabled:   0,
+		PacketsRealNotPresent: 0,
+		OpsPackets:            0,
+		ErrorIcmpPackets:      0,
+		CreatedSessions:       1,
+		Packets:               1,
+		Bytes:                 uint64(len(packet.Data())),
 	}
 
 	t.Run("Read_State_Info", func(t *testing.T) {
-		state, err := balancer.StateInfo()
-		require.NoError(t, err)
+		state := balancer.GetStateInfo()
 
 		require.Equal(t, 1, len(state.RealInfo))
 		realInfo := &state.RealInfo[0]
-		assert.Equal(t, realInfo.ActiveSessions, uint64(1))
-		assert.Equal(t, realInfo.Stats, expectedRealStats)
+		assert.Equal(t, expectedRealStats, realInfo.Stats)
 
 		require.Equal(t, 1, len(state.VsInfo))
 		vsInfo := &state.VsInfo[0]
-		assert.Equal(t, vsInfo.ActiveSessions, uint64(1))
-		assert.Equal(t, vsInfo.Stats, expectedVsStats)
+		assert.Equal(t, expectedVsStats, vsInfo.Stats)
 	})
 
 	t.Run("Read_Config_Info", func(t *testing.T) {
-		configInfo, err := balancer.ConfigInfo(
+		configStats := balancer.GetConfigStats(
+			0,
 			defaultDeviceName,
 			defaultPipelineName,
 			defaultFunctionName,
 			defaultChainName,
 		)
-		require.NoError(t, err)
-		require.Equal(t, 1, len(configInfo.Vs))
-		vsInfo := configInfo.Vs[0]
+		require.Equal(t, 1, len(configStats.Vs))
+		vsInfo := configStats.Vs[0]
 
-		require.Equal(t, 1, len(vsInfo.Reals))
-		realInfo := &vsInfo.Reals[0]
+		require.Equal(t, 1, len(configStats.Reals))
+		realInfo := &configStats.Reals[0]
 
-		assert.Equal(t, vsInfo.Stats, expectedVsStats)
-		assert.Equal(t, realInfo.Stats, expectedRealStats)
+		assert.Equal(t, expectedVsStats, vsInfo.Stats)
+		assert.Equal(t, expectedRealStats, realInfo.Stats)
 	})
 }

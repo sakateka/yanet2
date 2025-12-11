@@ -8,7 +8,7 @@ RELEASE_DIR := $(TARGET_DIR)/release
 BUILD_DIR   := $(ROOT_DIR)/build/modules/balancer/cli
 
 MODULES  := balancer
-BINARIES := $(addprefix yanet-cli-,$(MODULES))
+BINARIES := $(addprefix yanet-,$(MODULES))
 TARGETS  := $(addprefix build/,$(BINARIES))
 
 build: $(TARGETS)

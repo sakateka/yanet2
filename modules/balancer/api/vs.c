@@ -3,13 +3,14 @@
 #include "common/network.h"
 #include "counters/counters.h"
 #include "info.h"
-#include "lookup.h"
 #include "module.h"
 
 #include "common/lpm.h"
 #include "common/memory.h"
 
-#include "../dataplane/counter.h"
+#include <filter/filter.h>
+
+#include "../dataplane/lookup.h"
 #include "../dataplane/module.h"
 #include "../dataplane/real.h"
 #include "../dataplane/vs.h"
@@ -30,17 +31,28 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 
+extern uint64_t
+register_vs_counter(struct counter_registry *registry, size_t vs_registry_idx);
+
+extern uint64_t
+register_real_counter(
+	struct counter_registry *registry, size_t real_registry_idx
+);
+
+////////////////////////////////////////////////////////////////////////////////
+
 struct addr_range {
-	uint8_t start_addr[16];
-	uint8_t end_addr[16];
+	uint8_t start_addr[NET6_LEN];
+	uint8_t end_addr[NET6_LEN];
 };
 
 // Represents config of the virtual service
 struct balancer_vs_config {
 	struct memory_context *mctx;
 
-	// index of the vs in the balancer registry
-	size_t idx;
+	// index of the virtual service
+	// in the balancer registry
+	size_t registry_idx;
 
 	vs_flags_t flags;
 	uint8_t address[16];
@@ -48,22 +60,16 @@ struct balancer_vs_config {
 	uint8_t proto;
 	size_t allowed_src_count;
 	struct addr_range *allowed_src;
+
+	size_t peers_v4_count;
+	struct net4_addr *peers_v4_addr;
+
+	size_t peers_v6_count;
+	struct net6_addr *peers_v6_addr;
+
 	size_t real_count;
-	struct real reals[];
+	struct real *reals;
 };
-
-////////////////////////////////////////////////////////////////////////////////
-
-static size_t
-vs_serialize(struct balancer_vs_config *vs, char *buf) {
-	sprintf(buf, "v%lu", vs->idx);
-	return strlen(buf);
-}
-
-static void
-real_serialize(struct real *real, char *buf) {
-	sprintf(buf, "r%lu", real->registry_idx);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -73,6 +79,9 @@ vs_v4_table_init(
 	struct balancer_vs_config **vs_configs,
 	size_t count
 ) {
+	// to supress stupid clang warning.
+	(void)vs_v4_lookup;
+
 	size_t ipv4_count = 0;
 	for (size_t i = 0; i < count; ++i) {
 		struct balancer_vs_config *vs_config = vs_configs[i];
@@ -123,7 +132,7 @@ vs_v4_table_init(
 		rule->transport.proto =
 			(struct filter_proto){vs_config->proto, 0, 0};
 
-		rule->action = vs_config->idx;
+		rule->action = vs_config->registry_idx;
 		++j;
 	}
 
@@ -212,7 +221,7 @@ vs_v6_table_init(
 		rule->transport.proto =
 			(struct filter_proto){vs_config->proto, 0, 0};
 
-		rule->action = vs_config->idx;
+		rule->action = vs_config->registry_idx;
 		++j;
 	}
 
@@ -258,8 +267,8 @@ balancer_vs_init(
 	config->vs_count = 0;
 	config->real_count = 0;
 	for (size_t vs_idx = 0; vs_idx < vs_count; ++vs_idx) {
-		if (vs_configs[vs_idx]->idx + 1 > config->vs_count) {
-			config->vs_count = vs_configs[vs_idx]->idx + 1;
+		if (vs_configs[vs_idx]->registry_idx + 1 > config->vs_count) {
+			config->vs_count = vs_configs[vs_idx]->registry_idx + 1;
 		}
 		for (size_t inner_real_idx = 0;
 		     inner_real_idx < vs_configs[vs_idx]->real_count;
@@ -281,7 +290,11 @@ balancer_vs_init(
 	if (config_vs == NULL && vs_count > 0) {
 		return -1;
 	}
-	memset(config_vs, 0, config->vs_count * sizeof(struct virtual_service));
+	if (vs_count > 0) {
+		memset(config_vs,
+		       0,
+		       config->vs_count * sizeof(struct virtual_service));
+	}
 	SET_OFFSET_OF(&config->vs, config_vs);
 
 	// allocate reals
@@ -292,7 +305,10 @@ balancer_vs_init(
 	if (config_reals == NULL && config->real_count > 0) {
 		goto free_vs;
 	}
-	memset(config_reals, 0, config->real_count * sizeof(struct real));
+	if (config->real_count > 0) {
+		memset(config_reals, 0, config->real_count * sizeof(struct real)
+		);
+	}
 	SET_OFFSET_OF(&config->reals, config_reals);
 
 	size_t initialized_vs_count;
@@ -301,10 +317,13 @@ balancer_vs_init(
 		struct balancer_vs_config *vs_config =
 			vs_configs[initialized_vs_count];
 
-		struct service_info *info =
-			balancer_state_get_vs(balancer_state, vs_config->idx);
-		struct virtual_service *vs = &config_vs[vs_config->idx];
+		struct service_info *info = balancer_state_get_vs(
+			balancer_state, vs_config->registry_idx
+		);
+		struct virtual_service *vs =
+			&config_vs[vs_config->registry_idx];
 		SET_OFFSET_OF(&vs->state, (struct service_state *)info->state);
+		vs->registry_idx = vs_config->registry_idx;
 		vs->round_robin_counter = 0;
 		vs->flags = vs_config->flags | VS_PRESENT_IN_CONFIG_FLAG;
 		memcpy(vs->address, vs_config->address, NET6_LEN);
@@ -322,13 +341,9 @@ balancer_vs_init(
 		}
 
 		// init counter
-		char vs_counter_name[80];
-		memset(vs_counter_name, 0, sizeof(vs_counter_name));
-		vs_serialize(vs_config, vs_counter_name);
-		vs->counter_id = counter_registry_register(
+		vs->counter_id = register_vs_counter(
 			&config->cp_module.counter_registry,
-			vs_counter_name,
-			VS_COUNTER_SIZE
+			vs_config->registry_idx
 		);
 
 		for (size_t real = 0; real < vs->real_count; ++real) {
@@ -350,13 +365,9 @@ balancer_vs_init(
 			}
 
 			// init counter
-			char real_counter_name[80];
-			memset(real_counter_name, 0, sizeof(real_counter_name));
-			real_serialize(current_real, real_counter_name);
-			setup_real->counter_id = counter_registry_register(
+			setup_real->counter_id = register_real_counter(
 				&config->cp_module.counter_registry,
-				real_counter_name,
-				REAL_COUNTER_SIZE
+				current_real->registry_idx
 			);
 		}
 		res = lpm_init(
@@ -380,6 +391,57 @@ balancer_vs_init(
 				goto free_initalized_vs;
 			}
 		}
+
+		// Setup IPv4 peers
+		vs->peers_v4_count = vs_config->peers_v4_count;
+		if (vs_config->peers_v4_count > 0) {
+			vs->peers_v4 = memory_balloc(
+				&config->cp_module.memory_context,
+				sizeof(struct net4_addr) *
+					vs_config->peers_v4_count
+			);
+			if (vs->peers_v4 == NULL) {
+				ring_free(&vs->real_ring);
+				lpm_free(&vs->src_filter);
+				goto free_initalized_vs;
+			}
+			memcpy(vs->peers_v4,
+			       vs_config->peers_v4_addr,
+			       sizeof(struct net4_addr) *
+				       vs_config->peers_v4_count);
+		} else {
+			vs->peers_v4 = NULL;
+		}
+
+		// Setup IPv6 peers
+		vs->peers_v6_count = vs_config->peers_v6_count;
+		if (vs_config->peers_v6_count > 0) {
+			vs->peers_v6 = memory_balloc(
+				&config->cp_module.memory_context,
+				sizeof(struct net6_addr) *
+					vs_config->peers_v6_count
+			);
+			if (vs->peers_v6 == NULL) {
+				if (vs->peers_v4 != NULL) {
+					memory_bfree(
+						&config->cp_module
+							 .memory_context,
+						vs->peers_v4,
+						sizeof(struct net4_addr
+						) * vs_config->peers_v4_count
+					);
+				}
+				ring_free(&vs->real_ring);
+				lpm_free(&vs->src_filter);
+				goto free_initalized_vs;
+			}
+			memcpy(vs->peers_v6,
+			       vs_config->peers_v6_addr,
+			       sizeof(struct net6_addr) *
+				       vs_config->peers_v6_count);
+		} else {
+			vs->peers_v6 = NULL;
+		}
 	}
 
 	// Init tables of virtual services
@@ -399,9 +461,23 @@ balancer_vs_init(
 
 free_initalized_vs:
 	for (size_t i = 0; i < initialized_vs_count; ++i) {
-		struct balancer_vs_config *vs_config =
-			vs_configs[initialized_vs_count];
-		struct virtual_service *vs = &config_vs[vs_config->idx];
+		struct balancer_vs_config *vs_config = vs_configs[i];
+		struct virtual_service *vs =
+			&config_vs[vs_config->registry_idx];
+		if (vs->peers_v4 != NULL) {
+			memory_bfree(
+				&config->cp_module.memory_context,
+				vs->peers_v4,
+				sizeof(struct net4_addr) * vs->peers_v4_count
+			);
+		}
+		if (vs->peers_v6 != NULL) {
+			memory_bfree(
+				&config->cp_module.memory_context,
+				vs->peers_v6,
+				sizeof(struct net6_addr) * vs->peers_v6_count
+			);
+		}
 		ring_free(&vs->real_ring);
 		lpm_free(&vs->src_filter);
 	}
@@ -427,31 +503,41 @@ balancer_vs_config_create(
 	uint16_t port,
 	uint8_t proto,
 	size_t real_count,
-	size_t allowed_src_count
+	size_t allowed_src_count,
+	size_t peers_v4_count,
+	size_t peers_v6_count
 ) {
 	if ((flags & BALANCER_VS_PURE_L3_FLAG) || port == 0) {
 		port = 0;
 		flags |= BALANCER_VS_PURE_L3_FLAG;
 	}
 
-	size_t size = sizeof(struct balancer_vs_config) +
-		      sizeof(struct real) * real_count +
-		      sizeof(struct addr_range) * allowed_src_count;
-
-	uint8_t *memory = memory_balloc(&agent->memory_context, size);
-	if (memory == NULL) {
+	// allocate config
+	struct balancer_vs_config *vs_config = memory_balloc(
+		&agent->memory_context, sizeof(struct balancer_vs_config)
+	);
+	if (vs_config == NULL) {
 		return NULL;
 	}
-	struct balancer_vs_config *vs_config =
-		(struct balancer_vs_config *)memory;
-	vs_config->idx = id;
+
+	memset(vs_config, 0, sizeof(*vs_config));
 	vs_config->mctx = &agent->memory_context;
+	vs_config->registry_idx = id;
 	vs_config->real_count = real_count;
+
+	// allocate allowed src list
 	vs_config->allowed_src_count = allowed_src_count;
-	vs_config->allowed_src =
-		(struct addr_range *)(memory +
-				      sizeof(struct balancer_vs_config) +
-				      sizeof(struct real) * real_count);
+	vs_config->allowed_src = memory_balloc(
+		&agent->memory_context,
+		sizeof(struct addr_range) * allowed_src_count
+	);
+	if (vs_config->allowed_src == NULL) {
+		balancer_vs_config_free(vs_config);
+		return NULL;
+	}
+
+	// fill flags, port, proto
+
 	vs_config->flags = (vs_flags_t)flags;
 	if (vs_config->flags & BALANCER_VS_IPV6_FLAG) {
 		memcpy(vs_config->address, ip, NET6_LEN);
@@ -464,6 +550,42 @@ balancer_vs_config_create(
 		vs_config->port = port;
 	}
 	vs_config->proto = proto;
+
+	// allocate v4 peers for this virtual service
+
+	vs_config->peers_v4_count = peers_v4_count;
+	vs_config->peers_v4_addr = memory_balloc(
+		&agent->memory_context,
+		sizeof(struct net4_addr) * peers_v4_count
+	);
+	if (peers_v4_count > 0 && vs_config->peers_v4_addr == NULL) {
+		balancer_vs_config_free(vs_config);
+		return NULL;
+	}
+
+	// allocate v6 peers for this virtual service
+
+	vs_config->peers_v6_count = peers_v6_count;
+	vs_config->peers_v6_addr = memory_balloc(
+		&agent->memory_context,
+		sizeof(struct net6_addr) * peers_v6_count
+	);
+	if (peers_v6_count > 0 && vs_config->peers_v6_addr == NULL) {
+		balancer_vs_config_free(vs_config);
+		return NULL;
+	}
+
+	// allocate reals
+
+	vs_config->real_count = real_count;
+	vs_config->reals = memory_balloc(
+		&agent->memory_context, sizeof(struct real) * real_count
+	);
+	if (vs_config->reals == NULL) {
+		balancer_vs_config_free(vs_config);
+		return NULL;
+	}
+
 	return vs_config;
 }
 
@@ -471,10 +593,28 @@ balancer_vs_config_create(
 
 void
 balancer_vs_config_free(struct balancer_vs_config *vs_config) {
-	size_t size = sizeof(struct balancer_vs_config) +
-		      sizeof(struct real) * vs_config->real_count +
-		      sizeof(struct addr_range) * vs_config->allowed_src_count;
-	memory_bfree(vs_config->mctx, vs_config, size);
+	struct memory_context *mctx = vs_config->mctx;
+	memory_bfree(
+		mctx,
+		vs_config->allowed_src,
+		vs_config->allowed_src_count * sizeof(struct addr_range)
+	);
+	memory_bfree(
+		mctx,
+		vs_config->peers_v4_addr,
+		vs_config->peers_v4_count * sizeof(struct net4_addr)
+	);
+	memory_bfree(
+		mctx,
+		vs_config->peers_v6_addr,
+		vs_config->peers_v6_count * sizeof(struct net6_addr)
+	);
+	memory_bfree(
+		mctx,
+		vs_config->reals,
+		vs_config->real_count * sizeof(struct real)
+	);
+	memory_bfree(mctx, vs_config, sizeof(struct balancer_vs_config));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -516,4 +656,20 @@ balancer_vs_config_set_allowed_src_range(
 								: NET4_LEN;
 	memcpy(addr_range->start_addr, from, len);
 	memcpy(addr_range->end_addr, to, len);
+}
+
+void
+balancer_vs_config_set_peer_v4(
+	struct balancer_vs_config *vs_config, size_t index, uint8_t *addr
+) {
+	struct net4_addr *peer = &vs_config->peers_v4_addr[index];
+	memcpy(peer->bytes, addr, NET4_LEN);
+}
+
+void
+balancer_vs_config_set_peer_v6(
+	struct balancer_vs_config *vs_config, size_t index, uint8_t *addr
+) {
+	struct net6_addr *peer = &vs_config->peers_v6_addr[index];
+	memcpy(peer->bytes, addr, NET6_LEN);
 }

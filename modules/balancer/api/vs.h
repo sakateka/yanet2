@@ -64,7 +64,9 @@ balancer_vs_config_create(
 	uint16_t port,
 	uint8_t proto,
 	size_t real_count,
-	size_t allowed_src_count
+	size_t allowed_src_count,
+	size_t peers_v4_count,
+	size_t peers_v6_count
 );
 
 /// Free virtual service config.
@@ -72,8 +74,8 @@ void
 balancer_vs_config_free(struct balancer_vs_config *vs_config);
 
 /// Allows to setup one real of the virtual service.
-/// @param id Index of the real in the balancer state registry
-/// @param index Index of the real in virtual service list.
+/// @param real_registry_idx Index of the real in the balancer state registry
+/// @param idx Index of the real in virtual service list.
 /// @param flags Real flags.
 /// @param weight Weight of the real (more weight -> more requests to the real).
 /// @param dst_addr Address of the real.
@@ -83,8 +85,8 @@ balancer_vs_config_free(struct balancer_vs_config *vs_config);
 void
 balancer_vs_config_set_real(
 	struct balancer_vs_config *vs_config,
-	size_t id,
-	size_t index,
+	size_t real_registry_idx,
+	size_t idx,
 	uint64_t flags,
 	uint16_t weight,
 	uint8_t *dst_addr,
@@ -99,4 +101,16 @@ balancer_vs_config_set_allowed_src_range(
 	size_t index,
 	uint8_t *from,
 	uint8_t *to
+);
+
+/// Set address of v4 peer
+void
+balancer_vs_config_set_peer_v4(
+	struct balancer_vs_config *vs_config, size_t index, uint8_t *addr
+);
+
+/// Set address of v6 peer
+void
+balancer_vs_config_set_peer_v6(
+	struct balancer_vs_config *vs_config, size_t index, uint8_t *addr
 );

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -7,12 +8,23 @@
 
 #include "memory_address.h"
 
+#ifdef HAVE_ASAN
+#define ASAN_RED_ZONE 32
+#else
+#define ASAN_RED_ZONE 0
+#endif
+
+static_assert(
+	ASAN_RED_ZONE == 0 || ASAN_RED_ZONE >= 8, "invalid red zone size"
+);
+
 #define MEMORY_BLOCK_ALLOCATOR_EXP 24
 #define MEMORY_BLOCK_ALLOCATOR_MIN_BITS 3
 #define MEMORY_BLOCK_ALLOCATOR_MAX_BITS                                        \
 	(MEMORY_BLOCK_ALLOCATOR_MIN_BITS + MEMORY_BLOCK_ALLOCATOR_EXP - 1)
 #define MEMORY_BLOCK_ALLOCATOR_MIN_SIZE (1 << MEMORY_BLOCK_ALLOCATOR_MIN_BITS)
-#define MEMORY_BLOCK_ALLOCATOR_MAX_SIZE (1 << MEMORY_BLOCK_ALLOCATOR_MAX_BITS)
+#define MEMORY_BLOCK_ALLOCATOR_MAX_SIZE                                        \
+	((1 << MEMORY_BLOCK_ALLOCATOR_MAX_BITS) - ASAN_RED_ZONE * 2)
 
 struct block_allocator_pool {
 	uint64_t allocate;
@@ -123,6 +135,8 @@ block_allocator_balloc(struct block_allocator *allocator, size_t size) {
 	if (size > MEMORY_BLOCK_ALLOCATOR_MAX_SIZE)
 		return NULL;
 
+	size += 2 * ASAN_RED_ZONE;
+
 	size_t pool_index = block_allocator_pool_index(allocator, size);
 
 	struct block_allocator_pool *pool = allocator->pools + pool_index;
@@ -135,10 +149,10 @@ block_allocator_balloc(struct block_allocator *allocator, size_t size) {
 		size_t parent_pool_index = pool_index + 1;
 		while (parent_pool_index < MEMORY_BLOCK_ALLOCATOR_EXP &&
 		       /*		       ADDR_OF(
-						      allocator,
-						      allocator->pools[parent_pool_index].free_list
-					      ) == NULL) {
-					      */
+					      allocator,
+					      allocator->pools[parent_pool_index].free_list
+				      ) == NULL) {
+				      */
 		       allocator->pools[parent_pool_index].free == 0) {
 			++parent_pool_index;
 		}
@@ -146,30 +160,30 @@ block_allocator_balloc(struct block_allocator *allocator, size_t size) {
 		if (parent_pool_index == MEMORY_BLOCK_ALLOCATOR_EXP) {
 			return NULL;
 			/*
-						FIXME: not sure should a block
-			   allocator try to seize new memory regions or not.
-						*/
+					FIXME: not sure should a block
+		   allocator try to seize new memory regions or not.
+					*/
 			/*
-						size_t alloc_size =
-			   block_allocator_pool_size( allocator,
-			   parent_pool_index - 1
-						);
+					size_t alloc_size =
+		   block_allocator_pool_size( allocator,
+		   parent_pool_index - 1
+					);
 
-						void *data =
-			   allocator->alloc_func( alloc_size,
-			   allocator->alloc_func_data
-						);
-						if (data == NULL)
-							return NULL;
+					void *data =
+		   allocator->alloc_func( alloc_size,
+		   allocator->alloc_func_data
+					);
+					if (data == NULL)
+						return NULL;
 
-						struct block_allocator_pool
-			   *root = allocator->pools + MEMORY_BLOCK_ALLOCATOR_EXP
-			   - 1;
-						++root->free;
-						root->free_list = data;
-						*(void **)data = NULL;
-						--parent_pool_index;
-			*/
+					struct block_allocator_pool
+		   *root = allocator->pools + MEMORY_BLOCK_ALLOCATOR_EXP
+		   - 1;
+					++root->free;
+					root->free_list = data;
+					*(void **)data = NULL;
+					--parent_pool_index;
+		*/
 		}
 
 		while (parent_pool_index-- > pool_index) {
@@ -180,9 +194,29 @@ block_allocator_balloc(struct block_allocator *allocator, size_t size) {
 	}
 
 	void *memory = block_allocator_pool_get(allocator, pool);
-	asan_unpoison_memory_region(memory, size);
+	asan_unpoison_memory_region(
+		memory + ASAN_RED_ZONE, size - 2 * ASAN_RED_ZONE
+	);
 
-	return memory;
+	return memory + ASAN_RED_ZONE;
+}
+
+static inline void
+block_allocator_bfree_internal(
+	struct block_allocator *allocator, void *block, size_t size
+) {
+	if (!size)
+		return;
+
+	size_t pool_index = block_allocator_pool_index(allocator, size);
+	struct block_allocator_pool *pool = allocator->pools + pool_index;
+
+	asan_unpoison_memory_region(block, sizeof(void *));
+	SET_OFFSET_OF((void **)block, ADDR_OF(&pool->free_list));
+	SET_OFFSET_OF(&pool->free_list, block);
+	++pool->free;
+
+	asan_poison_memory_region(block, size);
 }
 
 static inline void
@@ -192,22 +226,10 @@ block_allocator_bfree(
 	if (!size)
 		return;
 
-	if (size < sizeof(void *))
-		asan_unpoison_memory_region(
-			block + size, sizeof(void *) - size
-		);
+	size += 2 * ASAN_RED_ZONE;
+	block -= ASAN_RED_ZONE;
 
-	size_t pool_index = block_allocator_pool_index(allocator, size);
-	struct block_allocator_pool *pool = allocator->pools + pool_index;
-
-	SET_OFFSET_OF((void **)block, ADDR_OF(&pool->free_list));
-	SET_OFFSET_OF(&pool->free_list, block);
-	++pool->free;
-
-	asan_poison_memory_region(block, size);
-	if (size < sizeof(void *)) {
-		asan_poison_memory_region(block + size, sizeof(void *) - size);
-	}
+	block_allocator_bfree_internal(allocator, block, size);
 }
 
 static inline void
@@ -219,7 +241,7 @@ block_allocator_put_arena(
 	uintptr_t end = (uintptr_t)arena + size;
 	end = end & ~(uintptr_t)0x07; // round down to 8 byte boundary
 
-	while (pos - end) {
+	while (pos < end) {
 		size_t align = (size_t)1 << __builtin_ctzll(pos);
 		/*
 		 * FIXME:
@@ -232,7 +254,7 @@ block_allocator_put_arena(
 		if (align > MEMORY_BLOCK_ALLOCATOR_MAX_SIZE)
 			align = MEMORY_BLOCK_ALLOCATOR_MAX_SIZE;
 
-		block_allocator_bfree(allocator, (void *)pos, align);
+		block_allocator_bfree_internal(allocator, (void *)pos, align);
 		pos += align;
 	}
 }

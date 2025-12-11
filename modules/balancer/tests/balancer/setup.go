@@ -3,9 +3,13 @@ package balancer
 import (
 	"fmt"
 
+	"github.com/yanet-platform/yanet2/common/go/logging"
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	mock "github.com/yanet-platform/yanet2/mock/go"
-	balancer "github.com/yanet-platform/yanet2/modules/balancer/controlplane"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancer"
+	"github.com/yanet-platform/yanet2/modules/balancer/controlplane/balancerpb"
+	"go.uber.org/zap/zapcore"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -19,23 +23,23 @@ var defaultConfigName string = "balancer0"
 ////////////////////////////////////////////////////////////////////////////////
 
 type TestConfig struct {
-	mock             *mock.YanetMockConfig
-	balancer         *balancer.ModuleInstanceConfig
-	timeouts         *balancer.SessionsTimeouts
-	sessionTableSize int
+	mock         *mock.YanetMockConfig
+	moduleConfig *balancerpb.ModuleConfig
+	stateConfig  *balancerpb.ModuleStateConfig
+	debug        bool
 }
 
 type TestSetup struct {
 	mock     *mock.YanetMock
 	agent    *ffi.Agent
-	balancer *balancer.ModuleInstance
+	balancer *balancer.Balancer
 }
 
 func SetupTest(config *TestConfig) (*TestSetup, error) {
 	if config.mock == nil {
 		config.mock = &mock.YanetMockConfig{
-			CpMemory: 1 << 28,
-			DpMemory: 1 << 26,
+			CpMemory: 1 << 29,
+			DpMemory: 1 << 27,
 			Workers:  1,
 			Devices: []mock.YanetMockDeviceConfig{
 				{
@@ -49,44 +53,46 @@ func SetupTest(config *TestConfig) (*TestSetup, error) {
 		return nil, fmt.Errorf("need at least 128MB for the controlplane")
 	}
 
-	if config.balancer == nil {
-		config.balancer = &balancer.ModuleInstanceConfig{}
+	if config.moduleConfig == nil {
+		config.moduleConfig = &balancerpb.ModuleConfig{}
 	}
 
-	if config.timeouts == nil {
-		config.timeouts = &balancer.SessionsTimeouts{
-			TcpSynAck: 30,
-			TcpSyn:    30,
-			TcpFin:    30,
-			Tcp:       30,
-			Udp:       30,
+	if config.stateConfig == nil {
+		config.stateConfig = &balancerpb.ModuleStateConfig{
+			SessionTableCapacity:      128,
+			SessionTableMaxLoadFactor: 0.75,
+			SessionTableScanPeriod:    durationpb.New(0),
 		}
-	}
-
-	sessionTableSize := 128
-	if config.sessionTableSize != 0 {
-		sessionTableSize = config.sessionTableSize
 	}
 
 	// create mock
 
-	mock, err := mock.NewYanetMock(config.mock)
+	mockInstance, err := mock.NewYanetMock(config.mock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create new yanet mock: %w", err)
 	}
 
-	agent, err := mock.SharedMemory().
-		AgentAttach("balancer", 0, uint(config.mock.CpMemory)-(1<<26))
+	agent, err := mockInstance.SharedMemory().
+		AgentAttach("balancer", 0, uint(config.mock.CpMemory)-(1<<27))
 	if err != nil {
-		return nil, fmt.Errorf("failed to attach agent: %w", err)
+		return nil, err
 	}
 
-	balancer, err := balancer.NewModuleInstance(
-		agent,
+	// Create logger for balancer with colorful output
+	logLevel := zapcore.InfoLevel
+	if config.debug {
+		logLevel = zapcore.DebugLevel
+	}
+	sugaredLogger, _, _ := logging.Init(&logging.Config{
+		Level: logLevel,
+	})
+
+	balancerInstance, err := balancer.NewBalancerFromProto(
+		*agent,
 		defaultConfigName,
-		config.balancer,
-		uint64(sessionTableSize),
-		config.timeouts,
+		config.moduleConfig,
+		config.stateConfig,
+		sugaredLogger,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -100,9 +106,9 @@ func SetupTest(config *TestConfig) (*TestSetup, error) {
 	}
 
 	return &TestSetup{
-		mock:     mock,
+		mock:     mockInstance,
 		agent:    agent,
-		balancer: balancer,
+		balancer: balancerInstance,
 	}, nil
 }
 

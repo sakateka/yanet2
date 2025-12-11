@@ -1,19 +1,25 @@
+#include <netinet/in.h>
 #include <rte_ether.h>
 #include <rte_ip.h>
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
+#include "dataplane/time/clock.h"
+#include "flow/setup.h"
+#include "flow/stats.h"
+
 #include "common/memory_address.h"
 #include "controlplane/config/econtext.h"
-#include "ctx.h"
 #include "dataplane.h"
 #include "dataplane/config/zone.h"
-#include "lookup.h"
-#include "meta.h"
+#include "decap.h"
+#include "flow/stats.h"
 #include "modules/balancer/dataplane/module.h"
-#include "real.h"
-#include "select.h"
-#include "tunnel.h"
+
+#include "icmp/handle.h"
+#include "l4/handle.h"
+#include "modules/balancer/state/session_table.h"
+#include "modules/balancer/state/state.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -21,61 +27,33 @@ struct balancer_module {
 	struct module module;
 };
 
-void
-handle_packets(
-	struct balancer_module_config *config,
-	struct packet_front *packet_front,
-	struct module_ectx *ectx,
-	uint32_t worker_idx,
-	uint32_t now
-) {
-	struct packet_ctx ctx;
-	packet_ctx_setup(&ctx, worker_idx, ectx, config);
-
-	struct packet *packet;
-	while ((packet = packet_list_pop(&packet_front->input)) != NULL) {
-		// set incoming packet
-		packet_ctx_incoming_packet(&ctx, packet);
-
-		// 1. Lookup single virtual service for which packet is
-		// dirrected to
-
-		struct virtual_service *vs = vs_lookup(&ctx, config, packet);
-
-		if (vs == NULL) { // not found virtual service
-			packet_front_drop(packet_front, packet);
-			continue;
-		}
-
-		// 2. Fill packet metadata
-
-		struct packet_metadata meta;
-		int res = fill_packet_metadata(packet, &meta);
-
-		if (res != 0) { // unexpected packet type
-			packet_front_drop(packet_front, packet);
-			continue;
-		}
-
-		// 3. Select real packet for which packet will be forwarded
-
-		struct real *rs =
-			select_real(&ctx, config, now, worker_idx, vs, &meta);
-		if (rs == NULL) { // failed to select real
-			packet_front_drop(packet_front, packet);
-			continue;
-		}
-
-		// 4. Tunnel packet to forward in to the selected real
-
-		res = tunnel_packet(vs->flags, rs, packet);
-		assert(res == 0);
-
-		// 5. Pass packet to the next module
-
-		packet_front_output(packet_front, packet);
+static inline void
+packet_ctx_handle(struct packet_ctx *ctx) {
+	struct packet *packet = ctx->packet;
+	// separately handle icmp and tcp/udp packets.
+	uint16_t packet_type = packet->transport_header.type;
+	if (packet_type == IPPROTO_ICMP || packet_type == IPPROTO_ICMPV6) {
+		handle_icmp_packet(ctx);
+	} else {
+		handle_l4_packet(ctx);
 	}
 }
+
+static inline int
+packet_ctx_try_decap(struct packet_ctx *ctx) {
+	return try_decap(ctx);
+}
+
+static inline void
+update_worker_time(
+	struct balancer_state *state, struct dp_worker *worker, uint32_t now
+) {
+	session_table_update_worker_time(
+		&state->session_table, worker->idx, now
+	);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 void
 balancer_handle_packets(
@@ -83,18 +61,50 @@ balancer_handle_packets(
 	struct module_ectx *module_ectx,
 	struct packet_front *packet_front
 ) {
+	// Get balancer module config as container of provided cp_module.
 	struct balancer_module_config *config = container_of(
 		ADDR_OF(&module_ectx->cp_module),
 		struct balancer_module_config,
 		cp_module
 	);
 
-	// TODO: FIXME
-	uint32_t now = time(NULL);
+	// Get current time in seconds.
+	uint32_t now = dp_worker->current_time / (1000 * 1000 * 1000);
 
-	uint32_t worker_idx = dp_worker->idx;
+	// update worker time
+	update_worker_time(ADDR_OF(&config->state), dp_worker, now);
 
-	handle_packets(config, packet_front, module_ectx, worker_idx, now);
+	// Setup packet context.
+	struct packet_ctx ctx;
+	packet_ctx_setup(
+		&ctx, now, dp_worker, module_ectx, config, packet_front
+	);
+
+	struct packet *packet;
+	while ((packet = packet_list_pop(&packet_front->input)) != NULL) {
+		// Set incoming packet
+		packet_ctx_set_packet(&ctx, packet);
+
+		// Update module common stats
+		packet_ctx_update_common_stats_on_incoming_packet(&ctx);
+
+		// Try decap packet if its destination
+		// is from the balancer decap list.
+		//
+		// If packet dst is from the destination list
+		// and decap failed, drop packet.
+		if (packet_ctx_try_decap(&ctx) != 0) {
+			packet_ctx_drop_packet(&ctx);
+			return;
+		}
+
+		// Handle incoming packet.
+		// This function drop packet
+		// or passes it to the next module
+		// under the hood. Or crafts new ICMP packets
+		// and also passes it to the next module.
+		packet_ctx_handle(&ctx);
+	}
 }
 
 struct module *
