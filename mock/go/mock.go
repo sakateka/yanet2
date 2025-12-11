@@ -69,6 +69,7 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"github.com/gopacket/gopacket"
@@ -101,15 +102,16 @@ func NewYanetMock(config *YanetMockConfig) (*YanetMock, error) {
 		)
 	}
 
-	mock := C.struct_yanet_mock{}
-	ec, err := C.yanet_mock_init(&mock, &cConfig, nil)
+	mock := new(YanetMock)
+	mock.inner = C.struct_yanet_mock{}
+	ec, err := C.yanet_mock_init(&mock.inner, &cConfig, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init mock: %w", err)
 	}
 	if ec != C.int(0) {
 		return nil, fmt.Errorf("failed to init mock: ec=%d", ec)
 	}
-	return &YanetMock{inner: mock}, nil
+	return mock, nil
 }
 
 func (mock *YanetMock) Free() {
@@ -166,4 +168,16 @@ func (mock *YanetMock) HandlePackets(packets ...gopacket.Packet) (*HandlePackets
 		Output: output.Info(),
 		Drop:   drop.Info(),
 	}, nil
+}
+
+func (mock *YanetMock) SetCurrentTime(time time.Time) {
+	ts := C.struct_timespec{}
+	ts.tv_sec = C.time_t(time.Unix())
+	ts.tv_nsec = C.long(time.Nanosecond())
+	C.yanet_mock_set_current_time(&mock.inner, &ts)
+}
+
+func (mock *YanetMock) GetCurrentTime() time.Time {
+	ts := C.yanet_mock_current_time(&mock.inner)
+	return time.Unix(int64(ts.tv_sec), int64(ts.tv_nsec))
 }

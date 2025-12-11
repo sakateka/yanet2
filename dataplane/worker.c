@@ -33,6 +33,7 @@
  *  - anything else
  */
 
+#include "dataplane/time/clock.h"
 #include "yanet_build_config.h"
 
 #include "worker.h"
@@ -40,10 +41,11 @@
 #include "dataplane/dataplane.h"
 #include "dataplane/device.h"
 
-#include "dataplane/pipeline/pipeline.h"
+#include "lib/dataplane/config/zone.h"
+#include "lib/dataplane/pipeline/pipeline.h"
+#include "lib/dataplane/time/clock.h"
 
-#include "controlplane/config/zone.h"
-#include "dataplane/config/zone.h"
+#include "lib/controlplane/config/zone.h"
 
 #include "common/data_pipe.h"
 #include "logging/log.h"
@@ -264,6 +266,14 @@ worker_write(struct dataplane_worker *worker, struct packet_list *packets) {
 
 static void
 worker_loop_round(struct dataplane_worker *worker) {
+	// Initialize current worker time
+	// on the start of loop round
+	{
+		struct dp_worker *dp_worker = worker->dp_worker;
+		dp_worker->current_time =
+			tsc_clock_get_time_ns(&dp_worker->clock);
+	}
+
 	struct dp_config *dp_config = worker->instance->dp_config;
 	struct cp_config *cp_config = worker->instance->cp_config;
 	struct cp_config_gen *cp_config_gen =
@@ -398,6 +408,12 @@ dataplane_worker_init(
 	}
 	memset(dp_worker, 0, sizeof(struct dp_worker));
 	dp_worker->idx = dp_config->worker_count;
+
+	// Init worker clock
+	int init_clock_result = tsc_clock_init(&dp_worker->clock);
+	if (init_clock_result != 0) {
+		return -1;
+	}
 
 	worker->dp_worker = dp_worker;
 	struct dp_worker **new_workers = (struct dp_worker **)memory_balloc(

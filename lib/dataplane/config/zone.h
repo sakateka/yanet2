@@ -1,12 +1,16 @@
 #pragma once
 
+#include <stdalign.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "common/memory.h"
 
 #include "dataplane/module/module.h"
+
+#include "dataplane/time/clock.h"
 
 #include "dataplane/config/topology.h"
 
@@ -32,6 +36,22 @@ struct dp_worker {
 
 	uint64_t gen;
 
+	// Allows to get current worker time.
+	//
+	// Currently, we init it only once
+	// and dont adjust.
+	// So, we have some drift, which is small but...
+	// (see tsc_clock docs). It is not importand
+	// for now and fix should be easy, but need discuss.
+	//
+	// TODO: FIXME
+	struct tsc_clock clock;
+
+	// Current worker time in nanoseconds,
+	// initialized on the start of the current
+	// loop round.
+	uint64_t current_time;
+
 	uint64_t *iterations;
 
 	uint64_t *rx_count;
@@ -45,9 +65,8 @@ struct dp_worker {
 
 	struct rte_mempool *rx_mempool;
 
-	uint64_t pad[6];
+	uint8_t pad[24];
 };
-
 struct dp_config {
 	uint32_t instance_count;
 	uint32_t instance_idx;
