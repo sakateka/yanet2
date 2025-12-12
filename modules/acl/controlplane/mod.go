@@ -3,17 +3,19 @@ package acl
 import (
 	"fmt"
 
-	"github.com/yanet-platform/yanet2/controlplane/ffi"
-	"github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+
+	"github.com/yanet-platform/yanet2/controlplane/ffi"
+	"github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb"
 )
 
 const agentName = "acl"
-const serviceName = "aclpb.AclService"
+const serviceName = "aclpb.ACLService"
 
-// AclModule implements module for Acl control
-type AclModule struct {
+// ACLModule is a control-plane component for ACL (Access Control List) module
+// with integrated firewall state management
+type ACLModule struct {
 	cfg     *Config
 	shm     *ffi.SharedMemory
 	agents  []*ffi.Agent
@@ -21,8 +23,8 @@ type AclModule struct {
 	log     *zap.SugaredLogger
 }
 
-// NewAclModule creates a new Acl module instance
-func NewAclModule(cfg *Config, log *zap.SugaredLogger) (*AclModule, error) {
+// NewACLModule creates a new ACL module instance
+func NewACLModule(cfg *Config, log *zap.SugaredLogger) (*ACLModule, error) {
 	log = log.With(zap.String("module", serviceName))
 
 	shm, err := ffi.AttachSharedMemory(cfg.MemoryPath)
@@ -41,9 +43,10 @@ func NewAclModule(cfg *Config, log *zap.SugaredLogger) (*AclModule, error) {
 		return nil, fmt.Errorf("failed to attach agents: %w", err)
 	}
 
-	service := NewACLService(agents)
+	// Create ACL service
+	service := NewACLService(shm, agents, log)
 
-	return &AclModule{
+	return &ACLModule{
 		cfg:     cfg,
 		shm:     shm,
 		agents:  agents,
@@ -52,23 +55,23 @@ func NewAclModule(cfg *Config, log *zap.SugaredLogger) (*AclModule, error) {
 	}, nil
 }
 
-func (m *AclModule) Name() string {
+func (m *ACLModule) Name() string {
 	return "acl"
 }
 
-func (m *AclModule) Endpoint() string {
+func (m *ACLModule) Endpoint() string {
 	return m.cfg.Endpoint
 }
 
-func (m *AclModule) ServicesNames() []string {
+func (m *ACLModule) ServicesNames() []string {
 	return []string{serviceName}
 }
 
-func (m *AclModule) RegisterService(server *grpc.Server) {
-	aclpb.RegisterAclServiceServer(server, m.service)
+func (m *ACLModule) RegisterService(server *grpc.Server) {
+	aclpb.RegisterACLServiceServer(server, m.service)
 }
 
-func (m *AclModule) Close() error {
+func (m *ACLModule) Close() error {
 	for i, agent := range m.agents {
 		if err := agent.Close(); err != nil {
 			m.log.Warnw("failed to close shared memory agent", "instance", i, "error", err)
@@ -77,5 +80,6 @@ func (m *AclModule) Close() error {
 	if err := m.shm.Detach(); err != nil {
 		m.log.Warnw("failed to detach shared memory", "error", err)
 	}
+
 	return nil
 }
