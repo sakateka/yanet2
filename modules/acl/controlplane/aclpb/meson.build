@@ -1,10 +1,13 @@
 proto_dir = meson.current_source_dir()
 root_dir = meson.project_source_root()
-proto_files = [join_paths(proto_dir, 'acl.proto')]
+proto_files = [
+    join_paths(proto_dir, 'fwstate.proto'),
+    join_paths(proto_dir, 'acl.proto'),
+]
 
 protoc_gen = custom_target(
     'acl-protoc',
-    output: ['acl.pb.go', 'acl_grpc.pb.go'],
+    output: ['acl.pb.go', 'acl_grpc.pb.go', 'fwstate.pb.go'],
     input: proto_files,
     command: [
         protoc,

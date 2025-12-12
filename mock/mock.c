@@ -154,45 +154,51 @@ dataplane_initialize(
 
 	int rc = dataplane_load_module(dp_config, bin_hndl, "forward");
 	if (rc == -1) {
-		return -1;
+		// FIXME: Define a common error base and enum with errors for
+		// modules and other parts
+		return -2;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "route");
 	if (rc == -1) {
-		return -1;
+		return -3;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "decap");
 	if (rc == -1) {
-		return -1;
+		return -4;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "dscp");
 	if (rc == -1) {
-		return -1;
+		return -5;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "nat64");
 	if (rc == -1) {
-		return -1;
+		return -6;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "balancer");
 	if (rc == -1) {
-		return -1;
+		return -7;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "pdump");
 	if (rc == -1) {
-		return -1;
+		return -8;
 	}
 	rc = dataplane_load_module(dp_config, bin_hndl, "acl");
 	if (rc == -1) {
-		return -1;
+		return -9;
+	}
+	rc = dataplane_load_module(dp_config, bin_hndl, "fwstate");
+	if (rc == -1) {
+		return -10;
 	}
 
 	rc = dataplane_load_device(dp_config, bin_hndl, "plain");
 	if (rc == -1) {
-		return -1;
+		return -11;
 	}
 
 	rc = dataplane_load_device(dp_config, bin_hndl, "vlan");
 	if (rc == -1) {
-		return -1;
+		return -12;
 	}
 
 	cp_config->cp_config_gen = NULL;
@@ -279,7 +285,7 @@ yanet_mock_init(
 	);
 	if (res != 0) {
 		yanet_mock_free(mock);
-		return -1;
+		return res;
 	}
 
 	// init worker mocks

@@ -3,16 +3,53 @@ syntax = "proto3";
 package aclpb;
 
 import "common/commonpb/target.proto";
+import "fwstate.proto";
 
 option go_package = "github.com/yanet-platform/yanet2/modules/"
 		    "acl/controlplane/aclpb;aclpb";
 
-service AclService {
-	// Updates the complete Acl configuration with a new set of rules
+service ACLService {
+	// List all ACL configurations across instances
+	rpc ListConfigs(ListConfigsRequest) returns (ListConfigsResponse);
+	// Show specific ACL configuration
+	rpc ShowConfig(ShowConfigRequest) returns (ShowConfigResponse);
+	// Updates the complete ACL configuration with a new set of rules
 	rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
 	// Allows to delete acl config if it is not referenced
 	// by any pipeline.
 	rpc DeleteConfig(DeleteConfigRequest) returns (DeleteConfigResponse);
+
+	// Updates fwstate config inside ACL configuration with a new set of
+	// rules
+	rpc UpdateFWStateConfig(UpdateFWStateConfigRequest)
+		returns (UpdateFWStateConfigResponse);
+}
+
+message ListConfigsRequest {
+}
+
+message ListConfigsResponse {
+	repeated InstanceConfigs instance_configs = 1;
+}
+
+message InstanceConfigs {
+	uint32 instance = 1;
+	repeated string configs = 2;
+}
+
+message ShowConfigRequest {
+	commonpb.TargetModule target = 1;
+}
+
+message ShowConfigResponse {
+	uint32 instance = 1;
+	Config rules = 2;
+	MapConfig fwstate_map = 3;
+	SyncConfig fwstate_sync = 4;
+}
+
+message Config {
+	repeated Rule rules = 1;
 }
 
 message UpdateConfigRequest {
@@ -74,6 +111,7 @@ enum ActionKind {
 	ACTION_KIND_DENY = 1;
 	ACTION_KIND_COUNT = 2;
 	ACTION_KIND_CHECK_STATE = 3;
+	ACTION_KIND_CREATE_STATE = 4;
 }
 
 // Delete config with specified name.
