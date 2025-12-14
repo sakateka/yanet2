@@ -311,6 +311,9 @@ dataplane_init_storage(
 	dp_config->dp_modules = NULL;
 	dp_config->module_count = 0;
 
+	dp_config->workers = NULL;
+	dp_config->worker_count = 0;
+
 	struct cp_config *cp_config =
 		(struct cp_config *)((uintptr_t)storage + dp_memory);
 

@@ -29,6 +29,29 @@ jobs:
       cache_name: build-and-test
 
     steps:
+      - name: Free up disk space on GitHub runner
+        run: |
+          echo "=== Initial disk space ==="
+          df -h
+          
+          echo "=== Removing unnecessary software ==="
+          # Remove large packages that are not needed
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          
+          # Clean apt cache
+          sudo apt-get clean
+          
+          # Remove docker images
+          docker rmi $(docker images -q) 2>/dev/null || true
+          
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: update apt (act hack)
         if: ${{ env.ACT }}
         run: |
@@ -45,29 +68,32 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}-
+            ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
       - uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: meson clang python3-pyelftools libnuma-dev libpcap-dev git protobuf-compiler
+          packages: meson clang python3-pyelftools libnuma-dev libpcap-dev git protobuf-compiler jq clang-tidy-19
           version: 1.1
+
+      - name: Install LLVM 19 toolchain
+        id: llvm
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "19.1.1"
+          directory: ${{ runner.temp }}/llvm
 
       - uses: actions/checkout@v4
         with:
           submodules: true
+
 
       - uses: hendrikmuhs/ccache-action@v1.2.18
         name: ccache
         with:
           key: ${{ runner.os }}-build-cache
 
-      - name: Cache DPDK build
-        uses: actions/cache@v4
-        with:
-          path: |
-            build/subprojects/dpdk
-          key: ${{ runner.os }}-dpdk-${{ hashFiles('subprojects/dpdk/**') }}-${{ hashFiles('**/meson.build') }}
-          restore-keys: |
-            ${{ runner.os }}-dpdk-
 
       - uses: actions/setup-go@v5
         with:
@@ -85,8 +111,9 @@ jobs:
           path: |
             ${{ env.cache }}
             ${{ env.modcache }}
-          key: ${{ env.cache_name }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/go.mod') }}
+          key: ${{ env.cache_name }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/go.mod') }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
+            ${{ env.cache_name }}-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-${{ hashFiles('**/go.mod') }}-
             ${{ env.cache_name }}-${{ runner.os }}-go-
 
       - name: Install Go Protobuf Plugins
@@ -94,10 +121,140 @@ jobs:
           go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
           go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 
-      - name: Build YANET (dataplane -> modules -> controlplane)
+      - name: Build YANET (sanitize)
         run: |
-          meson setup build -Dbuildtype=debug
+          make go-cache-clean
+          meson setup build -Dbuildtype=debug -Doptimization=0 -Db_sanitize=address,undefined
           make dataplane cli
+
+      - name: Build and run tests (sanitize)
+        run: |
+          make go-cache-clean
+          make test-debug
+      - name: Show meson test log
+        run:
+          grep -v 'Inherited environment' build/meson-logs/testlog.txt
+
+      - name: Clean debug build artifacts to free space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          echo "=== Build directory size ==="
+          du -sh build/ || true
+          
+          echo "=== Cleaning debug build artifacts ==="
+          # Completely remove build directory to free maximum space
+          rm -rf build/
+          
+          # Clean Docker build cache if exists
+          docker system prune -af 2>/dev/null || true
+          
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      - name: Build YANET (release)
+        run: |
+          make go-cache-clean
+          meson setup build -Dbuildtype=release
+          make dataplane cli
+
+      - name: Build and run tests (release)
+        run: |
+          make test
+      - name: Show meson test log
+        run:
+          grep -v 'Inherited environment' build/meson-logs/testlog.txt
+
+      - name: Run clang-tidy
+        env:
+          # Use the same directory we asked the install-llvm-action to install to
+          LLVM_DIR: ${{ runner.temp }}/llvm
+        run: |
+          set -euo pipefail
+          # Ensure compilation database exists
+          test -f build/compile_commands.json || { echo "ERROR: build/compile_commands.json not found"; ls -la build || true; exit 1; }
+  
+          # Force using the freshly installed LLVM 19 to avoid ABI/lib conflicts with system packages
+          if [ ! -x "$LLVM_DIR/bin/clang-tidy" ]; then
+            echo "ERROR: LLVM 19 clang-tidy not found at $LLVM_DIR/bin/clang-tidy"; ls -la "$LLVM_DIR/bin" || true; exit 1
+          fi
+          export PATH="$LLVM_DIR/bin:$PATH"
+          export LD_LIBRARY_PATH="$LLVM_DIR/lib:${LD_LIBRARY_PATH:-}"
+  
+          CTIDY="$LLVM_DIR/bin/clang-tidy"
+          # Locate run-clang-tidy.py shipped with LLVM
+          if   [ -f "$LLVM_DIR/share/clang/run-clang-tidy.py" ]; then
+            RTIDY="$LLVM_DIR/share/clang/run-clang-tidy.py"
+          elif [ -f "$LLVM_DIR/lib/clang/run-clang-tidy.py" ]; then
+            RTIDY="$LLVM_DIR/lib/clang/run-clang-tidy.py"
+          else
+            RTIDY=""
+          fi
+  
+          echo "Using clang-tidy binary: $CTIDY"
+          [ -n "$RTIDY" ] && echo "Using run-clang-tidy helper: $RTIDY"
+  
+          # Build file list from database (C files, exclude subprojects)
+          FILES="$(jq -r '.[].file' build/compile_commands.json | sort -u | grep '\.c$' | grep -v '/subprojects/' || true)"
+          if [ -z "$FILES" ]; then
+            echo "No source files to lint (after filtering)."; exit 0;
+          fi
+  
+          if [ -n "$RTIDY" ] && [ -f "$RTIDY" ]; then
+            # Use run-clang-tidy.py (handles DB well and parallelism)
+            python3 "$RTIDY" \
+              -p build \
+              -j "$(nproc)" \
+              -clang-tidy-binary "$CTIDY" \
+              -header-filter='^(?!.*\/subprojects\/).*' \
+              $FILES
+          else
+            # Fallback: invoke clang-tidy directly from DB directory
+            cd build
+            printf "%s\n" $FILES \
+              | xargs -P"$(nproc)" -I{} "$CTIDY" \
+                  -p . \
+                  -header-filter='^(?!.*\/subprojects\/).*' \
+                  {}
+          fi
+
+      - name: Verify binaries before upload
+        run: |
+          echo "=== DIAGNOSTIC: Verifying binaries before artifact upload ==="
+          echo "Current git commit: $(git rev-parse HEAD)"
+          echo "Current git commit short: $(git rev-parse --short HEAD)"
+          echo ""
+          
+          echo "yanet-dataplane:"
+          if [ -f "build/dataplane/yanet-dataplane" ]; then
+            stat build/dataplane/yanet-dataplane
+            md5sum build/dataplane/yanet-dataplane
+            strings build/dataplane/yanet-dataplane | grep -E "yanet|version" | head -20 || true
+          else
+            echo "ERROR: build/dataplane/yanet-dataplane not found!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "yanet-controlplane:"
+          if [ -f "build/controlplane/yanet-controlplane" ]; then
+            stat build/controlplane/yanet-controlplane
+            md5sum build/controlplane/yanet-controlplane
+            strings build/controlplane/yanet-controlplane | grep -E "yanet|version" | head -20 || true
+          else
+            echo "ERROR: build/controlplane/yanet-controlplane not found!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "yanet-cli binaries:"
+          if ls target/release/yanet-cli* 1> /dev/null 2>&1; then
+            stat target/release/yanet-cli* || true
+            md5sum target/release/yanet-cli* || true
+          else
+            echo "ERROR: No yanet-cli binaries found in target/release/!"
+            exit 1
+          fi
 
       - name: Upload YANET binaries
         uses: actions/upload-artifact@v4
@@ -107,34 +264,6 @@ jobs:
             build/dataplane/yanet-dataplane
             build/controlplane/yanet-controlplane
             target/release/yanet-cli*
-
-      - name: Build and run tests
-        run: |
-          make test
-      - name: Show meson test log
-        run:
-          grep -v 'Inherited environment' build/meson-logs/testlog.txt
-
-      - uses: cpp-linter/cpp-linter-action@main
-        id: linter
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          database: build
-          style: file
-          # Use .clang-tidy config file.
-          tidy-checks: ''
-          version: 19
-          thread-comments: false
-          step-summary: true
-          tidy-review: false
-          format-review: false
-          files-changed-only: true
-          ignore: '.github|build'
-      - name: Check code style violation
-        if: steps.linter.outputs.clang-tidy-checks-failed > 0
-        run: exit 1
 
   functional-tests:
     name: Run Functional Tests
@@ -146,6 +275,12 @@ jobs:
     - uses: actions/checkout@v4
       with:
         submodules: true
+
+    - name: Clean any pre-existing build artifacts
+      run: |
+        echo "=== Cleaning any cached build artifacts before downloading from build job ==="
+        rm -rf build/ target/ || true
+        echo "Cleaned build/ and target/ directories"
 
     - name: Set up Go
       uses: actions/setup-go@v5
@@ -204,34 +339,17 @@ jobs:
         name: yanet2-binaries
         path: ./
 
-    - name: Display structure of downloaded files
+    - name: Place downloaded binaries
       run: |
-        echo "=== Downloaded files structure ==="
-        ls -la ./
-        echo "=== Build directory ==="
-        ls -la build/ || echo "Build directory not found"
-        echo "=== Target directory ==="
-        ls -la target/ || echo "Target directory not found"
-        
-        # Ensure directories exist
-        mkdir -p build/dataplane build/controlplane
-        mkdir -p target/release
-        
-        # Move binaries to correct locations if they were downloaded to root
-        if [ -f "./yanet-dataplane" ]; then
-          mv ./yanet-dataplane build/dataplane/
+        mkdir -p build/dataplane build/controlplane target/release
+        [ -f "./yanet-dataplane" ] && mv -f ./yanet-dataplane build/dataplane/
+        [ -f "./yanet-controlplane" ] && mv -f ./yanet-controlplane build/controlplane/
+        if ls ./yanet-cli* 1> /dev/null 2>&1; then
+          mv -f ./yanet-cli-* target/release/
         fi
-        if [ -f "./yanet-controlplane" ]; then
-          mv ./yanet-controlplane build/controlplane/
-        fi
-        if [ -f "./yanet-cli-nat64" ]; then
-          mv ./yanet-cli-* target/release/
-        fi
-        
-        # Make binaries executable
-        chmod +x build/dataplane/yanet-dataplane || true
-        chmod +x build/controlplane/yanet-controlplane || true
-        chmod +x target/release/yanet-cli* || true
+        chmod +x build/dataplane/yanet-dataplane 2>/dev/null || true
+        chmod +x build/controlplane/yanet-controlplane 2>/dev/null || true
+        chmod +x target/release/yanet-cli* 2>/dev/null || true
         
     - name: Prepare test environment
       working-directory: tests/functional

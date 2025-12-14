@@ -15,13 +15,10 @@
 
 #include <string.h>
 
-#include "common/memory_address.h"
 #include "key.h"
-#include "value.h"
-
-#include "key.h"
-
 #include "memory.h"
+#include "memory_address.h"
+#include "value.h"
 
 #define LPM_VALUE_INVALID 0xffffffff
 #define LPM_VALUE_MASK 0x7fffffff
@@ -138,7 +135,8 @@ lpm_check_range_lo(
 	uint8_t check[key_size];
 	memcpy(check, key, hop + 1);
 
-	memset(check + hop + 1, 0x00, key_size - hop - 1);
+	if (hop + 1 < key_size)
+		memset(check + hop + 1, 0x00, key_size - hop - 1);
 	if (filter_key_cmp(key_size, check, from) < 0)
 		return -1;
 
@@ -152,7 +150,8 @@ lpm_check_range_hi(
 	uint8_t check[key_size];
 	memcpy(check, key, key_size);
 
-	memset(check + hop + 1, 0xff, key_size - hop - 1);
+	if (hop + 1 < key_size)
+		memset(check + hop + 1, 0xff, key_size - hop - 1);
 	if (filter_key_cmp(key_size, check, to) > 0)
 		return -1;
 
