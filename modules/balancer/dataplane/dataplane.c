@@ -4,7 +4,6 @@
 #include <rte_tcp.h>
 #include <rte_udp.h>
 
-#include "dataplane/time/clock.h"
 #include "flow/setup.h"
 #include "flow/stats.h"
 
@@ -18,8 +17,6 @@
 
 #include "icmp/handle.h"
 #include "l4/handle.h"
-#include "modules/balancer/state/session_table.h"
-#include "modules/balancer/state/state.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -44,15 +41,6 @@ packet_ctx_try_decap(struct packet_ctx *ctx) {
 	return try_decap(ctx);
 }
 
-static inline void
-update_worker_time(
-	struct balancer_state *state, struct dp_worker *worker, uint32_t now
-) {
-	session_table_update_worker_time(
-		&state->session_table, worker->idx, now
-	);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 void
@@ -70,9 +58,6 @@ balancer_handle_packets(
 
 	// Get current time in seconds.
 	uint32_t now = dp_worker->current_time / (1000 * 1000 * 1000);
-
-	// update worker time
-	update_worker_time(ADDR_OF(&config->state), dp_worker, now);
 
 	// Setup packet context.
 	struct packet_ctx ctx;

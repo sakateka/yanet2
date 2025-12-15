@@ -48,18 +48,12 @@ balancer_state_register_real(
 size_t
 balancer_state_session_table_capacity(struct balancer_state *state);
 
-// Resize sessions table. Returns -1 on error
-// (memory not enough), 0 if we dont resized
-// and 1 if we successfully resized.
+// Resize sessions table.
+// Returns -1 on error and 0 if we successfully resized.
 int
 balancer_state_resize_session_table(
-	struct balancer_state *state, size_t new_size
+	struct balancer_state *state, size_t new_size, uint32_t now
 );
-
-// Free unused memory.
-// Returns 0 if we dont free, 1 if we freed successfully and -1 if error occurs.
-int
-balancer_state_gc_session_table(struct balancer_state *state);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -67,8 +61,8 @@ balancer_state_gc_session_table(struct balancer_state *state);
 struct balancer_session_id {
 	// registry id of the virtual service
 	uint32_t vs_id;
-	uint8_t client_ip[16];
-	uint16_t client_port;
+	uint8_t client_ip[16]; // client ip in the network byte order
+	uint16_t client_port;  // client port in the network byte order
 };
 
 // Represents state info of the session between client and virtual service.
