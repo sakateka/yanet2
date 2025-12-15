@@ -1,6 +1,8 @@
 #include "common/hugepages.h"
 #include "common/memory.h"
+#include "common/ttlmap/detail/city.h"
 #include "lib/fwstate/fwmap.h"
+#include "rte_hash_crc.h"
 #include "test_utils.h"
 #include <assert.h>
 #include <errno.h>
@@ -26,6 +28,71 @@
 
 volatile uint64_t now = 0; // Acceptable for testing purposes
 const uint64_t ttl = 50000;
+
+/*
+static inline uint32_t
+crc32c_sse42_u8(uint8_t data, uint32_t init_val) {
+	__asm__ volatile("crc32b %[data], %[init_val];"
+			 : [init_val] "+r"(init_val)
+			 : [data] "rm"(data));
+	return init_val;
+}
+
+static inline uint32_t
+crc32c_sse42_u16(uint16_t data, uint32_t init_val) {
+	__asm__ volatile("crc32w %[data], %[init_val];"
+			 : [init_val] "+r"(init_val)
+			 : [data] "rm"(data));
+	return init_val;
+}
+
+static inline uint32_t
+crc32c_sse42_u32(uint32_t data, uint32_t init_val) {
+	__asm__ volatile("crc32l %[data], %[init_val];"
+			 : [init_val] "+r"(init_val)
+			 : [data] "rm"(data));
+	return init_val;
+}
+static inline uint32_t
+crc32c_sse42_u64(uint64_t data, uint64_t init_val) {
+	__asm__ volatile("crc32q %[data], %[init_val];"
+			 : [init_val] "+r"(init_val)
+			 : [data] "rm"(data));
+	return (uint32_t)init_val;
+}
+*/
+
+static inline uint64_t
+fwmap_hash_crc32(const void *data, uint32_t data_len, uint32_t init_val) {
+	unsigned i;
+	uintptr_t pd = (uintptr_t)data;
+
+	for (i = 0; i < data_len / 8; i++) {
+		init_val = rte_hash_crc_8byte(*(const uint64_t *)pd, init_val);
+		pd += 8;
+	}
+
+	if (data_len & 0x4) {
+		init_val = rte_hash_crc_4byte(*(const uint32_t *)pd, init_val);
+		pd += 4;
+	}
+
+	if (data_len & 0x2) {
+		init_val = rte_hash_crc_2byte(*(const uint16_t *)pd, init_val);
+		pd += 2;
+	}
+
+	if (data_len & 0x1)
+		init_val = rte_hash_crc_1byte(*(const uint8_t *)pd, init_val);
+
+	return init_val;
+}
+
+static inline uint64_t
+fwmap_hash_city(const void *key, size_t key_size, uint32_t seed) {
+	(void)seed;
+	return city_hash32(key, key_size);
+}
 
 /* Custom key comparison for int keys */
 static bool
@@ -84,7 +151,8 @@ allocate_hugepages_memory(size_t size) {
 
 	if (storage == MAP_FAILED) {
 		int err = errno;
-		printf("L%d: failed to create memory-mapped storage %s: %s\n",
+		printf("L%d: failed to create memory-mapped storage "
+		       "%s: %s\n",
 		       __LINE__,
 		       storage_path,
 		       strerror(errno));
@@ -162,10 +230,6 @@ writer_thread(void *arg) {
 				);
 				((uint8_t *)entry.value)[id] = (uint8_t)id;
 
-				if (lock) {
-					rwlock_write_unlock(lock);
-				}
-
 				successful++;
 				if (j == 0 && id == data->thread_id) {
 					data->write_checksum +=
@@ -181,6 +245,9 @@ writer_thread(void *arg) {
 				}
 				assert(false);
 				exit(1);
+			}
+			if (lock) {
+				rwlock_write_unlock(lock);
 			}
 		}
 	}
@@ -226,7 +293,8 @@ reader_thread_benchmark(void *arg) {
 				rwlock_read_unlock(lock);
 				successful++;
 			} else {
-				printf("L%d ERROR: value with key=%d is not "
+				printf("L%d ERROR: value with key=%d "
+				       "is not "
 				       "found\n",
 				       __LINE__,
 				       key);
@@ -264,16 +332,14 @@ test_multithreaded_benchmark(void *mt_arena) {
 		init_context_from_arena(mt_arena, MT_ARENA_SIZE, "benchmark");
 
 	/* Register custom functions in registry */
-	static bool registered = false;
-	if (!registered) {
-		fwmap_func_registry[FWMAP_KEY_EQUAL_DEFAULT] =
-			(void *)bench_key_equal;
-		fwmap_func_registry[FWMAP_COPY_KEY_DEFAULT] =
-			(void *)bench_copy_key;
-		fwmap_func_registry[FWMAP_COPY_VALUE_DEFAULT] =
-			(void *)bench_copy_value;
-		registered = true;
-	}
+	fwmap_func_registry[FWMAP_KEY_EQUAL_DEFAULT] = (void *)bench_key_equal;
+	fwmap_func_registry[FWMAP_COPY_KEY_DEFAULT] = (void *)bench_copy_key;
+	fwmap_func_registry[FWMAP_COPY_VALUE_DEFAULT] =
+		(void *)bench_copy_value;
+	fwmap_func_registry[FWMAP_HASH_FNV1A] = (void *)fwmap_hash_crc32;
+
+	// fwmap_func_registry[FWMAP_HASH_FNV1A] =
+	//  (void *)fwmap_hash_city;
 
 	fwmap_config_t config = {
 		.key_size = sizeof(int),
@@ -296,7 +362,8 @@ test_multithreaded_benchmark(void *mt_arena) {
 			perror("failed to create FWMap: ");
 		} else {
 
-			printf("Failed to create FWMap (unknown error)\n");
+			printf("Failed to create FWMap (unknown "
+			       "error)\n");
 		}
 		free_arena(mt_arena, MT_ARENA_SIZE);
 		assert(false);
@@ -423,7 +490,8 @@ test_multithreaded_benchmark(void *mt_arena) {
 	// Verify 100% success rate by comparing actual counts (avoids
 	// floating-point precision issues)
 	if (total_successful_writes != TOTAL_OPS) {
-		printf("L%d ERROR: Write success rate (%lu/%llu) is below "
+		printf("L%d ERROR: Write success rate (%lu/%llu) is "
+		       "below "
 		       "required threshold\n",
 		       __LINE__,
 		       total_successful_writes,
@@ -432,7 +500,8 @@ test_multithreaded_benchmark(void *mt_arena) {
 		exit(1);
 	}
 	if (total_successful_reads != TOTAL_OPS) {
-		printf("L%d ERROR: Read success rate (%lu/%llu) is below "
+		printf("L%d ERROR: Read success rate (%lu/%llu) is "
+		       "below "
 		       "required "
 		       "threshold\n",
 		       __LINE__,

@@ -12,7 +12,7 @@ test('fwmap_basic', fwmap_test_basic, suite: ['fwstate'])
 fwmap_bench_test = executable(
   'fwmap_bench_test',
   ['fwmap_bench_test.c'],
-  c_args: yanet_c_args,  # not testing args
+  c_args: yanet_c_args,  # not yanet_test_c_args
   link_args: yanet_link_args,
   dependencies: dependencies,
 )
@@ -21,16 +21,21 @@ test('fwmap_bench-st', fwmap_bench_test, suite: ['fwstate', 'large'])
 fwmap_heavy_bench_test = executable(
   'fwmap_heavy_bench_test',
   ['fwmap_heavy_bench_test.c'],
-  c_args: yanet_c_args,  # not testing args
+  c_args: yanet_c_args,  # non yanet_test_c_args
   link_args: yanet_link_args,
-  dependencies: dependencies,
+  dependencies: dependencies + [
+    libdpdk.get_variable('dpdk_dep'),
+    libdpdk.get_variable('static_rte_hash'),
+    libdpdk_inc_dep,
+    libdpdk_dep,
+  ],
 )
 test('fwmap_heavy_bench-mt', fwmap_heavy_bench_test, suite: ['fwstate', 'large'])
 
 ttlmap_heavy_bench_test = executable(
   'ttlmap_heavy_bench_test',
   ['ttlmap_heavy_bench_test.c'],
-  c_args: yanet_c_args,  # not testing args
+  c_args: yanet_c_args,  # not yanet_test_c_args
   link_args: yanet_link_args,
   dependencies: dependencies,
 )
