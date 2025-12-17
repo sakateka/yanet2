@@ -1,7 +1,7 @@
 .PHONY: all dataplane test test-functional cli cli-install fuzz clean $(foreach module,$(MODULES),cli/$(module) cli-install/$(module))
 
 # Define the list of modules to avoid repetition
-MODULES := decap dscp route forward nat64
+MODULES := decap dscp route forward nat64 pdump acl
 
 # Default PREFIX for debian packaging
 PREFIX ?= /usr
@@ -15,7 +15,11 @@ setup:
 	meson setup build
 
 setup-debug:
-	meson setup -Dbuildtype=debug -Doptimization=0 build
+	@if [ ! -d "build" ]; then \
+		meson setup -Dbuildtype=debug -Doptimization=0 build; \
+	else \
+		meson configure -Dbuildtype=debug -Doptimization=0 -Db_sanitize="" build; \
+	fi
 
 setup-asan:
 	meson setup -Dbuildtype=debug -Doptimization=0 -Db_sanitize=address,undefined build
