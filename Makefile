@@ -27,6 +27,11 @@ setup-asan:
 dataplane:
 	meson compile -C build
 
+install1:
+	cp build/dataplane/yanet-dataplane /usr/bin
+	cp build/controlplane/yanet-controlplane /usr/bin
+	cd cli && make install
+
 cli:
 	cargo build --release --workspace
 
