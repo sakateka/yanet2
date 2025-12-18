@@ -25,6 +25,13 @@ type ModuleConfig struct {
 	// Balancer virtual services
 	VirtualServices []lib.VirtualService
 
+	// Index from real identifier to its location in VirtualServices
+	// Maps RealIdentifier -> (vsIndex, realIndex)
+	realIndex map[lib.RealIdentifier]struct {
+		vsIdx   int
+		realIdx int
+	}
+
 	// Balancer source and decap addresses
 	Addresses lib.BalancerAddresses
 
@@ -170,12 +177,42 @@ func (config *ModuleConfig) Update(
 	// Set wlc
 	config.wlc = wlc
 
+	// Build real index for fast lookups
+	config.buildRealIndex()
+
 	// clear real updates buffer
 	config.realUpdates.Clear()
 
 	config.runBackgroundTasks()
 
 	return nil
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+// buildRealIndex builds an index mapping real identifiers to their locations
+func (config *ModuleConfig) buildRealIndex() {
+	// Count total reals to pre-allocate map
+	totalReals := 0
+	for vsIdx := range config.VirtualServices {
+		totalReals += len(config.VirtualServices[vsIdx].Reals)
+	}
+
+	config.realIndex = make(map[lib.RealIdentifier]struct {
+		vsIdx   int
+		realIdx int
+	}, totalReals)
+
+	for vsIdx := range config.VirtualServices {
+		vs := &config.VirtualServices[vsIdx]
+		for realIdx := range vs.Reals {
+			real := &vs.Reals[realIdx]
+			config.realIndex[real.Identifier] = struct {
+				vsIdx   int
+				realIdx int
+			}{vsIdx: vsIdx, realIdx: realIdx}
+		}
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -214,45 +251,12 @@ func (config *ModuleConfig) UpdateReals(
 		config.realUpdates.Append(updates)
 		return nil
 	} else {
-		// clone virtual services
-		cloneVirtualServices := config.VirtualServices
+		// Apply updates using the real index for O(1) lookups
 		for updateIdx := range updates {
 			update := &updates[updateIdx]
-			var updateVs *lib.VirtualService = nil
-			for vsIdx := range cloneVirtualServices {
-				vs := &config.VirtualServices[vsIdx]
-				if vs.Identifier == update.Real.Vs {
-					updateVs = vs
-					break
-				}
-			}
-			if updateVs == nil {
-				config.log.Warnw(
-					"failed to find virtual service for real update",
-					"update_index", updateIdx,
-					"vs_ip", update.Real.Vs.Ip.String(),
-					"vs_port", update.Real.Vs.Port,
-					"vs_proto", update.Real.Vs.Proto.String(),
-					"real_ip", update.Real.Ip.String(),
-				)
-				return fmt.Errorf(
-					"failed to find virtual service for update at index %d: vs=%s:%d/%s, real=%s",
-					updateIdx,
-					update.Real.Vs.Ip.String(),
-					update.Real.Vs.Port,
-					update.Real.Vs.Proto.String(),
-					update.Real.Ip.String(),
-				)
-			}
-			found := false
-			for realIdx := range updateVs.Reals {
-				real := &updateVs.Reals[realIdx]
-				if real.Identifier == update.Real {
-					real.Weight = update.Weight
-					found = true
-					break
-				}
-			}
+
+			// Find real location using index (O(1) lookup)
+			location, found := config.realIndex[update.Real]
 			if !found {
 				config.log.Warnw(
 					"failed to find real for update",
@@ -271,8 +275,18 @@ func (config *ModuleConfig) UpdateReals(
 					update.Real.Ip.String(),
 				)
 			}
+
+			// Update the real directly
+			real := &config.VirtualServices[location.vsIdx].Reals[location.realIdx]
+			real.Weight = update.Weight
+			real.Enabled = update.Enable
 		}
-		return config.Update(cloneVirtualServices, config.Addresses, config.SessionTimeouts, config.wlc)
+
+		// Only call Update if we actually made changes
+		if len(updates) > 0 {
+			return config.Update(config.VirtualServices, config.Addresses, config.SessionTimeouts, config.wlc)
+		}
+		return nil
 	}
 }
 
