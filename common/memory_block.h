@@ -22,9 +22,16 @@ static_assert(
 #define MEMORY_BLOCK_ALLOCATOR_MIN_BITS 3
 #define MEMORY_BLOCK_ALLOCATOR_MAX_BITS                                        \
 	(MEMORY_BLOCK_ALLOCATOR_MIN_BITS + MEMORY_BLOCK_ALLOCATOR_EXP - 1)
+// Based on the hugepage size (currently 2MB), we depend on this size when
+// mapping shared memory. There could be tricky solutions to mmap with max block
+// alignment, but those solutions seem brittle and cumbersome, so we decided to
+// restrict allocator block alignment to the huge page size.
+#define MEMORY_BLOCK_ALLOCATOR_MAX_ALIGN (1 << 21)
 #define MEMORY_BLOCK_ALLOCATOR_MIN_SIZE (1 << MEMORY_BLOCK_ALLOCATOR_MIN_BITS)
+#define MEMORY_BLOCK_ALLOCATOR_MAX_SIZE_INTERNAL                               \
+	(1 << MEMORY_BLOCK_ALLOCATOR_MAX_BITS)
 #define MEMORY_BLOCK_ALLOCATOR_MAX_SIZE                                        \
-	((1 << MEMORY_BLOCK_ALLOCATOR_MAX_BITS) - ASAN_RED_ZONE * 2)
+	(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE_INTERNAL - ASAN_RED_ZONE * 2)
 
 struct block_allocator_pool {
 	uint64_t allocate;
@@ -243,19 +250,28 @@ block_allocator_put_arena(
 
 	while (pos < end) {
 		size_t align = (size_t)1 << __builtin_ctzll(pos);
+		// If alignment is greater than or equal to
+		// MEMORY_BLOCK_ALLOCATOR_MAX_ALIGN, then we can allocate blocks
+		// with their maximum size
+		size_t block_size =
+			align < MEMORY_BLOCK_ALLOCATOR_MAX_ALIGN
+				? align
+				: MEMORY_BLOCK_ALLOCATOR_MAX_SIZE_INTERNAL;
 		/*
 		 * FIXME:
 		 * The loop bellow could be replaced with some bit magic but
 		 * let us do it in the future
 		 */
-		while (pos + align > end)
-			align >>= 1;
+		while (pos + block_size > end)
+			block_size >>= 1;
 
-		if (align > MEMORY_BLOCK_ALLOCATOR_MAX_SIZE)
-			align = MEMORY_BLOCK_ALLOCATOR_MAX_SIZE;
+		if (block_size > MEMORY_BLOCK_ALLOCATOR_MAX_SIZE_INTERNAL)
+			block_size = MEMORY_BLOCK_ALLOCATOR_MAX_SIZE_INTERNAL;
 
-		block_allocator_bfree_internal(allocator, (void *)pos, align);
-		pos += align;
+		block_allocator_bfree_internal(
+			allocator, (void *)pos, block_size
+		);
+		pos += block_size;
 	}
 }
 
