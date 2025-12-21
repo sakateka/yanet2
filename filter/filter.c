@@ -68,7 +68,6 @@ filter_build(
 		value_registry_free(&dummy);
 
 		// dummy classifier is always 0
-		filter->v[0].slots[0] = 0;
 
 		return 0;
 	}
@@ -133,6 +132,9 @@ filter_query(
 	const uint32_t **actions,
 	uint32_t *count
 ) {
+	// do not initialize
+	struct filter_slots slots;
+
 	// calculate classifiers for attributes
 	for (size_t attr_idx = 0; attr_idx < filter->n; ++attr_idx) {
 		size_t vertex = filter->n + attr_idx;
@@ -140,9 +142,12 @@ filter_query(
 		struct filter_attribute *attr = filter->attr[attr_idx];
 		struct filter_vertex *v = &filter->v[vertex];
 
-		// store calculated classifier in the parent vertex
-		filter->v[vertex / 2].slots[vertex & 1] =
-			attr->query_func(packet, ADDR_OF(&v->data));
+		// store calculated classifier
+		filter_slots_put_value(
+			&slots,
+			vertex,
+			attr->query_func(packet, ADDR_OF(&v->data))
+		);
 	}
 
 	// calculate classifiers for the rest vertices except root
@@ -150,9 +155,15 @@ filter_query(
 		// here both slots must be calculated already
 		struct filter_vertex *v = &filter->v[vertex];
 
-		// store calculated classifier in the parent vertex
-		filter->v[vertex / 2].slots[vertex & 1] =
-			value_table_get(&v->table, v->slots[0], v->slots[1]);
+		// calculate classifier
+		uint32_t c = value_table_get(
+			&v->table,
+			filter_vertex_left_slot(&slots, vertex),
+			filter_vertex_right_slot(&slots, vertex)
+		);
+
+		// store calculated classifier
+		filter_slots_put_value(&slots, vertex, c);
 	}
 
 	// get result from root
@@ -161,7 +172,11 @@ filter_query(
 	size_t root = filter->n > 1;
 	struct filter_vertex *r = &filter->v[root];
 
-	uint32_t result = value_table_get(&r->table, r->slots[0], r->slots[1]);
+	uint32_t result = value_table_get(
+		&r->table,
+		root == 0 ? 0 : filter_vertex_left_slot(&slots, root),
+		filter_vertex_right_slot(&slots, root)
+	);
 
 	struct value_range *range = ADDR_OF(&r->registry.ranges) + result;
 	*actions = ADDR_OF(&range->values);

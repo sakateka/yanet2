@@ -142,6 +142,10 @@ type HandlePacketsResult struct {
 }
 
 func (mock *YanetMock) HandlePackets(packets ...gopacket.Packet) (*HandlePacketsResult, error) {
+	return mock.HandlePacketsOnWorker(0, packets...)
+}
+
+func (mock *YanetMock) HandlePacketsOnWorker(worker int, packets ...gopacket.Packet) (*HandlePacketsResult, error) {
 	pinner := runtime.Pinner{}
 	defer pinner.Unpin()
 
@@ -163,14 +167,14 @@ func (mock *YanetMock) HandlePackets(packets ...gopacket.Packet) (*HandlePackets
 
 	pinner.Pin(mock)
 
-	result, err := C.yanet_mock_handle_packets(
+	// Allocate result on stack - no race condition since each goroutine has its own stack
+	var result C.struct_packet_handle_result
+	C.yanet_mock_handle_packets(
 		&mock.inner,
 		(*C.struct_packet_list)(unsafe.Pointer(packetList)),
-		C.size_t(0), // use the first worker for now
+		C.size_t(worker),
+		&result,
 	)
-	if err != nil {
-		return nil, err
-	}
 
 	pinner.Pin(&result)
 

@@ -3,6 +3,7 @@ package module
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/netip"
 	"sync"
 	"time"
@@ -35,6 +36,9 @@ type ModuleConfigState struct {
 
 	// Total number of active sessions.
 	ActiveSessions uint
+
+	// Previous total number of active sessions.
+	PrevActiveSessions uint
 
 	// Virtual services active sessions information
 	VsActiveSessions map[lib.VsIdentifier]uint
@@ -204,6 +208,7 @@ func (s *ModuleConfigState) GetAndUpdateSessionsInfo(
 		s.VsActiveSessions[session.Real.Vs]++
 	}
 
+	s.PrevActiveSessions = s.ActiveSessions
 	s.ActiveSessions = sessions.SessionsCount
 	s.ActiveSessionsUpdateTimestamp = now
 
@@ -229,6 +234,14 @@ func (s *ModuleConfigState) SyncActiveSessions(now time.Time) error {
 	return nil
 }
 
+func (s *ModuleConfigState) calcNextTableCapacity() uint {
+	sessionTableCapacity := s.SessionTableCapacity()
+	activeSessions := s.ActiveSessions
+	prevActiveSessions := s.PrevActiveSessions
+	newSize := float64(2*activeSessions-prevActiveSessions) / float64(s.MaxLoadFactor)
+	return max(uint(math.Ceil(newSize)), sessionTableCapacity*2)
+}
+
 // ResizeTableOnDemand checks if session table needs resizing based on load factor
 // and resizes it if necessary.
 // Note: Caller must hold the lock.
@@ -243,7 +256,7 @@ func (s *ModuleConfigState) ResizeTableOnDemand(now time.Time) error {
 		zap.Float32("max_load_factor", s.MaxLoadFactor))
 
 	if loadFactor > s.MaxLoadFactor {
-		requestedCapacity := sessionTableCapacity * 2
+		requestedCapacity := s.calcNextTableCapacity()
 		s.log.Infow("session table load factor exceeded, resizing",
 			zap.Float32("load_factor", loadFactor),
 			zap.Float32("max_load_factor", s.MaxLoadFactor),
@@ -281,12 +294,12 @@ func (s *ModuleConfigState) SyncActiveSessionsAndResizeTableOnDemand(
 ) error {
 	// First sync active sessions
 	if err := s.SyncActiveSessions(now); err != nil {
-		return err
+		return fmt.Errorf("failed to sync active sessions: %w", err)
 	}
 
 	// Then check if we need to resize
 	if err := s.ResizeTableOnDemand(now); err != nil {
-		return err
+		return fmt.Errorf("failed to resize table: %w", err)
 	}
 
 	return nil
@@ -295,16 +308,16 @@ func (s *ModuleConfigState) SyncActiveSessionsAndResizeTableOnDemand(
 ////////////////////////////////////////////////////////////////////////////////
 
 func (s *ModuleConfigState) runBackgroundTasks() {
-	// Create a new context for background tasks
-	s.ctx, s.cancel = context.WithCancel(context.Background())
-
 	// Start scanSessionTable task
 	if s.ScanSessionTablePeriodMs > 0 {
+		// Create a new context for background tasks
+		s.ctx, s.cancel = context.WithCancel(context.Background())
+
 		period := time.Duration(s.ScanSessionTablePeriodMs) * time.Millisecond
 		ctx := s.ctx
 
 		s.log.Infow(
-			"starting session table scan background task",
+			"starting sync active sessions and resize table goroutine",
 			zap.Uint("period_ms", s.ScanSessionTablePeriodMs),
 			zap.Duration("period", period),
 		)
@@ -314,20 +327,15 @@ func (s *ModuleConfigState) runBackgroundTasks() {
 			ticker := time.NewTicker(period)
 			defer ticker.Stop()
 
-			s.log.Debugw(
-				"session table scan goroutine started",
-				zap.Duration("ticker_period", period),
-			)
-
 			for {
 				select {
 				case <-ctx.Done():
-					s.log.Info("session table scan goroutine cancelled")
+					s.log.Info("sync active sessions and resize table goroutine cancelled")
 					return
 				case <-ticker.C:
 					s.log.Debugw(
-						"session table scan tick",
-						zap.Duration("period", period),
+						"sync active sessions and resize table tick",
+						zap.Duration("ticker_period", period),
 					)
 					s.lock.Lock()
 					err := s.SyncActiveSessionsAndResizeTableOnDemand(
@@ -336,7 +344,7 @@ func (s *ModuleConfigState) runBackgroundTasks() {
 					s.lock.Unlock()
 					if err != nil {
 						s.log.Errorw(
-							"background task failed",
+							"failed to sync active sessions and resize table",
 							zap.Error(err),
 						)
 					}
@@ -344,6 +352,8 @@ func (s *ModuleConfigState) runBackgroundTasks() {
 			}
 		}()
 	} else {
+		s.ctx = nil
+		s.cancel = nil
 		s.log.Warn("passed zero period for session table scan routine, scanning routine not started")
 	}
 }

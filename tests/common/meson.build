@@ -45,3 +45,20 @@ interval_counter_test = executable(
   dependencies: dependencies
 )
 test('interval_counter', interval_counter_test, suite: ['common'])
+
+rcu_test = executable(
+  'rcu_test',
+  ['rcu.c'],
+  c_args: yanet_test_c_args,
+  link_args: yanet_link_args,
+  dependencies: dependencies
+)
+test('rcu', rcu_test, suite: ['common'])
+
+rcu_bench = executable(
+  'rcu_bench',
+  ['rcu_bench.c'],
+  c_args: yanet_c_args,
+  link_args: yanet_link_args,
+  dependencies: dependencies
+)

@@ -86,6 +86,7 @@
 #include "attribute.h"
 #include "common/registry.h"
 #include "helper.h"
+#include <threads.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -108,17 +109,6 @@ struct filter_vertex {
 	// This table is not filled for leaves.
 	struct value_table table;
 
-	// This values are used during packet classification.
-	// In slots[0] the calculated classifier for the left son is stored.
-	// In slots[1] the calculated classifier for the right son is stored.
-	// If slots[0] and slots[1] are calculated for the vertex,
-	// the classifier for the current vertex can be calculated in the
-	// following way:
-	// 	result classifier = table[slots[0]][slots[1]].
-	// After that, the calculated classifier must be stored in the slot
-	// of the parent vertex.
-	uint32_t slots[2];
-
 	// This data is dedicated for user.
 	// It is passed in the initialization function for
 	// the packet attribute classifier, and can be filled by user
@@ -128,6 +118,35 @@ struct filter_vertex {
 	// As working in shared memory, data is relative pointer.
 	void *data;
 };
+
+// This values are used during packet classification.
+// In slots[0] the calculated classifier for the left son is stored.
+// In slots[1] the calculated classifier for the right son is stored.
+// If slots[0] and slots[1] are calculated for the vertex,
+// the classifier for the current vertex can be calculated in the
+// following way:
+// 	result classifier = table[slots[0]][slots[1]].
+// After that, the calculated classifier must be stored in the slot
+// of the parent vertex.
+struct filter_slots {
+	uint32_t slots[2 * MAX_ATTRIBUTES][2];
+};
+
+// Set one of the child classifiers for the parent of vertex v.
+static inline void
+filter_slots_put_value(struct filter_slots *slots, uint32_t v, uint32_t value) {
+	slots->slots[v / 2][v & 1] = value;
+}
+
+static inline uint32_t
+filter_vertex_left_slot(struct filter_slots *slots, uint32_t v) {
+	return slots->slots[v][0];
+}
+
+static inline uint32_t
+filter_vertex_right_slot(struct filter_slots *slots, uint32_t v) {
+	return slots->slots[v][1];
+}
 
 // Represents packet filter.
 struct filter {
@@ -251,7 +270,6 @@ filter_free(struct filter *filter);
 				value_registry_free(&dummy);                   \
 				goto init_failed;                              \
 			}                                                      \
-			(filter)->v[0].slots[0] = 0;                           \
 			goto init_finish;                                      \
 		}                                                              \
 		for (size_t idx = n - 1; idx >= 2; --idx) {                    \
@@ -283,6 +301,7 @@ filter_free(struct filter *filter);
 
 #define FILTER_QUERY(filter, tag, packet, actions, actions_count)              \
 	__extension__({                                                        \
+		struct filter_slots slots;                                     \
 		const size_t n = sizeof(__filter_attrs_##tag) /                \
 				 sizeof(struct filter_attribute *);            \
 		for (size_t attr_idx = 0; attr_idx < n; ++attr_idx) {          \
@@ -290,20 +309,35 @@ filter_free(struct filter *filter);
 			const struct filter_attribute *attr =                  \
 				__filter_attrs_##tag[attr_idx];                \
 			struct filter_vertex *v = &((filter)->v)[vertex];      \
-			(filter)->v[vertex / 2].slots[vertex & 1] =            \
-				attr->query_func(packet, ADDR_OF(&v->data));   \
+			filter_slots_put_value(                                \
+				&slots,                                        \
+				vertex,                                        \
+				attr->query_func(packet, ADDR_OF(&v->data))    \
+			);                                                     \
 		}                                                              \
 		for (size_t vertex = n - 1; vertex >= 2; --vertex) {           \
 			struct filter_vertex *v = &((filter)->v)[vertex];      \
-			(filter)->v[vertex / 2].slots[vertex & 1] =            \
+			filter_slots_put_value(                                \
+				&slots,                                        \
+				vertex,                                        \
 				value_table_get(                               \
-					&v->table, v->slots[0], v->slots[1]    \
-				);                                             \
+					&v->table,                             \
+					filter_vertex_left_slot(               \
+						&slots, vertex                 \
+					),                                     \
+					filter_vertex_right_slot(              \
+						&slots, vertex                 \
+					)                                      \
+				)                                              \
+			);                                                     \
 		}                                                              \
 		const size_t root = n > 1;                                     \
 		struct filter_vertex *r = &((filter)->v)[root];                \
-		uint32_t result =                                              \
-			value_table_get(&r->table, r->slots[0], r->slots[1]);  \
+		uint32_t result = value_table_get(                             \
+			&r->table,                                             \
+			root == 0 ? 0 : filter_vertex_left_slot(&slots, root), \
+			filter_vertex_right_slot(&slots, root)                 \
+		);                                                             \
 		struct value_range *range =                                    \
 			ADDR_OF(&r->registry.ranges) + result;                 \
 		*(actions) = ADDR_OF(&range->values);                          \
