@@ -11,6 +11,9 @@ protoc_gen = custom_target(
     output: [
         'balancer.pb.go',
         'balancer_grpc.pb.go',
+        'stats.pb.go',
+        'info.pb.go',
+        'module.pb.go',
     ],
     input: proto_files,
     command: [
@@ -20,7 +23,6 @@ protoc_gen = custom_target(
         '--go-grpc_out=paths=source_relative:' + root_dir,
         '@INPUT@',
     ],
-    depends: [common_protoc_gen],
     build_by_default: true,
 )
 balancer_protoc_gen = protoc_gen

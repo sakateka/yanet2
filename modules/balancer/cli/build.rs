@@ -1,7 +1,6 @@
 use core::error::Error;
 
 pub fn main() -> Result<(), Box<dyn Error>> {
-    println!("cargo:rerun-if-changed=../../../common/commonpb/target.proto");
     println!("cargo:rerun-if-changed=../controlplane/balancerpb/balancer.proto");
     println!("cargo:rerun-if-changed=../controlplane/balancerpb/info.proto");
     println!("cargo:rerun-if-changed=../controlplane/balancerpb/module.proto");
@@ -12,10 +11,12 @@ pub fn main() -> Result<(), Box<dyn Error>> {
         .build_server(false)
         .compile_protos(
             &[
-                "common/commonpb/target.proto",
-                "balancerpb/balancer.proto",
+                "modules/balancer/controlplane/balancerpb/balancer.proto",
+                "modules/balancer/controlplane/balancerpb/info.proto",
+                "modules/balancer/controlplane/balancerpb/module.proto",
+                "modules/balancer/controlplane/balancerpb/stats.proto",
             ],
-            &["../../..", "../controlplane"],
+            &["../../.."],
         )?;
 
     Ok(())
