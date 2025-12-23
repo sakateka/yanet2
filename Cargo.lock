@@ -2541,7 +2541,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "colored",
- "humantime",
  "ipnet",
  "ipnetwork",
  "log",
@@ -2735,6 +2734,24 @@ dependencies = [
  "log",
  "prost",
  "prost-types",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "yanet-cli",
+]
+
+[[package]]
+name = "yanet-cli-fwstate"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "humantime",
+ "log",
+ "prost",
+ "prost-types",
+ "serde",
+ "serde_json",
  "tokio",
  "tonic",
  "tonic-build",

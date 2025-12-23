@@ -1,7 +1,7 @@
 .PHONY: all dataplane test test-functional cli cli-install fuzz clean $(foreach module,$(MODULES),cli/$(module) cli-install/$(module))
 
 # Define the list of modules to avoid repetition
-MODULES := decap dscp route forward nat64 pdump acl
+MODULES := decap dscp route forward nat64 pdump acl fwstate
 
 # Default PREFIX for debian packaging
 PREFIX ?= /usr
@@ -46,11 +46,11 @@ cli-install/%:
 cli-clean/%:
 	$(MAKE) -C modules/$*/cli clean
 
-test: dataplane
+test: go-cache-clean dataplane
 	go test -count=1 $$(go list ./... | grep -v 'tests/functional')
 	meson test -C build
 
-test-asan:
+test-asan: go-cache-clean
 	@if [ ! -d "build" ]; then \
 		$(MAKE) setup-asan; \
 	else \
