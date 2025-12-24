@@ -1,7 +1,8 @@
 #include "common.h"
-#include "logging/log.h"
-#include <sys/mman.h>
 
+#include "lib/utils/packet.h"
+
+#include "logging/log.h"
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -10,13 +11,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "utils/utils.h"
+#include <common/rng.h>
 
-#include "../../filter.h"
+#include <filter/query.h>
 
-////////////////////////////////////////////////////////////////////////////////
+FILTER_QUERY_DECLARE(filter_sign, net4_dst, port_dst, proto);
 
-int
+static int
 filter_packets(struct common *common) {
 	uint64_t rng = 128318;
 	const size_t packets = 1000;
@@ -28,18 +29,26 @@ filter_packets(struct common *common) {
 		uint8_t dst_ip[4] = {(i + 1) & 0xFF, 0, 0, 0};
 		uint16_t src_port = rng_next(&rng) & 0xFF;
 		uint16_t dst_port = rng_next(&rng) & 0xFF;
-		struct packet packet = make_packet4(
+
+		struct packet packet = {0};
+		int res = fill_packet_net4(
+			&packet,
 			src_ip,
 			dst_ip,
 			src_port,
 			dst_port,
 			i % 2 == 0 ? IPPROTO_TCP : IPPROTO_UDP,
-			0,
 			0
 		);
+		if (res < 0) {
+			LOG(ERROR, "failed to fill packet: %d", res);
+			++errors;
+			continue;
+		}
+
 		uint32_t *actions;
 		uint32_t actions_count;
-		int res = FILTER_QUERY(
+		FILTER_QUERY(
 			&common->filter,
 			filter_sign,
 			&packet,
