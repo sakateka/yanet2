@@ -94,6 +94,10 @@ make debug-vm
 
 # Enable debug logging for tests
 export YANET_TEST_DEBUG=1
+# Preserve test artifacts for debugging (don't delete after test)
+export YANET_PRESERVE_ARTIFACTS=1
+# Keep VM running after test for manual debugging (also enables debug logging and preserves artifacts)
+export YANET_KEEP_VM_ALIVE=1
 go test -v ./...
 
 # Clean test artifacts
@@ -105,7 +109,8 @@ make clean-all
 
 #### Debug Logging
 
-By default, tests use minimal logging level (ErrorLevel). To enable verbose debug output, set the environment variable:
+By default, tests use minimal logging level (ErrorLevel).
+To enable verbose debug output, set the environment variable:
 
 ```bash
 # Enable verbose logging
@@ -118,7 +123,13 @@ go test -v ./...
 YANET_TEST_DEBUG=1 go test -v ./...
 ```
 
-When `YANET_TEST_DEBUG` is set, the framework will use zap's Development configuration with detailed output of all framework operations.
+When `YANET_TEST_DEBUG` is set, the framework will use zap's Development
+configuration with detailed output of all framework operations.
+
+When `YANET_PRESERVE_ARTIFACTS` is set, the framework will:
+- Keep the VM working directory with all configuration files
+- Preserve QEMU logs and output files
+- Log the location of preserved artifacts
 
 ### Writing Tests
 
@@ -161,6 +172,9 @@ func TestExample(t *testing.T) {
 ### QEMU Logs
 
 QEMU VM logs are available in the `yanet-test-vm.log` file in the test working directory.
+To access logs after test run, preserve artifacts with settings env
+`export YANET_PRESERVE_ARTIFACTS=1` - logs are then available in
+`/tmp/yanet-vm-<name>-<pid>-<timestamp>/` directory.
 
 ### VM Access
 
@@ -176,6 +190,24 @@ make debug-vm
 # - /tmp/yanet-test-vm/ - VM working directory
 ```
 
+When `YANET_KEEP_VM_ALIVE` is set, the framework will:
+- Enable debug logging (same as `YANET_TEST_DEBUG`)
+- Preserve test artifacts (same as `YANET_PRESERVE_ARTIFACTS`)
+- Keep the VM process running after test completion
+- Enable SSH port forwarding on a random free port for manual debugging
+- Log SSH connection details and serial console socket path
+
+To connect to a running VM's serial console when `YANET_KEEP_VM_ALIVE` is set, find the VM
+process with `pgrep -af qemu` (look for the VM name), locate the working directory in the
+command line, and connect using `socat - UNIX-CONNECT:/tmp/yanet-vm-<instance-id>/serial.sock`.
+
+```bash
+# Example: Find running VM and connect to serial console
+pgrep -af qemu  # Find VM process and locate workdir path
+# rlwrap is optional but very helpful
+rlwrap socat - UNIX-CONNECT:/tmp/yanet-vm-main-1058482-1766597152887221542/serial.sock
+```
+
 ### Network Traffic Monitoring
 
 To view packets passing through Unix domain sockets, you can monitor socket files:
@@ -186,6 +218,36 @@ ls -la /tmp/yanetvm_sockdev_*.sock
 
 # Monitor socket activity
 lsof /tmp/yanetvm_sockdev_*.sock
+```
+
+### Packet Dump Files
+
+When `YANET_TEST_DEBUG=1` is enabled, the framework automatically records all socket traffic to dump files for each test:
+
+```bash
+# Enable debug mode to record packet dumps
+export YANET_TEST_DEBUG=1
+go test -v ./...
+
+# Dump files are created in the VM working directory:
+# /tmp/yanet-vm-<name>-<pid>-<timestamp>/<Test/SubTestName>.in.dump   # Input packets
+# /tmp/yanet-vm-<name>-<pid>-<timestamp>/<Test/SubTestName>.out.dump  # Output packets
+```
+
+Each dump file contains raw socket data in the QEMU socket protocol format:
+- 4-byte length prefix (big-endian)
+- Packet data
+
+#### Replaying Packets from Dump Files
+
+To manually replay packets from a dump file to a socket:
+
+```bash
+# Find the socket path (usually in /tmp/)
+ls -la /tmp/yanetvm_*_sockdev_*.sock
+
+# Replay packets from dump file to socket
+socat -u FILE:/tmp/yanet-vm-main-123-456/TestDecap.in.dump UNIX-CONNECT:/tmp/yanetvm_main_123_456_sockdev_0.sock > response.dump
 ```
 
 ## Limitations
