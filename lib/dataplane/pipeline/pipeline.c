@@ -4,9 +4,33 @@
 
 #include "controlplane/config/zone.h"
 #include "dataplane/config/zone.h"
+#include "dataplane/packet/packet.h"
 #include "lib/logging/log.h"
 
 #include <rte_cycles.h>
+
+static inline void
+counter_add(
+	uint64_t counter_id,
+	uint64_t worker_idx,
+	struct counter_storage *storage,
+	uint64_t count
+) {
+	counter_get_address(counter_id, worker_idx, storage)[0] += count;
+}
+
+static inline void
+counter_add_packets_bytes(
+	uint64_t packets_id,
+	uint64_t bytes_id,
+	uint64_t worker_idx,
+	struct counter_storage *storage,
+	uint64_t packets,
+	uint64_t bytes
+) {
+	counter_add(packets_id, worker_idx, storage, packets);
+	counter_add(bytes_id, worker_idx, storage, bytes);
+}
 
 void
 module_ectx_process(
@@ -27,19 +51,28 @@ module_ectx_process(
 		);
 	}
 
-	uint64_t *rx = counter_get_address(
+	struct counter_storage *storage =
+		ADDR_OF(&module_ectx->counter_storage);
+
+	counter_add_packets_bytes(
 		module_ectx->rx_counter_id,
+		module_ectx->rx_bytes_counter_id,
 		dp_worker->idx,
-		ADDR_OF(&module_ectx->counter_storage)
+		storage,
+		packet_front->input.count,
+		packet_list_bytes_sum(&packet_front->input)
 	);
-	rx[0] += packet_front->input.count;
+
 	module_ectx->handler(dp_worker, module_ectx, packet_front);
-	uint64_t *tx = counter_get_address(
+
+	counter_add_packets_bytes(
 		module_ectx->tx_counter_id,
+		module_ectx->tx_bytes_counter_id,
 		dp_worker->idx,
-		ADDR_OF(&module_ectx->counter_storage)
+		storage,
+		packet_front->output.count,
+		packet_list_bytes_sum(&packet_front->output)
 	);
-	tx[0] += packet_front->output.count;
 
 	LOG_TRACEX(int in = packet_list_counter(&packet_front->input);
 		   int out = packet_list_counter(&packet_front->output);
@@ -105,12 +138,42 @@ function_ectx_process(
 	struct function_ectx *function_ectx,
 	struct packet_front *packet_front
 ) {
+	struct cp_function *cp_function = ADDR_OF(&function_ectx->cp_function);
+	struct counter_storage *storage =
+		ADDR_OF(&function_ectx->counter_storage);
+
+	counter_add_packets_bytes(
+		cp_function->counter_packet_in_count,
+		cp_function->counter_packet_in_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->output.count,
+		packet_list_bytes_sum(&packet_front->output)
+	);
+
 	// FIXME route through chains
 	uint64_t chain_idx = 0;
 	struct chain_ectx *chain_ectx =
 		ADDR_OF(function_ectx->chain_map + chain_idx);
 	chain_ectx_process(
 		dp_config, dp_worker, cp_config_gen, chain_ectx, packet_front
+	);
+
+	counter_add_packets_bytes(
+		cp_function->counter_packet_out_count,
+		cp_function->counter_packet_out_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->output.count,
+		packet_list_bytes_sum(&packet_front->output)
+	);
+	counter_add_packets_bytes(
+		cp_function->counter_packet_drop_count,
+		cp_function->counter_packet_drop_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->drop.count,
+		packet_list_bytes_sum(&packet_front->drop)
 	);
 }
 
@@ -122,6 +185,20 @@ pipeline_ectx_process(
 	struct pipeline_ectx *pipeline_ectx,
 	struct packet_front *packet_front
 ) {
+	struct cp_pipeline *cp_pipeline = ADDR_OF(&pipeline_ectx->cp_pipeline);
+	struct counter_storage *storage =
+		ADDR_OF(&pipeline_ectx->counter_storage);
+
+	// Packets arrive in output list, count them before processing
+	counter_add_packets_bytes(
+		cp_pipeline->counter_packet_in_count,
+		cp_pipeline->counter_packet_in_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->output.count,
+		packet_list_bytes_sum(&packet_front->output)
+	);
+
 	for (uint64_t idx = 0; idx < pipeline_ectx->length; ++idx) {
 		struct function_ectx *function_ectx =
 			ADDR_OF(pipeline_ectx->functions + idx);
@@ -134,6 +211,23 @@ pipeline_ectx_process(
 			packet_front
 		);
 	}
+
+	counter_add_packets_bytes(
+		cp_pipeline->counter_packet_out_count,
+		cp_pipeline->counter_packet_out_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->output.count,
+		packet_list_bytes_sum(&packet_front->output)
+	);
+	counter_add_packets_bytes(
+		cp_pipeline->counter_packet_drop_count,
+		cp_pipeline->counter_packet_drop_bytes,
+		dp_worker->idx,
+		storage,
+		packet_front->drop.count,
+		packet_list_bytes_sum(&packet_front->drop)
+	);
 }
 
 static void
@@ -173,12 +267,14 @@ device_ectx_process_input(
 	struct packet *packet
 ) {
 	struct cp_device *cp_device = ADDR_OF(&device_ectx->cp_device);
-	uint64_t *counters = counter_get_address(
+	counter_add_packets_bytes(
 		cp_device->counter_packet_rx_count,
+		cp_device->counter_packet_rx_bytes,
 		dp_worker->idx,
-		ADDR_OF(&device_ectx->counter_storage)
+		ADDR_OF(&device_ectx->counter_storage),
+		1,
+		packet_data_len(packet)
 	);
-	counters[0] += 1;
 
 	struct device_entry_ectx *entry_ectx =
 		ADDR_OF(&device_ectx->input_pipelines);
@@ -195,12 +291,14 @@ device_ectx_process_output(
 	struct packet *packet
 ) {
 	struct cp_device *cp_device = ADDR_OF(&device_ectx->cp_device);
-	uint64_t *counters = counter_get_address(
+	counter_add_packets_bytes(
 		cp_device->counter_packet_tx_count,
+		cp_device->counter_packet_tx_bytes,
 		dp_worker->idx,
-		ADDR_OF(&device_ectx->counter_storage)
+		ADDR_OF(&device_ectx->counter_storage),
+		1,
+		packet_data_len(packet)
 	);
-	counters[0] += 1;
 
 	struct device_entry_ectx *entry_ectx =
 		ADDR_OF(&device_ectx->output_pipelines);
