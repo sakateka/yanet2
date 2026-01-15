@@ -520,6 +520,12 @@ dataplane_init(
 		if (rc == -1) {
 			return -1;
 		}
+		rc = dataplane_load_module(
+			instance->dp_config, bin_hndl, "proxy"
+		);
+		if (rc == -1) {
+			return -1;
+		}
 
 		rc = dataplane_load_device(
 			instance->dp_config, bin_hndl, "plain"
