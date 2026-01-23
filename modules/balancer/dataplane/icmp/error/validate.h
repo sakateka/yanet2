@@ -2,21 +2,19 @@
 
 #include "common/network.h"
 #include "flow/common.h"
+#include "handler/real.h"
 #include "icmp/error/info.h"
 #include "lib/dataplane/packet/packet.h"
 
+#include "api/stats.h"
 #include "lookup.h"
 #include "meta.h"
-#include "modules/balancer/api/stats.h"
-#include "modules/balancer/state/session_table.h"
 #include "rte_byteorder.h"
 #include "rte_icmp.h"
+#include "session_table.h"
+#include "state/state.h"
 
 #include <netinet/in.h>
-
-#include "../../../state/session.h"
-#include "../../flow/context.h"
-#include "../../vs.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -109,9 +107,7 @@ packet_swap_src_dst(struct packet *packet) {
 
 static inline int
 validate_packet_ipv4(
-	struct packet_ctx *ctx,
-	struct packet_metadata *meta,
-	struct virtual_service **vs
+	struct packet_ctx *ctx, struct packet_metadata *meta, struct vs **vs
 ) {
 	struct packet *packet = ctx->packet;
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
@@ -180,9 +176,7 @@ validate_packet_ipv4(
 
 static inline int
 validate_packet_ipv6(
-	struct packet_ctx *ctx,
-	struct packet_metadata *meta,
-	struct virtual_service **vs
+	struct packet_ctx *ctx, struct packet_metadata *meta, struct vs **vs
 ) {
 	struct packet *packet = ctx->packet;
 	struct rte_mbuf *mbuf = packet_to_mbuf(packet);
@@ -260,7 +254,7 @@ validate_and_parse_packet(struct packet_ctx *ctx) {
 	// in the current balancer state.
 
 	struct packet_metadata meta;
-	struct virtual_service *vs;
+	struct vs *vs;
 
 	// validate packet, set metadata and packet icmp info
 	// (in the packet context).
@@ -299,30 +293,32 @@ validate_and_parse_packet(struct packet_ctx *ctx) {
 	// try to find session by id
 
 	// fill session id
-	struct balancer_session_id session_id;
+	struct session_id session_id;
 	fill_session_id(&session_id, &meta, vs);
 
 	// begin critical section
 	uint64_t current_gen = session_table_begin_cs(
-		&ctx->state.ptr->session_table, ctx->worker->idx
+		&ctx->balancer_state->session_table, ctx->worker->idx
 	);
 
 	// get real for the session
 	uint32_t real_id = get_session_real(
-		&ctx->state.ptr->session_table,
+		&ctx->balancer_state->session_table,
 		current_gen,
 		&session_id,
 		ctx->now
 	);
 
 	// end critical section
-	session_table_end_cs(&ctx->state.ptr->session_table, ctx->worker->idx);
+	session_table_end_cs(
+		&ctx->balancer_state->session_table, ctx->worker->idx
+	);
 
 	if (real_id == (uint32_t)-1) { // real not found
 		// end critical section
 		return validate_packet_session_not_found;
 	} else { // real found
-		struct real *reals = ADDR_OF(&ctx->config->reals);
+		struct real *reals = ADDR_OF(&ctx->handler->reals);
 		struct real *real = &reals[real_id];
 		packet_ctx_set_vs(ctx, vs);
 		packet_ctx_set_real(ctx, real);

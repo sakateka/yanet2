@@ -1,18 +1,12 @@
 #pragma once
 
+#include "handler/handler.h"
+
 #include "lib/controlplane/config/econtext.h"
 #include "lib/counters/counters.h"
 #include "lib/dataplane/config/zone.h"
 #include "lib/dataplane/module/module.h"
 #include "lib/dataplane/packet/packet.h"
-
-#include "module.h"
-#include "modules/balancer/api/stats.h"
-#include "modules/balancer/state/registry.h"
-#include "real.h"
-#include "vs.h"
-
-#include "../state/state.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -27,44 +21,40 @@ struct packet_ctx {
 
 	// worker which process current packet
 	struct dp_worker *worker;
+	uint32_t worker_idx;
 
-	// module config
-	struct balancer_module_config *config;
+	// packet handler
+	struct packet_handler *handler;
 
 	// state of the balancer
-	struct {
-		struct balancer_state *ptr;
-		struct balancer_stats *stats;
-	} state;
+	struct balancer_state *balancer_state;
 
 	// current time in seconds
 	uint32_t now;
 
 	// module counters
 	struct {
-		struct balancer_common_module_stats *common;
-		struct balancer_icmp_module_stats *icmp_v4;
-		struct balancer_icmp_module_stats *icmp_v6;
-		struct balancer_l4_module_stats *l4;
+		struct balancer_common_stats *common;
+		struct balancer_icmp_stats *icmp_v4;
+		struct balancer_icmp_stats *icmp_v6;
+		struct balancer_l4_stats *l4;
 
 		// counters storage
 		struct counter_storage *storage;
-	} counter;
+	} stats;
 
 	// selected virtual service
 	struct {
-		struct balancer_vs_stats *counter;
-		struct service_state *state;
-		struct virtual_service *ptr;
+		struct vs_stats *stats;
+		struct vs *ptr;
 	} vs;
 
 	// selected real
 	struct {
-		struct balancer_real_stats *counter;
-		struct service_state *state;
+		struct real_stats *stats;
 		struct real *ptr;
 	} real;
 
 	// if packet was decapsulated
-	bool decap;
+	bool decap_flag;
 };

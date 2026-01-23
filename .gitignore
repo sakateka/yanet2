@@ -79,10 +79,12 @@ target/
 
 ### IDE ###
 .vscode
+.protolint.yaml
 
 # clangd
 .cache
 compile_commands.json
+.clangd
 
 buildclang/
 build/

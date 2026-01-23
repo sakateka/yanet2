@@ -1,18 +1,20 @@
 #pragma once
 
-#include "../../flow/context.h"
-
-#include "common/network.h"
-#include "dataplane/module/module.h"
-#include "dataplane/packet/packet.h"
 #include "flow/common.h"
+#include "flow/context.h"
 #include "flow/helpers.h"
+
+#include "common/memory_address.h"
+#include "common/network.h"
+
+#include "lib/dataplane/module/module.h"
+#include "lib/dataplane/packet/packet.h"
 #include "lib/dataplane/worker/worker.h"
-#include "vs.h"
+
+#include "handler/vs.h"
 
 #include "tunnel.h"
 #include <assert.h>
-#include <linux/magic.h>
 #include <netinet/in.h>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -97,8 +99,8 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 	// to them.
 
 	// Check if packet is a cloned already
-	if (ctx->decap && icmp_error_hdr(ctx->packet)->unused_marker ==
-				  rte_cpu_to_be_16(ICMP_BROADCAST_IDENT)) {
+	if (ctx->decap_flag && icmp_error_hdr(ctx->packet)->unused_marker ==
+				       rte_cpu_to_be_16(ICMP_BROADCAST_IDENT)) {
 		// Update module counters
 		uint16_t header_type = ctx->packet->transport_header.type;
 		ICMP_STATS_INC(packet_clones_received, header_type, ctx);
@@ -106,7 +108,7 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 		return;
 	}
 
-	struct virtual_service *vs = ctx->vs.ptr;
+	struct vs *vs = ctx->vs.ptr;
 	assert(vs != NULL);
 
 	// here virtual service can not be null
@@ -127,7 +129,8 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 	}
 
 	// Broadcast packet to v4 peers.
-	uint8_t *balancer_src_v4 = ctx->config->source_ip;
+	uint8_t *balancer_src_v4 = ctx->handler->source_ipv4.bytes;
+	struct net4_addr *peers_v4 = ADDR_OF(&vs->peers_v4);
 	for (size_t i = 0; i < vs->peers_v4_count; ++i) {
 		struct packet *clone = clone_packet(ctx->worker, ctx->packet);
 		if (clone == NULL) {
@@ -139,7 +142,7 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 		set_cloned_mark(clone);
 
 		// tunnel packet to peer
-		struct net4_addr *peer = &vs->peers_v4[i];
+		struct net4_addr *peer = &peers_v4[i];
 		tunnel_v4(clone, balancer_src_v4, peer->bytes);
 
 		// send packet
@@ -147,7 +150,8 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 	}
 
 	// Broadcast packet to v6 peers.
-	uint8_t *balancer_src_v6 = ctx->config->source_ip_v6;
+	uint8_t *balancer_src_v6 = ctx->handler->source_ipv6.bytes;
+	struct net6_addr *peers_v6 = ADDR_OF(&vs->peers_v6);
 	for (size_t i = 0; i < vs->peers_v6_count; ++i) {
 		struct packet *clone = clone_packet(ctx->worker, ctx->packet);
 		if (clone == NULL) {
@@ -159,7 +163,7 @@ broadcast_icmp_packet(struct packet_ctx *ctx) {
 		set_cloned_mark(clone);
 
 		// tunnel packet to peer
-		struct net6_addr *peer = &vs->peers_v6[i];
+		struct net6_addr *peer = &peers_v6[i];
 		tunnel_v6(clone, balancer_src_v6, peer->bytes);
 
 		// send packet
