@@ -16,27 +16,34 @@ import (
 )
 
 type PacketData struct {
-	data       []uint8
-	txDeviceId uint16
-	rxDeviceId uint16
+	Data       []uint8
+	TxDeviceId uint16
+	RxDeviceId uint16
+}
+
+func (data *PacketData) asRaw() C.struct_packet_data {
+	return C.struct_packet_data{
+		data:         (*C.uint8_t)(&data.Data[0]),
+		size:         C.uint16_t(len(data.Data)),
+		tx_device_id: C.uint16_t(data.TxDeviceId),
+		rx_device_id: C.uint16_t(data.RxDeviceId),
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
 type Packet C.struct_packet
 
-func NewPacketFromData(data PacketData, pinner *runtime.Pinner) (*Packet, error) {
+func NewPacketFromData(
+	data PacketData,
+	pinner *runtime.Pinner,
+) (*Packet, error) {
 	if pinner != nil {
-		pinner.Pin(data.data)
+		pinner.Pin(data.Data)
 	}
 
 	packet := C.struct_packet{}
-	packetData := C.struct_packet_data{
-		data:         (*C.uint8_t)(&data.data[0]),
-		size:         C.uint16_t(len(data.data)),
-		tx_device_id: C.uint16_t(data.txDeviceId),
-		rx_device_id: C.uint16_t(data.rxDeviceId),
-	}
+	packetData := data.asRaw()
 
 	rc := C.fill_packet_from_data(&packet, &packetData)
 	if rc != 0 {
@@ -51,15 +58,15 @@ func (packet *Packet) Data() PacketData {
 	size := data.size
 	bytes := unsafe.Slice((*uint8)(data.data), size)
 	return PacketData{
-		data:       bytes,
-		txDeviceId: uint16(data.tx_device_id),
-		rxDeviceId: uint16(data.rx_device_id),
+		Data:       bytes,
+		TxDeviceId: uint16(data.tx_device_id),
+		RxDeviceId: uint16(data.rx_device_id),
 	}
 }
 
 func (packet *Packet) Info() *framework.PacketInfo {
 	data := packet.Data()
-	info, err := framework.NewPacketParser().ParsePacket(data.data)
+	info, err := framework.NewPacketParser().ParsePacket(data.Data)
 	if err != nil {
 		msg := fmt.Sprintf("failed to parse packet: %v", err)
 		panic(msg)
@@ -92,7 +99,10 @@ func (packetList *PacketList) Iter() *PacketListIter {
 }
 
 func (packetList *PacketList) Add(packet *Packet) {
-	C.packet_list_add((*C.struct_packet_list)(packetList), (*C.struct_packet)(packet))
+	C.packet_list_add(
+		(*C.struct_packet_list)(packetList),
+		(*C.struct_packet)(packet),
+	)
 }
 
 func NewPacketList(packets ...Packet) PacketList {
@@ -110,11 +120,48 @@ func NewPacketListFromData(data ...PacketData) (*PacketList, error) {
 	for idx := range data {
 		packet, err := NewPacketFromData(data[idx], nil)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create new packet from data at index %d: %v", idx, err)
+			return nil, fmt.Errorf(
+				"failed to create new packet from data at index %d: %v",
+				idx,
+				err,
+			)
 		}
 		packetList.Add(packet)
 	}
 	return &packetList, nil
+}
+
+func FillPacketListFromDataWithCustomAlloc(
+	packetList *PacketList,
+	alloc *Alloc,
+	data ...PacketData,
+) error {
+	// Pin all Go slices to prevent them from being moved by GC
+	pinner := &runtime.Pinner{}
+	defer pinner.Unpin()
+
+	datas := make([]C.struct_packet_data, len(data))
+	for idx := range data {
+		// Pin the data slice before taking its pointer
+		pinner.Pin(&data[idx].Data[0])
+		datas[idx] = data[idx].asRaw()
+	}
+	var ptr *C.struct_packet_data = nil
+	if len(datas) > 0 {
+		ptr = &datas[0]
+	}
+	rc := C.fill_packet_list_custom_alloc(
+		(*C.struct_packet_list)(packetList),
+		C.size_t(len(data)),
+		ptr,
+		C.uint16_t(0),
+		alloc.alloc,
+		(*[0]byte)(alloc.allocFunc),
+	)
+	if rc != 0 {
+		return fmt.Errorf("failed to fill packet list: rc=%d", rc)
+	}
+	return nil
 }
 
 func (packetList *PacketList) Free() {
