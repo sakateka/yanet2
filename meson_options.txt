@@ -25,3 +25,10 @@ option(
   description: 'Default data offset (in bytes) in a packet buffer'
                 + 'to leave room for additional headers.'
 )
+
+option(
+  'only_config',
+  type: 'boolean',
+  value: false,
+  description: 'Only generate config files'
+)
