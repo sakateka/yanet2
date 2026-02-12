@@ -8,7 +8,7 @@ package balancer_test
 // # Source Filtering Behavior
 // - Packets from allowed source ranges are accepted and forwarded
 // - Packets from non-allowed source ranges are dropped
-// - Empty allowed_srcs list allows all sources
+// - Empty allowed_srcs list denies all sources
 // - 0.0.0.0/0 (IPv4) or ::/0 (IPv6) allows all sources
 //
 // # Protocol Coverage
@@ -25,13 +25,14 @@ package balancer_test
 // - outgoing_packets counter increases only for allowed packets
 // - created_sessions counter increases only for allowed packets
 //
-// The test uses 6 virtual services with different configurations:
+// The test uses 7 virtual services with different configurations:
 // - VS1: IPv4 TCP port 80 with allowed_src 10.0.1.0/24
 // - VS2: IPv4 UDP port 5353 with allowed_src 10.0.2.0/24
 // - VS3: IPv6 TCP port 8080 with allowed_src 2001:db8:1::/48
 // - VS4: IPv6 UDP port 5353 with allowed_src 2001:db8:2::/48
 // - VS5: IPv4 TCP port 443 with allowed_src 0.0.0.0/1 + 128.0.0.0/1 (allow all IPv4)
 // - VS6: IPv4 TCP port 8443 with allowed_src 0.0.0.0/0 (allow all)
+// - VS7: IPv4 TCP port 9443 with empty allowed_src (deny all)
 
 import (
 	"net/netip"
@@ -65,13 +66,17 @@ var (
 	allowedSrcVs4IP   = netip.MustParseAddr("2001:db8:200::1")
 	allowedSrcVs4Port = uint16(5353)
 
-	// VS5: IPv4 TCP with empty allowed_src (allow all)
+	// VS5: IPv4 TCP with large CIDR ranges (allow all)
 	allowedSrcVs5IP   = netip.MustParseAddr("10.10.5.1")
 	allowedSrcVs5Port = uint16(443)
 
 	// VS6: IPv4 TCP with 0.0.0.0/0 allowed_src (allow all)
 	allowedSrcVs6IP   = netip.MustParseAddr("10.10.6.1")
 	allowedSrcVs6Port = uint16(8443)
+
+	// VS7: IPv4 TCP with empty allowed_src (deny all)
+	allowedSrcVs7IP   = netip.MustParseAddr("10.10.7.1")
+	allowedSrcVs7Port = uint16(9443)
 
 	// Real servers for allowed_src tests
 	allowedSrcRealIPv4 = netip.MustParseAddr("192.168.100.1")
@@ -82,7 +87,7 @@ var (
 	allowedSrcBalancerSrcIPv6 = netip.MustParseAddr("fe80::5")
 )
 
-// createAllowedSrcTestConfig creates a balancer configuration with 6 virtual services
+// createAllowedSrcTestConfig creates a balancer configuration with 7 virtual services
 // covering different allowed_src scenarios
 func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 	return &balancerpb.BalancerConfig{
@@ -104,13 +109,18 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_TCP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("10.0.1.0").
-									AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("10.0.1.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("255.255.255.0").
+										AsSlice(),
+								},
 							},
-							Size: 24,
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -150,13 +160,18 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_UDP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("10.0.2.0").
-									AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("10.0.2.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("255.255.255.0").
+										AsSlice(),
+								},
 							},
-							Size: 24,
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -196,13 +211,18 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_TCP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("2001:db8:1::").
-									AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("2001:db8:1::").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("ffff:ffff:ffff::").
+										AsSlice(),
+								},
 							},
-							Size: 48,
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -242,13 +262,18 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_UDP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("2001:db8:2::").
-									AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("2001:db8:2::").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("ffff:ffff:ffff::").
+										AsSlice(),
+								},
 							},
-							Size: 48,
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -288,19 +313,30 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_TCP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("0.0.0.0").AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("0.0.0.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("128.0.0.0").
+										AsSlice(),
+								},
 							},
-							Size: 1, // 0.0.0.0/1 covers 0.0.0.0-127.255.255.255
 						},
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("128.0.0.0").
-									AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("128.0.0.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("128.0.0.0").
+										AsSlice(),
+								},
 							},
-							Size: 1, // 128.0.0.0/1 covers 128.0.0.0-255.255.255.255
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -340,14 +376,58 @@ func createAllowedSrcTestConfig() *balancerpb.BalancerConfig {
 						Proto: balancerpb.TransportProto_TCP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.Net{
+					AllowedSrcs: []*balancerpb.AllowedSrc{
 						{
-							Addr: &balancerpb.Addr{
-								Bytes: netip.MustParseAddr("0.0.0.0").AsSlice(),
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("0.0.0.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("0.0.0.0").
+										AsSlice(),
+								},
 							},
-							Size: 0, // 0.0.0.0/0 allows all
 						},
 					},
+					Flags: &balancerpb.VsFlags{
+						Gre:    false,
+						FixMss: false,
+						Ops:    false,
+						PureL3: false,
+						Wlc:    false,
+					},
+					Reals: []*balancerpb.Real{
+						{
+							Id: &balancerpb.RelativeRealIdentifier{
+								Ip: &balancerpb.Addr{
+									Bytes: allowedSrcRealIPv4.AsSlice(),
+								},
+								Port: 0,
+							},
+							Weight: 1,
+							SrcAddr: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("4.4.4.4").AsSlice(),
+							},
+							SrcMask: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("255.255.255.255").
+									AsSlice(),
+							},
+						},
+					},
+					Peers: []*balancerpb.Addr{},
+				},
+				// VS7: IPv4 TCP with empty allowed_src (deny all)
+				{
+					Id: &balancerpb.VsIdentifier{
+						Addr: &balancerpb.Addr{
+							Bytes: allowedSrcVs7IP.AsSlice(),
+						},
+						Port:  uint32(allowedSrcVs7Port),
+						Proto: balancerpb.TransportProto_TCP,
+					},
+					Scheduler:   balancerpb.VsScheduler_ROUND_ROBIN,
+					AllowedSrcs: []*balancerpb.AllowedSrc{},
 					Flags: &balancerpb.VsFlags{
 						Gre:    false,
 						FixMss: false,
@@ -493,6 +573,99 @@ func TestAllowedSrc(t *testing.T) {
 	t.Run("Zero_CIDR_AllowsAll", func(t *testing.T) {
 		testZeroCIDRAllowsAll(t, ts, statsRef)
 	})
+
+	// Test empty allowed_src (deny all)
+	t.Run("Empty_AllowedSrc_DeniesAll", func(t *testing.T) {
+		testEmptyAllowedSrcDeniesAll(t, ts, statsRef)
+	})
+}
+
+// testEmptyAllowedSrcDeniesAll tests that empty allowed_src denies all sources
+func testEmptyAllowedSrcDeniesAll(
+	t *testing.T,
+	ts *utils.TestSetup,
+	statsRef *balancerpb.PacketHandlerRef,
+) {
+	t.Helper()
+
+	// Get initial stats
+	initialStats, err := ts.Balancer.Stats(statsRef)
+	require.NoError(t, err)
+	initialVsStats := findVsStats(
+		initialStats,
+		allowedSrcVs7IP,
+		allowedSrcVs7Port,
+		balancerpb.TransportProto_TCP,
+	)
+	require.NotNil(t, initialVsStats, "VS7 stats should exist")
+
+	// Send packets from various sources - all should be denied
+	testSources := []string{
+		"10.0.1.1",
+		"10.0.99.99",
+		"192.168.1.1",
+		"1.2.3.4",
+		"172.16.0.1",
+	}
+
+	for _, srcIP := range testSources {
+		clientIP := netip.MustParseAddr(srcIP)
+		clientPort := uint16(60000)
+
+		packetLayers := utils.MakeTCPPacket(
+			clientIP,
+			clientPort,
+			allowedSrcVs7IP,
+			allowedSrcVs7Port,
+			&layers.TCP{SYN: true},
+		)
+		packet := xpacket.LayersToPacket(t, packetLayers...)
+
+		result, err := ts.Mock.HandlePackets(packet)
+		require.NoError(t, err)
+		require.Empty(
+			t,
+			result.Output,
+			"expected no output packets for source %s when allowed_src is empty",
+			srcIP,
+		)
+		require.Equal(
+			t,
+			1,
+			len(result.Drop),
+			"expected 1 dropped packet for source %s when allowed_src is empty",
+			srcIP,
+		)
+	}
+
+	// Get final stats
+	finalStats, err := ts.Balancer.Stats(statsRef)
+	require.NoError(t, err)
+	finalVsStats := findVsStats(
+		finalStats,
+		allowedSrcVs7IP,
+		allowedSrcVs7Port,
+		balancerpb.TransportProto_TCP,
+	)
+	require.NotNil(t, finalVsStats, "VS7 stats should exist")
+
+	// Verify counters - all packets should be blocked
+	assert.Equal(
+		t,
+		initialVsStats.PacketSrcNotAllowed+uint64(len(testSources)),
+		finalVsStats.PacketSrcNotAllowed,
+		"packet_src_not_allowed should increase by number of test sources when allowed_src is empty",
+	)
+	assert.Equal(t,
+		initialVsStats.OutgoingPackets,
+		finalVsStats.OutgoingPackets,
+		"outgoing_packets should not increase when allowed_src is empty",
+	)
+	assert.Equal(t,
+		initialVsStats.CreatedSessions,
+		finalVsStats.CreatedSessions,
+		"created_sessions should not increase when allowed_src is empty",
+	)
 }
 
 // testIPv4TCPAllowed tests that packets from allowed IPv4 source are accepted
@@ -1179,4 +1352,278 @@ func testZeroCIDRAllowsAll(
 		finalVsStats.OutgoingPackets,
 		"outgoing_packets should increase by number of test sources",
 	)
+}
+
+// TestAllowedSrcWithPorts tests source filtering with port range restrictions
+func TestAllowedSrcWithPorts(t *testing.T) {
+	// Create configuration with port range restrictions
+	config := &balancerpb.BalancerConfig{
+		PacketHandler: &balancerpb.PacketHandlerConfig{
+			SourceAddressV4: &balancerpb.Addr{
+				Bytes: allowedSrcBalancerSrcIPv4.AsSlice(),
+			},
+			SourceAddressV6: &balancerpb.Addr{
+				Bytes: allowedSrcBalancerSrcIPv6.AsSlice(),
+			},
+			Vs: []*balancerpb.VirtualService{
+				// VS with single port range restriction
+				{
+					Id: &balancerpb.VsIdentifier{
+						Addr: &balancerpb.Addr{
+							Bytes: netip.MustParseAddr("10.20.1.1").AsSlice(),
+						},
+						Port:  80,
+						Proto: balancerpb.TransportProto_TCP,
+					},
+					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
+					AllowedSrcs: []*balancerpb.AllowedSrc{
+						{
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("192.168.0.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("255.255.0.0").
+										AsSlice(),
+								},
+							},
+							Ports: []*balancerpb.PortsRange{
+								{
+									From: 1024,
+									To:   65535,
+								}, // Only high ports allowed
+							},
+						},
+					},
+					Flags: &balancerpb.VsFlags{},
+					Reals: []*balancerpb.Real{
+						{
+							Id: &balancerpb.RelativeRealIdentifier{
+								Ip: &balancerpb.Addr{
+									Bytes: allowedSrcRealIPv4.AsSlice(),
+								},
+								Port: 0,
+							},
+							Weight: 1,
+							SrcAddr: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("4.4.4.4").AsSlice(),
+							},
+							SrcMask: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("255.255.255.255").
+									AsSlice(),
+							},
+						},
+					},
+					Peers: []*balancerpb.Addr{},
+				},
+				// VS with multiple specific port ranges
+				{
+					Id: &balancerpb.VsIdentifier{
+						Addr: &balancerpb.Addr{
+							Bytes: netip.MustParseAddr("10.20.2.1").AsSlice(),
+						},
+						Port:  443,
+						Proto: balancerpb.TransportProto_TCP,
+					},
+					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
+					AllowedSrcs: []*balancerpb.AllowedSrc{
+						{
+							Net: &balancerpb.Net{
+								Addr: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("10.0.0.0").
+										AsSlice(),
+								},
+								Mask: &balancerpb.Addr{
+									Bytes: netip.MustParseAddr("255.0.0.0").
+										AsSlice(),
+								},
+							},
+							Ports: []*balancerpb.PortsRange{
+								{From: 80, To: 80},     // HTTP
+								{From: 443, To: 443},   // HTTPS
+								{From: 8000, To: 9000}, // Custom range
+							},
+						},
+					},
+					Flags: &balancerpb.VsFlags{},
+					Reals: []*balancerpb.Real{
+						{
+							Id: &balancerpb.RelativeRealIdentifier{
+								Ip: &balancerpb.Addr{
+									Bytes: allowedSrcRealIPv4.AsSlice(),
+								},
+								Port: 0,
+							},
+							Weight: 1,
+							SrcAddr: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("4.4.4.4").AsSlice(),
+							},
+							SrcMask: &balancerpb.Addr{
+								Bytes: netip.MustParseAddr("255.255.255.255").
+									AsSlice(),
+							},
+						},
+					},
+					Peers: []*balancerpb.Addr{},
+				},
+			},
+			SessionsTimeouts: &balancerpb.SessionsTimeouts{
+				TcpSynAck: 60,
+				TcpSyn:    60,
+				TcpFin:    60,
+				Tcp:       60,
+				Udp:       60,
+				Default:   60,
+			},
+		},
+		State: &balancerpb.StateConfig{
+			SessionTableCapacity:      func() *uint64 { v := uint64(1000); return &v }(),
+			SessionTableMaxLoadFactor: func() *float32 { v := float32(0.8); return &v }(),
+			RefreshPeriod:             durationpb.New(0),
+			Wlc: &balancerpb.WlcConfig{
+				Power:     func() *uint64 { v := uint64(10); return &v }(),
+				MaxWeight: func() *uint32 { v := uint32(1000); return &v }(),
+			},
+		},
+	}
+
+	ts, err := utils.Make(&utils.TestConfig{
+		Mock:     utils.SingleWorkerMockConfig(64*datasize.MB, 4*datasize.MB),
+		Balancer: config,
+		AgentMemory: func() *datasize.ByteSize {
+			memory := 16 * datasize.MB
+			return &memory
+		}(),
+	})
+	require.NoError(t, err)
+	defer ts.Free()
+
+	// Enable all reals
+	utils.EnableAllReals(t, ts)
+
+	statsRef := &balancerpb.PacketHandlerRef{
+		Device:   &utils.DeviceName,
+		Pipeline: &utils.PipelineName,
+		Function: &utils.FunctionName,
+		Chain:    &utils.ChainName,
+	}
+
+	t.Run("HighPortAllowed", func(t *testing.T) {
+		// Test packet from high port (within 1024-65535 range)
+		vsIP := netip.MustParseAddr("10.20.1.1")
+		clientIP := netip.MustParseAddr("192.168.1.100")
+		clientPort := uint16(50000) // High port - should be allowed
+
+		packetLayers := utils.MakeTCPPacket(
+			clientIP,
+			clientPort,
+			vsIP,
+			80,
+			&layers.TCP{SYN: true},
+		)
+		packet := xpacket.LayersToPacket(t, packetLayers...)
+
+		result, err := ts.Mock.HandlePackets(packet)
+		require.NoError(t, err)
+		require.Equal(
+			t,
+			1,
+			len(result.Output),
+			"expected 1 output packet for high port",
+		)
+		require.Empty(
+			t,
+			result.Drop,
+			"expected no dropped packets for high port",
+		)
+	})
+
+	t.Run("LowPortBlocked", func(t *testing.T) {
+		// Test packet from low port (below 1024)
+		vsIP := netip.MustParseAddr("10.20.1.1")
+		clientIP := netip.MustParseAddr("192.168.1.100")
+		clientPort := uint16(80) // Low port - should be blocked
+
+		packetLayers := utils.MakeTCPPacket(
+			clientIP,
+			clientPort,
+			vsIP,
+			80,
+			&layers.TCP{SYN: true},
+		)
+		packet := xpacket.LayersToPacket(t, packetLayers...)
+
+		result, err := ts.Mock.HandlePackets(packet)
+		require.NoError(t, err)
+		require.Empty(
+			t,
+			result.Output,
+			"expected no output packets for low port",
+		)
+		require.Equal(
+			t,
+			1,
+			len(result.Drop),
+			"expected 1 dropped packet for low port",
+		)
+
+		// Verify counter increased
+		stats, err := ts.Balancer.Stats(statsRef)
+		require.NoError(t, err)
+		vsStats := findVsStats(stats, vsIP, 80, balancerpb.TransportProto_TCP)
+		require.NotNil(t, vsStats)
+		assert.Greater(t, vsStats.PacketSrcNotAllowed, uint64(0),
+			"packet_src_not_allowed should increase for blocked port")
+	})
+
+	t.Run("SpecificPortsAllowed", func(t *testing.T) {
+		// Test packets from specific allowed ports
+		vsIP := netip.MustParseAddr("10.20.2.1")
+		clientIP := netip.MustParseAddr("10.1.1.100")
+
+		allowedPorts := []uint16{80, 443, 8500} // All within allowed ranges
+		for _, port := range allowedPorts {
+			packetLayers := utils.MakeTCPPacket(
+				clientIP,
+				port,
+				vsIP,
+				443,
+				&layers.TCP{SYN: true},
+			)
+			packet := xpacket.LayersToPacket(t, packetLayers...)
+
+			result, err := ts.Mock.HandlePackets(packet)
+			require.NoError(t, err)
+			require.Equal(t, 1, len(result.Output),
+				"expected 1 output packet for allowed port %d", port)
+			require.Empty(t, result.Drop,
+				"expected no dropped packets for allowed port %d", port)
+		}
+	})
+
+	t.Run("SpecificPortsBlocked", func(t *testing.T) {
+		// Test packets from ports outside allowed ranges
+		vsIP := netip.MustParseAddr("10.20.2.1")
+		clientIP := netip.MustParseAddr("10.1.1.100")
+
+		blockedPorts := []uint16{22, 3306, 10000} // Outside allowed ranges
+		for _, port := range blockedPorts {
+			packetLayers := utils.MakeTCPPacket(
+				clientIP,
+				port,
+				vsIP,
+				443,
+				&layers.TCP{SYN: true},
+			)
+			packet := xpacket.LayersToPacket(t, packetLayers...)
+
+			result, err := ts.Mock.HandlePackets(packet)
+			require.NoError(t, err)
+			require.Empty(t, result.Output,
+				"expected no output packets for blocked port %d", port)
+			require.Equal(t, 1, len(result.Drop),
+				"expected 1 dropped packet for blocked port %d", port)
+		}
+	})
 }

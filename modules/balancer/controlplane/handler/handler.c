@@ -29,8 +29,8 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 // Declare filter compiler signatures for VS lookup tables
-FILTER_COMPILER_DECLARE(vs_v4_sig, net4_dst, port_dst, proto);
-FILTER_COMPILER_DECLARE(vs_v6_sig, net6_dst, port_dst, proto);
+FILTER_COMPILER_DECLARE(vs_lookup_ipv4, net4_fast_dst, port_dst, proto);
+FILTER_COMPILER_DECLARE(vs_lookup_ipv6, net6_fast_dst, port_dst, proto);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -257,6 +257,8 @@ init_announce_lpms(
 	return 0;
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
 static int
 init_vs_filters(
 	struct packet_handler *handler,
@@ -370,19 +372,25 @@ init_vs_filters(
 
 	// Compile filters
 	int res = 0;
-	res = FILTER_INIT(&handler->vs_v4, vs_v4_sig, v4_rules, v4_count, mctx);
+	res = FILTER_INIT(
+		&handler->vs_v4, vs_lookup_ipv4, v4_rules, v4_count, mctx
+	);
 	if (res != 0) {
 		NEW_ERROR("failed to compile IPv4 VS filter");
 	}
 
 	if (res == 0) {
 		res = FILTER_INIT(
-			&handler->vs_v6, vs_v6_sig, v6_rules, v6_count, mctx
+			&handler->vs_v6,
+			vs_lookup_ipv6,
+			v6_rules,
+			v6_count,
+			mctx
 		);
 		if (res != 0) {
 			NEW_ERROR("failed to compile IPv6 VS filter");
 			if (v4_count > 0) {
-				FILTER_FREE(&handler->vs_v4, vs_v4_sig);
+				FILTER_FREE(&handler->vs_v4, vs_lookup_ipv4);
 			}
 		}
 	}
@@ -506,10 +514,10 @@ free_filters:
 			}
 		}
 		if (v4_count > 0) {
-			FILTER_FREE(&handler->vs_v4, vs_v4_sig);
+			FILTER_FREE(&handler->vs_v4, vs_lookup_ipv4);
 		}
 		if (v6_count > 0) {
-			FILTER_FREE(&handler->vs_v6, vs_v6_sig);
+			FILTER_FREE(&handler->vs_v6, vs_lookup_ipv6);
 		}
 	}
 	lpm_free(&handler->announce_ipv4);

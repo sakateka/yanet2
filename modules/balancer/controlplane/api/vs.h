@@ -219,6 +219,94 @@ enum vs_scheduler {
 	round_robin = 1,
 };
 
+/**
+ * Source port range for allowed_src filtering.
+ *
+ * Defines an inclusive range of source ports that are permitted for
+ * traffic matching a specific network prefix. Used in conjunction with
+ * allowed_src to provide fine-grained access control based on both
+ * source IP address and source port.
+ */
+struct ports_range {
+	/**
+	 * Starting port of the range (inclusive).
+	 *
+	 * Valid range: 0-65535
+	 * Must be less than or equal to 'to' field.
+	 */
+	uint16_t from;
+
+	/**
+	 * Ending port of the range (inclusive).
+	 *
+	 * Valid range: 0-65535
+	 * Must be greater than or equal to 'from' field.
+	 */
+	uint16_t to;
+};
+
+/**
+ * Allowed source address and port configuration.
+ *
+ * Defines a network prefix and optional port ranges that are permitted
+ * to access a virtual service. When configured, only traffic from matching
+ * source addresses and ports will be accepted; all other traffic is dropped
+ * and counted in the packet_src_not_allowed counter.
+ *
+ * FILTERING BEHAVIOR:
+ * - If allowed_src array is empty (allowed_src_count = 0): All sources
+ * denied
+ * - If allowed_src contains entries: Only matching sources are permitted
+ * - Multiple allowed_src entries are evaluated with OR logic (any match allows)
+ *
+ * PORT FILTERING:
+ * - If port_ranges is NULL or port_ranges_count = 0: All source ports permitted
+ * - If port_ranges contains ranges: Only source ports within ranges permitted
+ * - Multiple port ranges are evaluated with OR logic (any match allows)
+ *
+ * EXAMPLES:
+ * 1. Allow all traffic from 10.0.0.0/8:
+ *    net = {10.0.0.0, 255.0.0.0}, port_ranges = NULL, port_ranges_count = 0
+ *
+ * 2. Allow only high ports from 192.168.0.0/16:
+ *    net = {192.168.0.0, 255.255.0.0}, port_ranges = [{1024, 65535}], count = 1
+ *
+ * 3. Allow specific ports from 172.16.0.0/12:
+ *    net = {172.16.0.0, 255.240.0.0}, port_ranges = [{80, 80}, {443, 443}],
+ * count = 2
+ */
+struct allowed_src {
+	/**
+	 * Network prefix (address and mask) for source filtering.
+	 *
+	 * Packets are matched against this network using:
+	 *   (packet_src_ip & mask) == (net.addr & mask)
+	 *
+	 * Special cases:
+	 * - 0.0.0.0/0.0.0.0 (IPv4) or ::/:: (IPv6): Matches all addresses
+	 * - Single host: Use full mask (255.255.255.255 or all-ones for IPv6)
+	 */
+	struct net net;
+
+	/** Number of port ranges in the port_ranges array */
+	size_t port_ranges_count;
+
+	/**
+	 * Array of source port ranges for additional filtering.
+	 *
+	 * When NULL or port_ranges_count = 0: All source ports are permitted
+	 * When specified: Only source ports within these ranges are permitted
+	 *
+	 * Common use cases:
+	 * - Restrict to high ports: [{1024, 65535}]
+	 * - Allow specific services: [{80, 80}, {443, 443}]
+	 * - Custom application ranges: [{8000, 9000}]
+	 *
+	 * Ownership: Caller allocates and manages this array
+	 */
+	struct ports_range *port_ranges;
+};
+
 struct named_real_config;
 
 /**
@@ -273,29 +361,41 @@ struct vs_config {
 	 */
 	struct named_real_config *reals;
 
-	/** Number of allowed source ranges in 'allowed_src' array */
+	/** Number of allowed source entries in the 'allowed_src' array */
 	size_t allowed_src_count;
 
 	/**
-	 * Client source address allowlist (optional).
+	 * Array of allowed source configurations for access control.
 	 *
-	 * When configured, only traffic from these source address ranges
-	 * will be accepted. Traffic from other sources is dropped and
-	 * counted in vs_stats.packet_src_not_allowed.
+	 * When specified, only traffic from matching source addresses and ports
+	 * will be accepted by this virtual service. Traffic from non-matching
+	 * sources is dropped and counted in the packet_src_not_allowed counter.
 	 *
 	 * BEHAVIOR:
-	 * - If NULL or count=0: All sources allowed (no filtering)
-	 * - If configured: Only listed CIDR ranges allowed
-	 * - Supports both IPv4 and IPv6 ranges
+	 * - NULL or allowed_src_count = 0: All sources are denied (no traffic
+	 * allowed)
+	 * - Non-NULL with allowed_src_count > 0: Only matching sources
+	 * permitted
+	 *
+	 * MATCHING LOGIC:
+	 * For each incoming packet:
+	 * 1. If allowed_src is NULL or count = 0 → DROP
+	 * 2. For each allowed_src entry:
+	 *    a. Check if packet source IP matches the network prefix
+	 *    b. If port_ranges is NULL or count = 0 → ACCEPT (IP match
+	 * sufficient) c. If port_ranges specified, check if source port matches
+	 * any range d. If both IP and port match → ACCEPT
+	 * 3. If no entry matches → DROP (increment packet_src_not_allowed)
 	 *
 	 * USE CASES:
-	 * - Restricting access to trusted networks
-	 * - Implementing IP-based access control
-	 * - Security hardening
+	 * - Restrict access to trusted networks
+	 * - Implement IP-based access control lists
+	 * - Prevent unauthorized access to services
+	 * - Combine with port filtering for fine-grained control
 	 *
 	 * Ownership: Caller allocates and manages this array
 	 */
-	struct net_addr_range *allowed_src;
+	struct allowed_src *allowed_src;
 
 	/** Number of IPv4 peer balancers in 'peers_v4' array */
 	size_t peers_v4_count;
