@@ -17,6 +17,11 @@ import (
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 )
 
+const (
+	addressFamilyIPv4 = 4
+	addressFamilyIPv6 = 6
+)
+
 type ModuleConfig struct {
 	ptr ffi.ModuleConfig
 }
@@ -130,4 +135,86 @@ func (m *ModuleConfig) prefixAdd6(addrStart [16]byte, addrEnd [16]byte, routeLis
 		return fmt.Errorf("failed to add v6 prefix: unknown error code=%d", rc)
 	}
 	return nil
+}
+
+// FIBNexthop represents a single ECMP nexthop in the FIB.
+type FIBNexthop struct {
+	// DstMAC is the destination MAC address.
+	DstMAC net.HardwareAddr
+	// SrcMAC is the source MAC address.
+	SrcMAC net.HardwareAddr
+	// Device is the egress device name.
+	Device string
+}
+
+// FIBEntry represents a single FIB prefix with its nexthops.
+type FIBEntry struct {
+	// AddressFamily is 4 for IPv4 or 6 for IPv6.
+	AddressFamily uint8
+	// PrefixFrom is the start of the prefix range.
+	PrefixFrom netip.Addr
+	// PrefixTo is the end of the prefix range.
+	PrefixTo netip.Addr
+	// Nexthops contains the ECMP nexthops for this prefix.
+	Nexthops []FIBNexthop
+}
+
+// DumpFIB reads the Forwarding Information Base from shared memory using a
+// zero-copy iterator.
+func (m *ModuleConfig) DumpFIB() ([]FIBEntry, error) {
+	it := C.fib_iter_create(m.asRawPtr())
+	if it == nil {
+		return nil, fmt.Errorf("failed to create FIB iterator")
+	}
+	defer C.fib_iter_destroy(it)
+
+	var entries []FIBEntry
+
+	for C.fib_iter_next(it) {
+		af := uint8(C.fib_iter_address_family(it))
+
+		from := C.fib_iter_prefix_from(it)
+		to := C.fib_iter_prefix_to(it)
+
+		var prefixFrom, prefixTo netip.Addr
+		switch af {
+		case addressFamilyIPv4:
+			prefixFrom = netip.AddrFrom4(*(*[4]byte)(unsafe.Pointer(from)))
+			prefixTo = netip.AddrFrom4(*(*[4]byte)(unsafe.Pointer(to)))
+		case addressFamilyIPv6:
+			prefixFrom = netip.AddrFrom16(*(*[16]byte)(unsafe.Pointer(from)))
+			prefixTo = netip.AddrFrom16(*(*[16]byte)(unsafe.Pointer(to)))
+		default:
+			continue
+		}
+
+		nhCount := int(C.fib_iter_nexthop_count(it))
+		nexthops := make([]FIBNexthop, nhCount)
+
+		for i := range nhCount {
+			idx := C.uint64_t(i)
+
+			var dstMAC, srcMAC C.struct_ether_addr
+			C.fib_iter_nexthop_dst_mac(it, idx, &dstMAC)
+			C.fib_iter_nexthop_src_mac(it, idx, &srcMAC)
+
+			dst := net.HardwareAddr(C.GoBytes(unsafe.Pointer(&dstMAC.addr[0]), 6))
+			src := net.HardwareAddr(C.GoBytes(unsafe.Pointer(&srcMAC.addr[0]), 6))
+
+			nexthops[i] = FIBNexthop{
+				DstMAC: dst,
+				SrcMAC: src,
+				Device: C.GoString(C.fib_iter_nexthop_device_name(it, idx)),
+			}
+		}
+
+		entries = append(entries, FIBEntry{
+			AddressFamily: af,
+			PrefixFrom:    prefixFrom,
+			PrefixTo:      prefixTo,
+			Nexthops:      nexthops,
+		})
+	}
+
+	return entries, nil
 }
