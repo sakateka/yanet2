@@ -11,11 +11,13 @@ import (
 	mock "github.com/yanet-platform/yanet2/mock/go"
 )
 
-var deviceName string = "eth0"
-var pipelineName string = "pipeline0"
-var functionName string = "function0"
-var chainName string = "chain0"
-var balancerName string = "balancer0"
+var (
+	deviceName   = "eth0"
+	pipelineName = "pipeline0"
+	functionName = "function0"
+	chainName    = "chain0"
+	balancerName = "balancer0"
+)
 
 func TestManager(t *testing.T) {
 	m, err := mock.NewYanetMock(&mock.YanetMockConfig{
@@ -24,7 +26,7 @@ func TestManager(t *testing.T) {
 		Workers:      1,
 		Devices: []mock.YanetMockDeviceConfig{
 			{
-				Id:   0,
+				ID:   0,
 				Name: deviceName,
 			},
 		},
@@ -40,11 +42,11 @@ func TestManager(t *testing.T) {
 		Balancer: BalancerConfig{
 			Handler: PacketHandlerConfig{
 				SessionsTimeouts: SessionsTimeouts{
-					TcpSynAck: 10,
-					TcpSyn:    20,
-					TcpFin:    15,
-					Tcp:       100,
-					Udp:       11,
+					TCPSynAck: 10,
+					TCPSyn:    20,
+					TCPFin:    15,
+					TCP:       100,
+					UDP:       11,
 					Default:   19,
 				},
 				VirtualServices: []VsConfig{
@@ -52,7 +54,7 @@ func TestManager(t *testing.T) {
 						Identifier: VsIdentifier{
 							Addr:           netip.MustParseAddr("10.12.13.213"),
 							Port:           80,
-							TransportProto: VsTransportProtoTcp,
+							TransportProto: VsTransportProtoTCP,
 						},
 						Flags:     VsFlags{FixMSS: true},
 						Scheduler: VsSchedulerSourceHash,
@@ -113,7 +115,7 @@ func TestManager(t *testing.T) {
 						Identifier: VsIdentifier{
 							Addr:           netip.MustParseAddr("10.20.30.40"),
 							Port:           443,
-							TransportProto: VsTransportProtoTcp,
+							TransportProto: VsTransportProtoTCP,
 						},
 						Flags:     VsFlags{FixMSS: false},
 						Scheduler: VsSchedulerRoundRobin,
@@ -157,7 +159,7 @@ func TestManager(t *testing.T) {
 						Identifier: VsIdentifier{
 							Addr:           netip.MustParseAddr("10.50.60.70"),
 							Port:           53,
-							TransportProto: VsTransportProtoUdp,
+							TransportProto: VsTransportProtoUDP,
 						},
 						Flags:     VsFlags{FixMSS: false},
 						Scheduler: VsSchedulerSourceHash,
@@ -341,7 +343,6 @@ func TestManager(t *testing.T) {
 				t.Fatalf("failed to update pipelines: %v", err)
 			}
 		}
-
 	})
 
 	// Test 2: Get initial configuration
@@ -955,11 +956,11 @@ func TestManager(t *testing.T) {
 			Balancer: BalancerConfig{
 				Handler: PacketHandlerConfig{
 					SessionsTimeouts: SessionsTimeouts{
-						TcpSynAck: 15,
-						TcpSyn:    25,
-						TcpFin:    20,
-						Tcp:       120,
-						Udp:       15,
+						TCPSynAck: 15,
+						TCPSyn:    25,
+						TCPFin:    20,
+						TCP:       120,
+						UDP:       15,
 						Default:   25,
 					},
 					VirtualServices: []VsConfig{
@@ -969,7 +970,7 @@ func TestManager(t *testing.T) {
 									"192.168.1.100",
 								),
 								Port:           8080,
-								TransportProto: VsTransportProtoTcp,
+								TransportProto: VsTransportProtoTCP,
 							},
 							Flags:     VsFlags{FixMSS: false},
 							Scheduler: VsSchedulerRoundRobin,
@@ -1040,7 +1041,7 @@ func TestManager(t *testing.T) {
 			MaxLoadFactor: 0.8,
 		}
 
-		err := manager.Update(&newConfig, now)
+		_, err := manager.Update(&newConfig, now)
 		require.NoError(t, err, "failed to update manager with new config")
 
 		// Verify the new config is applied
@@ -1135,7 +1136,7 @@ func TestManager(t *testing.T) {
 	// Test updating manager with same reals/VS but in different order
 	t.Run("UpdateWithReorderedConfig", func(t *testing.T) {
 		// First, restore the original config since previous test changed it
-		err = manager.Update(&managerConfig, now)
+		_, err = manager.Update(&managerConfig, now)
 		require.NoError(t, err, "failed to restore original config")
 
 		// Now enable some reals
@@ -1182,7 +1183,7 @@ func TestManager(t *testing.T) {
 			managerConfig.Balancer.Handler.VirtualServices[1].Reals[0],
 		}
 
-		err = manager.Update(&reorderedConfig, now)
+		_, err = manager.Update(&reorderedConfig, now)
 		require.NoError(
 			t,
 			err,

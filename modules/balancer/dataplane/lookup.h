@@ -27,7 +27,13 @@ FILTER_QUERY_DECLARE(vs_acl_ipv4, net4_fast_src, port_src);
 static inline uint32_t
 vs_v4_table_lookup(struct packet_handler *handler, struct packet *packet) {
 	struct value_range *result;
-	FILTER_QUERY(&handler->vs_v4, vs_lookup_ipv4, &packet, &result, 1);
+	FILTER_QUERY(
+		ADDR_OF(&handler->vs_ipv4.filter),
+		vs_lookup_ipv4,
+		&packet,
+		&result,
+		1
+	);
 	if (result->count == 0) {
 		return -1;
 	}
@@ -44,7 +50,13 @@ FILTER_QUERY_DECLARE(vs_acl_ipv6, net6_fast_src, port_src);
 static inline uint32_t
 vs_v6_table_lookup(struct packet_handler *handler, struct packet *packet) {
 	struct value_range *result;
-	FILTER_QUERY(&handler->vs_v6, vs_lookup_ipv6, &packet, &result, 1);
+	FILTER_QUERY(
+		ADDR_OF(&handler->vs_ipv6.filter),
+		vs_lookup_ipv6,
+		&packet,
+		&result,
+		1
+	);
 	if (result->count == 0) {
 		return -1;
 	}
@@ -63,7 +75,7 @@ vs_v4_lookup(struct packet_ctx *ctx) {
 	if (service_id == (uint32_t)-1) {
 		return NULL;
 	}
-	struct vs *vs = ADDR_OF(&handler->vs) + service_id;
+	struct vs *vs = ADDR_OF(&handler->vs_ipv4.vs) + service_id;
 
 	// set virtual service
 	packet_ctx_set_vs(ctx, vs);
@@ -75,7 +87,7 @@ static inline bool
 vs_v4_fw(struct packet_ctx *ctx, struct vs *vs, struct packet *packet) {
 	(void)ctx;
 	struct value_range *result;
-	FILTER_QUERY(&vs->acl, vs_acl_ipv4, &packet, &result, 1);
+	FILTER_QUERY(ADDR_OF(&vs->acl), vs_acl_ipv4, &packet, &result, 1);
 	return result->count != 0;
 }
 
@@ -88,7 +100,7 @@ vs_v4_announced(struct packet_ctx *ctx) {
 		mbuf, struct rte_ipv4_hdr *, packet->network_header.offset
 	);
 	return lpm_lookup(
-		       &handler->announce_ipv4,
+		       &handler->vs_ipv4.announce,
 		       NET4_LEN,
 		       (uint8_t *)&ipv4_hdr->dst_addr
 	       ) != LPM_VALUE_INVALID;
@@ -103,7 +115,7 @@ vs_v6_announced(struct packet_ctx *ctx) {
 		mbuf, struct rte_ipv6_hdr *, packet->network_header.offset
 	);
 	return lpm_lookup(
-		       &handler->announce_ipv6,
+		       &handler->vs_ipv6.announce,
 		       NET6_LEN,
 		       (uint8_t *)&ipv6_hdr->dst_addr
 	       ) != LPM_VALUE_INVALID;
@@ -118,7 +130,7 @@ vs_v6_lookup(struct packet_ctx *ctx) {
 	if (service_id == (uint32_t)-1) {
 		return NULL;
 	}
-	struct vs *vs = ADDR_OF(&handler->vs) + service_id;
+	struct vs *vs = ADDR_OF(&handler->vs_ipv6.vs) + service_id;
 
 	// set virtual service
 	packet_ctx_set_vs(ctx, vs);
@@ -130,7 +142,7 @@ static inline bool
 vs_v6_fw(struct packet_ctx *ctx, struct vs *vs, struct packet *packet) {
 	(void)ctx;
 	struct value_range *result;
-	FILTER_QUERY(&vs->acl, vs_acl_ipv6, &packet, &result, 1);
+	FILTER_QUERY(ADDR_OF(&vs->acl), vs_acl_ipv6, &packet, &result, 1);
 	return result->count != 0;
 }
 

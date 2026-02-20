@@ -551,8 +551,8 @@ clone_vs_array_from_relative(
 /**
  * Clone packet_handler_config from relative pointers to normal pointers.
  */
-static int
-clone_handler_config_from_relative(
+int
+packet_handler_config_from_relative(
 	struct packet_handler_config *dst, struct packet_handler_config *src
 ) {
 	// Copy scalar fields and embedded structs
@@ -615,7 +615,7 @@ clone_balancer_config_from_relative(
 	struct balancer_config *dst, struct balancer_config *src
 ) {
 	// Clone handler config
-	if (clone_handler_config_from_relative(&dst->handler, &src->handler) !=
+	if (packet_handler_config_from_relative(&dst->handler, &src->handler) !=
 	    0) {
 		return -1;
 	}

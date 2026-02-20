@@ -240,7 +240,7 @@ calculate_stats(
 	}
 }
 
-void
+int
 packet_handler_fill_stats(
 	struct packet_handler *handler,
 	struct balancer_stats *stats,
@@ -262,7 +262,10 @@ packet_handler_fill_stats(
 		NULL,
 		(size_t)-1
 	);
-	assert(counter_handles != NULL);
+	if (counter_handles == NULL) {
+		NEW_ERROR("failed to find stats");
+		return -1;
+	}
 
 	// Initialize all stats to zero
 	memset(&stats->common, 0, sizeof(struct balancer_common_stats));
@@ -285,4 +288,6 @@ packet_handler_fill_stats(
 
 	// calculate stats
 	calculate_stats(handler, stats, real_stats, counter_handles);
+
+	return 0;
 }

@@ -12,6 +12,7 @@
 #include "session_table.h"
 #include "state/state.h"
 #include <assert.h>
+#include <stdio.h>
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -108,11 +109,9 @@ handle_l4_packets(struct packet_ctx *ctxs, size_t count) {
 		if (unlikely(ctx->processed)) {
 			continue;
 		}
-		if (unlikely(
-			    select_real(
-				    ctx, ctx->vs.ptr, table, current_table_gen
-			    ) == NULL
-		    )) { // failed to select real
+		struct real *selected_real =
+			select_real(ctx, ctx->vs.ptr, table, current_table_gen);
+		if (unlikely(selected_real == NULL)) { // failed to select real
 			// update stats
 			L4_STATS_INC(select_real_failed, ctx);
 			packet_ctx_drop_packet(ctx);

@@ -1,5 +1,9 @@
 package balancer
 
+// BalancerManager implementation providing lifecycle management, configuration updates,
+// real server management, and WLC (Weighted Least Connection) scheduling with automatic
+// session table resizing and periodic refresh tasks.
+
 import (
 	"context"
 	"fmt"
@@ -47,7 +51,7 @@ func (b *BalancerManager) Name() string {
 func (b *BalancerManager) Update(
 	config *balancerpb.BalancerConfig,
 	now time.Time,
-) error {
+) (*ffi.UpdateInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -57,21 +61,21 @@ func (b *BalancerManager) Update(
 	mergedConfig, err := mergeBalancerConfig(config, b.handle.Config())
 	if err != nil {
 		b.log.Errorw("failed to merge config", "error", err)
-		return fmt.Errorf("failed to merge config: %w", err)
+		return nil, fmt.Errorf("failed to merge config: %w", err)
 	}
 
 	// Convert merged protobuf to FFI config
 	ffiConfig, err := ProtoToFFIConfig(mergedConfig)
 	if err != nil {
 		b.log.Errorw("failed to convert config", "error", err)
-		return fmt.Errorf("failed to convert config: %w", err)
+		return nil, fmt.Errorf("failed to convert config: %w", err)
 	}
 
 	// Create WLC configuration with validation
 	wlcConfig, err := createWlcConfig(mergedConfig)
 	if err != nil {
 		b.log.Errorw("failed to create WLC config", "error", err)
-		return fmt.Errorf("failed to create WLC config: %w", err)
+		return nil, fmt.Errorf("failed to create WLC config: %w", err)
 	}
 
 	// Create manager config
@@ -83,13 +87,25 @@ func (b *BalancerManager) Update(
 	}
 
 	// Update via FFI
-	if err := b.handle.Update(managerConfig, now); err != nil {
+	updateInfo, err := b.handle.Update(managerConfig, now)
+	if err != nil {
 		b.log.Errorw("failed to update manager", "error", err)
-		return fmt.Errorf("failed to update manager: %w", err)
+		return nil, fmt.Errorf("failed to update manager: %w", err)
 	}
 
-	b.log.Infow("balancer configuration updated successfully")
-	return nil
+	// Log update information
+	b.log.Infow("balancer configuration updated successfully",
+		"vs_ipv4_matcher_reused", updateInfo.VsIpv4MatcherReused,
+		"vs_ipv6_matcher_reused", updateInfo.VsIpv6MatcherReused,
+		"acl_reused_vs_count", len(updateInfo.ACLReusedVs))
+
+	if len(updateInfo.ACLReusedVs) > 0 {
+		b.log.Debugw("ACL filters reused for virtual services",
+			"count", len(updateInfo.ACLReusedVs),
+			"vs_identifiers", updateInfo.ACLReusedVs)
+	}
+
+	return updateInfo, nil
 }
 
 func (b *BalancerManager) UpdateReals(

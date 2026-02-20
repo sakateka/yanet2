@@ -1,5 +1,9 @@
 package balancer
 
+// BalancerService implements the gRPC service interface for balancer management,
+// providing RPC methods for configuration updates, real server management, statistics
+// retrieval, and session inspection with automatic manager selection support.
+
 import (
 	"context"
 	"fmt"
@@ -11,12 +15,13 @@ import (
 	"github.com/c2h5oh/datasize"
 	yanet "github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/modules/balancer/agent/balancerpb"
+	"github.com/yanet-platform/yanet2/modules/balancer/agent/go/ffi"
 	"go.uber.org/zap"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// gRPC service for controlling balancer
+// BalancerService is agRPC service for controlling balancer
 type BalancerService struct {
 	balancerpb.UnimplementedBalancerServiceServer
 
@@ -115,7 +120,8 @@ func (m *BalancerService) UpdateConfig(
 	manager, _ := m.agent.BalancerManager(name)
 	if manager != nil {
 		m.log.Infow("updating balancer config", "name", name)
-		if err := manager.Update(req.Config, time.Now()); err != nil {
+		updateInfo, err := manager.Update(req.Config, time.Now())
+		if err != nil {
 			m.log.Errorw(
 				"failed to update balancer",
 				"name",
@@ -128,6 +134,10 @@ func (m *BalancerService) UpdateConfig(
 		m.log.Infow("balancer config updated", "name", name)
 		return &balancerpb.UpdateConfigResponse{
 			Name: req.Name,
+			UpdateInfo: ConvertUpdateInfoToProto(
+				updateInfo,
+				false,
+			), // created=false for updates
 		}, nil
 	} else {
 		m.log.Infow("creating new balancer", "name", name)
@@ -138,6 +148,12 @@ func (m *BalancerService) UpdateConfig(
 		m.log.Infow("balancer created", "name", name)
 		return &balancerpb.UpdateConfigResponse{
 			Name: req.Name,
+			// Return update info with created=true for new balancer
+			UpdateInfo: ConvertUpdateInfoToProto(&ffi.UpdateInfo{
+				VsIpv4MatcherReused: false,
+				VsIpv6MatcherReused: false,
+				ACLReusedVs:         []ffi.VsIdentifier{},
+			}, true), // created=true for new balancer
 		}, nil
 	}
 }

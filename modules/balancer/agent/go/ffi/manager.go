@@ -1,21 +1,29 @@
 package ffi
 
+// BalancerManager FFI wrapper providing C interop for manager operations including
+// configuration updates, real server management, session table resizing, statistics
+// collection, and graph topology retrieval with proper error handling.
+
 /*
 #cgo CFLAGS: -I../../ -I../../../../../
 #cgo LDFLAGS: -L../../../../../build/modules/balancer/agent -lbalancer_agent -L../../../../../build/modules/balancer/controlplane/api -lbalancer_cp -L../../../../../build/modules/balancer/controlplane/handler -lbalancer_packet_handler -L../../../../../build/modules/balancer/controlplane/state -lbalancer_state -lbalancer_packet_handler -L../../../../../build/filter -lfilter_compiler
 #include "manager.h"
+#include "modules/balancer/controlplane/api/balancer.h"
 #include <stdlib.h>
 */
 import "C"
+
 import (
 	"fmt"
 	"time"
 	"unsafe"
 )
 
-var DontUpdateRealWeight uint16 = uint16(C.DONT_UPDATE_REAL_WEIGHT)
-var DontUpdateRealEnabled uint8 = uint8(C.DONT_UPDATE_REAL_ENABLED)
-var MaxRealWeight uint16 = uint16(C.MAX_REAL_WEIGHT)
+var (
+	DontUpdateRealWeight  uint16 = uint16(C.DONT_UPDATE_REAL_WEIGHT)
+	DontUpdateRealEnabled uint8  = uint8(C.DONT_UPDATE_REAL_ENABLED)
+	MaxRealWeight         uint16 = uint16(C.MAX_REAL_WEIGHT)
+)
 
 // BalancerManager wraps a C balancer_manager handle
 type BalancerManager struct {
@@ -32,34 +40,43 @@ func (m *BalancerManager) Name() string {
 func (m *BalancerManager) Config() *BalancerManagerConfig {
 	var cConfig C.struct_balancer_manager_config
 	C.balancer_manager_config(m.handle, &cConfig)
-	return cToGo_BalancerManagerConfig(&cConfig)
+	return cToGoBalancerManagerConfig(&cConfig)
 }
 
-// Update updates the manager's configuration
+// Update updates the manager's configuration and returns update metadata
 func (m *BalancerManager) Update(
 	config *BalancerManagerConfig,
 	now time.Time,
-) error {
+) (*UpdateInfo, error) {
 	if config == nil {
-		return fmt.Errorf("config is nil")
+		return nil, fmt.Errorf("config is nil")
 	}
 
-	cConfig, err := goToC_BalancerManagerConfig(config)
+	cConfig, err := goToCBalancerManagerConfig(config)
 	if err != nil {
-		return fmt.Errorf("failed to convert config: %w", err)
+		return nil, fmt.Errorf("failed to convert config: %w", err)
 	}
-	defer freeC_BalancerManagerConfig(cConfig)
+	defer freeCBalancerManagerConfig(cConfig)
+
+	// Allocate C update_info structure
+	var cUpdateInfo C.struct_balancer_update_info
 
 	cNow := C.uint32_t(now.Unix())
 
-	if C.balancer_manager_update(m.handle, cConfig, cNow) != 0 {
+	if C.balancer_manager_update(m.handle, cConfig, &cUpdateInfo, cNow) != 0 {
 		cErr := C.balancer_manager_take_error(m.handle)
 		errMsg := C.GoString(cErr)
 		C.free(unsafe.Pointer(cErr))
-		return fmt.Errorf("failed to perform update: %s", errMsg)
+		return nil, fmt.Errorf("failed to perform update: %s", errMsg)
 	}
 
-	return nil
+	// Convert C update_info to Go, copying all data
+	updateInfo := cToGoUpdateInfo(&cUpdateInfo)
+
+	// Free C allocations from update_info
+	C.balancer_update_info_free(&cUpdateInfo)
+
+	return updateInfo, nil
 }
 
 // UpdateReals applies a batch of real server updates
@@ -71,7 +88,7 @@ func (m *BalancerManager) UpdateReals(updates []RealUpdate) error {
 	// Convert Go updates to C updates
 	cUpdates := make([]C.struct_real_update, len(updates))
 	for i, update := range updates {
-		cUpdates[i] = goToC_RealUpdate(update)
+		cUpdates[i] = goToCRealUpdate(update)
 	}
 
 	if C.balancer_manager_update_reals(
@@ -99,7 +116,7 @@ func (m *BalancerManager) UpdateRealsWlc(updates []RealUpdate) error {
 	// Convert Go updates to C updates
 	cUpdates := make([]C.struct_real_update, len(updates))
 	for i, update := range updates {
-		cUpdates[i] = goToC_RealUpdate(update)
+		cUpdates[i] = goToCRealUpdate(update)
 	}
 
 	if C.balancer_manager_update_reals_wlc(
@@ -150,7 +167,7 @@ func (m *BalancerManager) Info(now time.Time) (*BalancerInfo, error) {
 	}
 
 	// Convert C info to Go, copying all data
-	info := cToGo_BalancerInfo(&cInfo)
+	info := cToGoBalancerInfo(&cInfo)
 
 	// Free C allocations
 	C.balancer_manager_info_free(&cInfo)
@@ -166,7 +183,7 @@ func (m *BalancerManager) Sessions(now time.Time) *Sessions {
 	C.balancer_manager_sessions(m.handle, &cSessions, cNow)
 
 	// Convert C sessions to Go, copying all data
-	sessions := cToGo_Sessions(&cSessions)
+	sessions := cToGoSessions(&cSessions)
 
 	// Free C allocations
 	C.balancer_manager_sessions_free(&cSessions)
@@ -181,10 +198,9 @@ func (m *BalancerManager) Stats(ref *PacketHandlerRef) (*BalancerStats, error) {
 	}
 
 	var cStats C.struct_balancer_stats
-	var cRef *C.struct_packet_handler_ref
 
-	cRef = goToC_PacketHandlerRef(ref)
-	defer freeC_PacketHandlerRef(cRef)
+	cRef := goToCPacketHandlerRef(ref)
+	defer freeCPacketHandlerRef(cRef)
 
 	if C.balancer_manager_stats(m.handle, &cStats, cRef) != 0 {
 		cErr := C.balancer_manager_take_error(m.handle)
@@ -194,7 +210,7 @@ func (m *BalancerManager) Stats(ref *PacketHandlerRef) (*BalancerStats, error) {
 	}
 
 	// Convert C stats to Go, copying all data
-	stats := cToGo_BalancerStats(&cStats)
+	stats := cToGoBalancerStats(&cStats)
 
 	// Free C allocations
 	C.balancer_manager_stats_free(&cStats)
@@ -209,7 +225,7 @@ func (m *BalancerManager) Graph() *BalancerGraph {
 	C.balancer_manager_graph(m.handle, &cGraph)
 
 	// Convert C graph to Go, copying all data
-	graph := cToGo_BalancerGraph(&cGraph)
+	graph := cToGoBalancerGraph(&cGraph)
 
 	// Free C allocations
 	C.balancer_manager_graph_free(&cGraph)

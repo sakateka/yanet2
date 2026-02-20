@@ -139,6 +139,146 @@ fn format_flags(flags: Option<&balancerpb::VsFlags>) -> String {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// UpdateInfo Output
+////////////////////////////////////////////////////////////////////////////////
+
+/// Print update information after configuration update
+pub fn print_update_info(update_info: &balancerpb::UpdateInfo, format: OutputFormat) -> Result<(), Box<dyn Error>> {
+    match format {
+        OutputFormat::Json => print_update_info_json(update_info),
+        OutputFormat::Tree => print_update_info_tree(update_info),
+        OutputFormat::Table => print_update_info_table(update_info),
+    }
+}
+
+fn print_update_info_json(update_info: &balancerpb::UpdateInfo) -> Result<(), Box<dyn Error>> {
+    let json = json_output::convert_update_info(update_info);
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+fn print_update_info_tree(update_info: &balancerpb::UpdateInfo) -> Result<(), Box<dyn Error>> {
+    let mut tree = TreeBuilder::new("Configuration Update".to_string());
+
+    // Operation type
+    let operation = if update_info.created {
+        "Created (new configuration)"
+    } else {
+        "Updated (existing configuration)"
+    };
+    tree.add_empty_child(format!("Operation: {}", operation));
+
+    // Filter reuse status (only relevant for updates)
+    if !update_info.created {
+        tree.begin_child("Filter Reuse Status".to_string());
+        
+        let ipv4_status = if update_info.vs_ipv4_matcher_reused {
+            "Reused (not recompiled)"
+        } else {
+            "Recompiled"
+        };
+        tree.add_empty_child(format!("IPv4 VS Matcher: {}", ipv4_status));
+        
+        let ipv6_status = if update_info.vs_ipv6_matcher_reused {
+            "Reused (not recompiled)"
+        } else {
+            "Recompiled"
+        };
+        tree.add_empty_child(format!("IPv6 VS Matcher: {}", ipv6_status));
+        
+        tree.end_child();
+        
+        // ACL reuse information
+        if !update_info.vs_acl_reuses.is_empty() {
+            tree.begin_child(format!("ACL Filters Reused ({} virtual services)", update_info.vs_acl_reuses.len()));
+            for vs_id in &update_info.vs_acl_reuses {
+                if let Ok(ip) = opt_addr_to_ip(&vs_id.addr) {
+                    tree.add_empty_child(format!("{}:{}/{}", ip, vs_id.port, proto_to_string(vs_id.proto)));
+                }
+            }
+            tree.end_child();
+        } else {
+            tree.add_empty_child("ACL Filters Reused: None (all ACLs recompiled)".to_string());
+        }
+    }
+
+    let tree = tree.build();
+    ptree::print_tree(&tree)?;
+    Ok(())
+}
+
+fn print_update_info_table(update_info: &balancerpb::UpdateInfo) -> Result<(), Box<dyn Error>> {
+    println!();
+    println!("{}", "═".repeat(60).cyan().bold());
+    println!("{}", "  Configuration Update Summary".white().bold());
+    println!("{}", "═".repeat(60).cyan().bold());
+    println!();
+
+    // Operation type
+    let operation = if update_info.created {
+        "Created (new configuration)".bright_green().bold()
+    } else {
+        "Updated (existing configuration)".bright_blue().bold()
+    };
+    println!("{} {}", "Operation:".bright_cyan().bold(), operation);
+    println!();
+
+    // Filter reuse status (only relevant for updates)
+    if !update_info.created {
+        println!("{}", "Filter Reuse Status:".bright_cyan().bold());
+    
+    let ipv4_status = if update_info.vs_ipv4_matcher_reused {
+        "✓ Reused (not recompiled)".bright_green()
+    } else {
+        "✗ Recompiled".bright_yellow()
+    };
+    println!("  IPv4 VS Matcher: {}", ipv4_status);
+    
+    let ipv6_status = if update_info.vs_ipv6_matcher_reused {
+        "✓ Reused (not recompiled)".bright_green()
+    } else {
+        "✗ Recompiled".bright_yellow()
+    };
+    println!("  IPv6 VS Matcher: {}", ipv6_status);
+    
+    println!();
+    
+    // ACL reuse information
+    if !update_info.vs_acl_reuses.is_empty() {
+        println!(
+            "{} {}",
+            "ACL Filters Reused:".bright_cyan().bold(),
+            format!("({} virtual services)", update_info.vs_acl_reuses.len()).bright_white()
+        );
+        
+        for vs_id in &update_info.vs_acl_reuses {
+            if let Ok(ip) = opt_addr_to_ip(&vs_id.addr) {
+                println!(
+                    "  • {}", format!("{}:{}/{}",
+                    ip.to_string(),
+                    vs_id.port,
+                    proto_to_string(vs_id.proto)).bright_yellow(),
+                );
+            }
+        }
+    } else {
+        println!(
+            "{} {}",
+            "ACL Filters Reused:".bright_cyan().bold(),
+            "None (all ACLs recompiled)".bright_yellow()
+        );
+    }
+    
+    println!();
+    }
+    
+    println!("{}", "═".repeat(60).cyan().bold());
+    println!();
+    
+    Ok(())
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // ShowConfig Output
 ////////////////////////////////////////////////////////////////////////////////
 
