@@ -1,6 +1,7 @@
 #pragma once
 
 #include "handler.h"
+#include "inspect.h"
 #include "real.h"
 #include "session.h"
 #include "state.h"
@@ -504,3 +505,11 @@ balancer_real_ph_idx(
 	struct real_identifier *real,
 	struct real_ph_index *real_idx
 );
+
+void
+balancer_inspect(
+	struct balancer_handle *handle, struct balancer_inspect *inspect
+);
+
+void
+balancer_inspect_free(struct balancer_inspect *inspect);

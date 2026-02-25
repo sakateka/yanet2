@@ -1835,10 +1835,10 @@ yanet_module_performance_counters(
 	}
 
 	// Initialize tx/rx fields to 0
-	counters->tx = 0;
 	counters->rx = 0;
-	counters->tx_bytes = 0;
 	counters->rx_bytes = 0;
+	counters->tx = 0;
+	counters->tx_bytes = 0;
 
 	// Allocate memory for the performance counters structure
 	counters->counters_count = CP_MODULE_PERF_COUNTERS;

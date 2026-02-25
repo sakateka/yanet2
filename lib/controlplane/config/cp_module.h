@@ -9,6 +9,7 @@
 
 #include "controlplane/config/registry.h"
 #include "counters/histogram.h"
+#include <assert.h>
 
 /*
  * Structure cp_module reflects module configuration
@@ -44,6 +45,61 @@ struct cp_module_device {
 #define CP_MODULE_PERF_COUNTERS 6
 
 /**
+ * Number of linear histogram buckets for performance counter latency tracking.
+ *
+ * Linear buckets provide fine-grained resolution for typical packet processing
+ * latencies. With 24 buckets and a 100ns step size, this covers latencies from
+ * 100ns to 2400ns with precise granularity.
+ */
+#define CP_MODULE_PERF_COUNTER_LINEAR_HISTS 24
+
+/**
+ * Number of exponential histogram buckets for performance counter latency
+ * tracking.
+ *
+ * Exponential buckets efficiently cover outlier latencies beyond the linear
+ * range. With 5 exponential buckets, this extends coverage to handle rare
+ * high-latency events without excessive memory overhead.
+ */
+#define CP_MODULE_PERF_COUNTER_EXP_HISTS 5
+
+/**
+ * Memory layout for module performance counter data.
+ *
+ * This structure defines the layout of performance metrics stored in shared
+ * memory for each module instance. It tracks packet processing statistics
+ * including:
+ * - Total accumulated latency across all batches
+ * - Total packet and byte counts
+ * - Histogram of batch counts distributed across latency buckets
+ *
+ * The histogram uses a hybrid approach with linear buckets (fine-grained) and
+ * exponential buckets (outlier coverage) as defined by cp_module_perf_counter.
+ */
+struct cp_module_perf_counter_layout {
+	/** Total accumulated processing latency in nanoseconds */
+	uint64_t summary_latency;
+	/** Total number of packets processed */
+	uint64_t packets;
+	/** Total number of bytes processed */
+	uint64_t bytes;
+	/** Histogram of batch counts across latency buckets (linear +
+	 * exponential) */
+	uint64_t batch_count
+		[CP_MODULE_PERF_COUNTER_LINEAR_HISTS +
+		 CP_MODULE_PERF_COUNTER_EXP_HISTS];
+};
+
+#define CP_MODULE_PERF_COUNTER_SIZE                                            \
+	(sizeof(struct cp_module_perf_counter_layout) / sizeof(uint64_t))
+
+// TODO: docs
+static_assert(
+	CP_MODULE_PERF_COUNTER_SIZE <= (1 << COUNTER_MAX_SIZE_EXP),
+	"cp_module_perf_counter is too large for single counter"
+);
+
+/**
  * Hybrid histogram configuration for module performance counters.
  *
  * This histogram tracks packet processing latency in nanoseconds with:
@@ -55,10 +111,10 @@ struct cp_module_device {
  * (linear buckets) while efficiently covering outliers (exponential buckets).
  */
 static const struct counters_hybrid_histogram cp_module_perf_counter = {
-	.min_value = 10 /* ns */,
-	.linear_hists = 20,
-	.linear_step = 50 /* ns */,
-	.exp_hists = 9
+	.min_value = 100 /* ns */,
+	.linear_hists = CP_MODULE_PERF_COUNTER_LINEAR_HISTS,
+	.linear_step = 100 /* ns */,
+	.exp_hists = CP_MODULE_PERF_COUNTER_EXP_HISTS
 };
 
 struct cp_module {

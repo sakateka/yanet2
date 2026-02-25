@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 struct filter_rule;
 struct named_vs_config;
@@ -51,3 +52,7 @@ build_filter(
 	struct memory_context *mctx,
 	int proto
 );
+
+// TODO: docs
+uint64_t
+rules_memory_usage(size_t rules_count, struct filter_rule *rules);
