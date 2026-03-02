@@ -23,10 +23,11 @@ type PortRange struct {
 	To   uint16
 }
 
-// AllowedSrc represents an allowed source with network and optional port ranges
-type AllowedSrc struct {
-	Net        xnetip.NetWithMask // Network with address and arbitrary mask
-	PortRanges []PortRange        // Optional port ranges
+// AllowedSources represents an allowed source with network and optional port ranges
+type AllowedSources struct {
+	Nets       []xnetip.NetWithMask // Network with address and arbitrary mask
+	PortRanges []PortRange          // Optional port ranges
+	Tag        uint32               // Tag for identification/filtering
 }
 
 // VsScheduler represents the scheduling algorithm for a virtual service
@@ -104,13 +105,13 @@ type RealInfo struct {
 
 // VsConfig contains static configuration for a virtual service
 type VsConfig struct {
-	Identifier VsIdentifier
-	Flags      VsFlags
-	Scheduler  VsScheduler
-	Reals      []RealConfig
-	AllowedSrc []AllowedSrc // Client source allowlist with networks and optional port ranges
-	PeersV4    []netip.Addr // IPv4 peer balancers for ICMP
-	PeersV6    []netip.Addr // IPv6 peer balancers for ICMP
+	Identifier     VsIdentifier
+	Flags          VsFlags
+	Scheduler      VsScheduler
+	Reals          []RealConfig
+	AllowedSources []AllowedSources // Client source allowlist with networks and optional port ranges
+	PeersV4        []netip.Addr     // IPv4 peer balancers for ICMP
+	PeersV6        []netip.Addr     // IPv6 peer balancers for ICMP
 }
 
 // VsStats contains per-virtual-service runtime counters
@@ -147,6 +148,10 @@ type NamedVsStats struct {
 	Reals      []struct {
 		Dst   netip.Addr
 		Stats RealStats
+	}
+	AllowedSources []struct {
+		Tag    uint32
+		Passes uint64
 	}
 }
 
@@ -313,7 +318,7 @@ type RealsUsage struct {
 
 // VsInspect contains memory usage for a single virtual service
 type VsInspect struct {
-	AclUsage      uint64
+	ACLUsage      uint64
 	RingUsage     uint64
 	CountersUsage uint64
 	RealsUsage    RealsUsage

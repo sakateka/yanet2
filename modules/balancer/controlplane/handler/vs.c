@@ -6,6 +6,7 @@
 #include "common/network.h"
 
 #include "compiler/declare.h"
+#include "counters/counters.h"
 #include "lib/controlplane/diag/diag.h"
 
 #include "rules.h"
@@ -208,45 +209,66 @@ static int
 fill_rule(
 	struct vs *vs,
 	struct filter_rule *rule,
-	struct allowed_src *src,
+	struct allowed_sources *src,
 	struct memory_context *mctx
 ) {
-	rule->action = 1;
+	rule->action = src->tag;
+
 	if (vs->identifier.ip_proto == IPPROTO_IP) {
 		rule->net4.dst_count = 0;
 		rule->net4.dsts = NULL;
 
-		if (validate_net4(&src->net.v4) != 0) {
-			PUSH_ERROR("IPv4 network is invalid");
-			return -1;
+		for (size_t net_idx = 0; net_idx < src->nets_count; ++net_idx) {
+			if (validate_net4(&src->nets[net_idx].v4) != 0) {
+				PUSH_ERROR(
+					"IPv4 network at index %zu is invalid",
+					net_idx
+				);
+				return -1;
+			}
 		}
 
-		rule->net4.src_count = 1;
-		struct net4 *net4_srcs =
-			memory_balloc(mctx, sizeof(struct net4));
+		rule->net4.src_count = src->nets_count;
+		struct net4 *net4_srcs = memory_balloc(
+			mctx, sizeof(struct net4) * src->nets_count
+		);
 		if (net4_srcs == NULL) {
 			NEW_ERROR("failed to allocate net4 srcs");
 			return -1;
 		}
-		net4_srcs[0] = src->net.v4;
+
+		for (size_t net_idx = 0; net_idx < src->nets_count; ++net_idx) {
+			net4_srcs[net_idx] = src->nets[net_idx].v4;
+		}
+
 		rule->net4.srcs = net4_srcs; // Store absolute pointer
 	} else if (vs->identifier.ip_proto == IPPROTO_IPV6) {
 		rule->net6.dst_count = 0;
 		rule->net6.dsts = NULL;
 
-		if (validate_net6(&src->net.v6) != 0) {
-			PUSH_ERROR("IPv6 network is invalid");
-			return -1;
+		for (size_t net_idx = 0; net_idx < src->nets_count; ++net_idx) {
+			if (validate_net6(&src->nets[net_idx].v6) != 0) {
+				PUSH_ERROR(
+					"IPv6 network at index %zu is invalid",
+					net_idx
+				);
+				return -1;
+			}
 		}
 
-		rule->net6.src_count = 1;
-		struct net6 *net6_srcs =
-			memory_balloc(mctx, sizeof(struct net6));
+		rule->net6.src_count = src->nets_count;
+		struct net6 *net6_srcs = memory_balloc(
+			mctx, sizeof(struct net6) * src->nets_count
+		);
 		if (net6_srcs == NULL) {
 			NEW_ERROR("failed to allocate net6 srcs");
 			return -1;
 		}
-		net6_srcs[0] = src->net.v6;
+
+		for (size_t net_idx = 0; net_idx < src->nets_count; ++net_idx) {
+			net6_srcs[net_idx] = src->nets[net_idx].v6;
+		}
+
 		rule->net6.srcs = net6_srcs; // Store absolute pointer
 	}
 
@@ -749,7 +771,10 @@ rule_to_relative_addresses(struct filter_rule *rule) {
 
 static int
 setup_acl_rules(
-	struct vs *vs, struct vs_config *config, struct memory_context *mctx
+	struct vs *vs,
+	struct counter_registry *counters,
+	struct vs_config *config,
+	struct memory_context *mctx
 ) {
 	// Create filter rules from config (already uses memory_balloc and
 	// relative pointers)
@@ -785,14 +810,48 @@ setup_acl_rules(
 		rules[++last_rule_idx] = rules[rule_idx];
 	}
 
+	char counter_name[80];
+	uint64_t *rule_counters =
+		memory_balloc(mctx, sizeof(uint64_t) * rules_count);
+	if (rule_counters == NULL && rules_count > 0) {
+		NEW_ERROR("failed to allocate rule counters: no memory");
+		return -1;
+	}
+
 	// Change to relative offsets
 	rules_count = last_rule_idx + 1;
 	for (size_t i = 0; i < rules_count; ++i) {
 		rule_to_relative_addresses(&rules[i]);
+
+		uint32_t rule_tag = rules[i].action;
+		if (rule_tag != 0) {
+			// register counter
+			sprintf(counter_name,
+				"acl_%zu_%u",
+				vs->registry_idx,
+				rule_tag);
+			uint64_t counter_id = counter_registry_register(
+				counters, counter_name, 1
+			);
+			if (counter_id == (uint64_t)-1) {
+				NEW_ERROR("failed to register counter for "
+					  "rule: no memory");
+				return -1;
+			}
+
+			rule_counters[i] = counter_id;
+		} else {
+			// counter is undefined, because tag not specified
+			rule_counters[i] = (uint64_t)-1;
+		}
+
+		// store actions equal rule stable index
+		rules[i].action = i;
 	}
 
 	// Store using relative pointers
 	SET_OFFSET_OF(&vs->rules, rules);
+	SET_OFFSET_OF(&vs->rule_counters, rule_counters);
 	vs->rules_count = rules_count;
 
 	return 0;
@@ -806,7 +865,7 @@ vs_with_identifier_and_registry_idx_init(
 	struct real *reals,
 	struct balancer_state *balancer_state,
 	struct named_vs_config *config,
-	struct counter_registry *registry,
+	struct counter_registry *counters,
 	struct memory_context *mctx,
 	struct balancer_update_info *update_info
 ) {
@@ -830,12 +889,12 @@ vs_with_identifier_and_registry_idx_init(
 		goto free_peers;
 	}
 
-	if (register_counter(vs, registry) != 0) {
+	if (register_counter(vs, counters) != 0) {
 		PUSH_ERROR("failed to register counter");
 		goto free_selector;
 	}
 
-	if (setup_acl_rules(vs, &config->config, mctx) != 0) {
+	if (setup_acl_rules(vs, counters, &config->config, mctx) != 0) {
 		PUSH_ERROR("failed to store acl rules");
 		goto free_selector;
 	}
@@ -931,4 +990,18 @@ vs_fill_inspect(struct vs *vs, struct vs_inspect *inspect, size_t workers) {
 			       inspect->counters_usage +
 			       inspect->reals_usage.total_usage +
 			       inspect->other_usage;
+}
+
+ssize_t
+parse_vs_acl_counter(struct counter_handle *counter, uint32_t *tag) {
+	// in format acl_<vs_registry_idx>_<tag>
+	if (strncmp(counter->name, "acl_", 4) == 0) { // vs acl counter
+		char *end_ptr = NULL;
+		size_t vs_registry_idx =
+			strtoull(counter->name + 4, &end_ptr, 10);
+		*tag = atoi(end_ptr + 1);
+		return vs_registry_idx;
+	} else {
+		return -1;
+	}
 }

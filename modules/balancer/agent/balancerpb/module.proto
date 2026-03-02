@@ -169,17 +169,17 @@ message PortsRange {
 // 3. Allow specific ports from 172.16.0.0/12:
 //    net = 172.16.0.0/255.240.0.0, ports = [{from: 80, to: 80}, {from: 443, to:
 //    443}]
-message AllowedSrc {
-	// Network prefix (address and mask) for source filtering.
+message AllowedSources {
+	// Network prefixes (address and mask) for source filtering.
 	//
-	// Packets are matched against this network using:
+	// Packets are matched against these networks using:
 	//   (packet_src_ip & mask) == (net.addr & mask)
 	//
 	// Special cases:
 	// - 0.0.0.0/0.0.0.0 (IPv4) or ::/:: (IPv6): Matches all addresses
 	// - Single host: Use full mask (255.255.255.255 or
 	// ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff)
-	Net net = 1;
+	repeated Net nets = 1;
 
 	// Optional source port ranges for additional filtering.
 	//
@@ -191,6 +191,44 @@ message AllowedSrc {
 	// - Allow specific services: [{from: 80, to: 80}, {from: 443, to: 443}]
 	// - Custom application ranges: [{from: 8000, to: 9000}]
 	repeated PortsRange ports = 2;
+
+	// Tag identifier for tracking allowed source statistics.
+	//
+	// When non-zero, enables per-tag statistics tracking for packets
+	// matching this allowed source entry. Multiple AllowedSources entries
+	// can share the same tag to aggregate statistics across different
+	// network prefixes or port ranges.
+	//
+	// BEHAVIOR:
+	// - tag = 0: No statistics tracking for this entry (default)
+	// - tag > 0: Track packets matching this entry under the specified tag
+	//
+	// STATISTICS:
+	// - Tracked in AllowedSourcesStats in NamedVsStats
+	// - Each unique non-zero tag gets its own statistics entry
+	// - Counts total packets that passed allowed source filtering
+	//
+	// USE CASES:
+	// - Track traffic from different customer networks separately
+	// - Monitor access patterns by source category
+	// - Aggregate statistics across multiple network ranges
+	// - Identify which allowed sources are actively used
+	//
+	// EXAMPLES:
+	// 1. Track internal vs external traffic:
+	//    - Internal networks (10.0.0.0/8, 172.16.0.0/12): tag = 1
+	//    - External networks (0.0.0.0/0): tag = 2
+	//
+	// 2. Track per-customer traffic:
+	//    - Customer A networks: tag = 100
+	//    - Customer B networks: tag = 101
+	//    - Customer C networks: tag = 102
+	//
+	// 3. Aggregate multiple ranges under one tag:
+	//    - Entry 1: nets=[10.0.0.0/8], tag=1
+	//    - Entry 2: nets=[172.16.0.0/12], tag=1
+	//    - Both entries contribute to the same statistics counter
+	uint32 tag = 3;
 }
 
 // Virtual service configuration.
@@ -233,7 +271,7 @@ message VirtualService {
 	// - Implement IP-based access control lists
 	// - Prevent unauthorized access to services
 	// - Combine with port filtering for fine-grained control
-	repeated AllowedSrc allowed_srcs = 3;
+	repeated AllowedSources allowed_srcs = 3;
 
 	// List of real servers backing this virtual service.
 	//

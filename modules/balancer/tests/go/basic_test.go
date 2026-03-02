@@ -40,9 +40,9 @@ func TestBasicOperations(t *testing.T) {
 						Proto: balancerpb.TransportProto_TCP,
 					},
 					Scheduler: balancerpb.VsScheduler_ROUND_ROBIN,
-					AllowedSrcs: []*balancerpb.AllowedSrc{
+					AllowedSrcs: []*balancerpb.AllowedSources{
 						{
-							Net: &balancerpb.Net{
+							Nets: []*balancerpb.Net{{
 								Addr: &balancerpb.Addr{
 									Bytes: netip.MustParseAddr("3.3.3.0").
 										AsSlice(),
@@ -51,7 +51,7 @@ func TestBasicOperations(t *testing.T) {
 									Bytes: netip.MustParseAddr("255.255.255.0").
 										AsSlice(),
 								},
-							},
+							}},
 						},
 					},
 					Flags: &balancerpb.VsFlags{
@@ -218,7 +218,7 @@ func TestBasicOperations(t *testing.T) {
 		)
 		assert.Equal(
 			t,
-			uint64(len(packet.Data())),
+			uint64(len(response.RawData)),
 			vsStats.Stats.OutgoingBytes,
 			"outgoing bytes should match packet size",
 		)
@@ -240,7 +240,7 @@ func TestBasicOperations(t *testing.T) {
 		)
 		assert.Equal(
 			t,
-			uint64(len(packet.Data())),
+			uint64(len(response.RawData)),
 			realStats.Stats.Bytes,
 			"real bytes should match packet size",
 		)

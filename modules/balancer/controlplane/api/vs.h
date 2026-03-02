@@ -275,18 +275,21 @@ struct ports_range {
  *    net = {172.16.0.0, 255.240.0.0}, port_ranges = [{80, 80}, {443, 443}],
  * count = 2
  */
-struct allowed_src {
+struct allowed_sources {
+	/** Number of networks in the nets array */
+	size_t nets_count;
+
 	/**
-	 * Network prefix (address and mask) for source filtering.
+	 * Network prefixes (address and mask) for source filtering.
 	 *
-	 * Packets are matched against this network using:
+	 * Packets are matched against these networks using:
 	 *   (packet_src_ip & mask) == (net.addr & mask)
 	 *
 	 * Special cases:
 	 * - 0.0.0.0/0.0.0.0 (IPv4) or ::/:: (IPv6): Matches all addresses
 	 * - Single host: Use full mask (255.255.255.255 or all-ones for IPv6)
 	 */
-	struct net net;
+	struct net *nets;
 
 	/** Number of port ranges in the port_ranges array */
 	size_t port_ranges_count;
@@ -305,6 +308,41 @@ struct allowed_src {
 	 * Ownership: Caller allocates and manages this array
 	 */
 	struct ports_range *port_ranges;
+
+	/**
+	 * Tag identifier for tracking allowed source statistics.
+	 *
+	 * When non-zero, enables per-tag statistics tracking for packets
+	 * matching this allowed source entry. Multiple allowed_sources entries
+	 * can share the same tag to aggregate statistics across different
+	 * network prefixes or port ranges.
+	 *
+	 * BEHAVIOR:
+	 * - tag = 0: No statistics tracking for this entry (default)
+	 * - tag > 0: Track packets matching this entry under the specified tag
+	 *
+	 * STATISTICS:
+	 * - Tracked in allowed_sources_stats array in named_vs_stats
+	 * - Each unique tag gets its own statistics entry
+	 * - Counts total packets that passed allowed source filtering
+	 *
+	 * USE CASES:
+	 * - Track traffic from different customer networks separately
+	 * - Monitor access patterns by source category
+	 * - Aggregate statistics across multiple network ranges
+	 * - Identify which allowed sources are actively used
+	 *
+	 * EXAMPLES:
+	 * 1. Track internal vs external traffic:
+	 *    - Internal networks (10.0.0.0/8, 172.16.0.0/12): tag = 1
+	 *    - External networks (0.0.0.0/0): tag = 2
+	 *
+	 * 2. Track per-customer traffic:
+	 *    - Customer A networks: tag = 100
+	 *    - Customer B networks: tag = 101
+	 *    - Customer C networks: tag = 102
+	 */
+	uint32_t tag;
 };
 
 struct named_real_config;
@@ -395,7 +433,7 @@ struct vs_config {
 	 *
 	 * Ownership: Caller allocates and manages this array
 	 */
-	struct allowed_src *allowed_src;
+	struct allowed_sources *allowed_src;
 
 	/** Number of IPv4 peer balancers in 'peers_v4' array */
 	size_t peers_v4_count;
@@ -593,6 +631,50 @@ struct vs_stats {
 };
 
 /**
+ * Statistics for packets matching allowed source entries with a specific tag.
+ *
+ * Tracks the number of packets that passed allowed source filtering for
+ * entries with a specific tag value. Multiple allowed_sources entries can
+ * share the same tag, and their statistics are aggregated together.
+ *
+ * AGGREGATION:
+ * - All allowed_sources entries with the same non-zero tag share one stats
+ * entry
+ * - Statistics are cumulative across all matching entries
+ * - Only non-zero tags generate statistics entries
+ *
+ * LIFECYCLE:
+ * - Created when first packet matches an allowed source with this tag
+ * - Persists until virtual service is reconfigured or removed
+ * - Reset when statistics are cleared
+ */
+struct allowed_sources_stats {
+	/**
+	 * Tag identifier matching allowed_sources.tag.
+	 *
+	 * This corresponds to the tag field in allowed_sources entries.
+	 * All entries with this tag contribute to these statistics.
+	 */
+	uint32_t tag;
+
+	/**
+	 * Total packets that passed allowed source filtering for this tag.
+	 *
+	 * Incremented when:
+	 * - Packet source IP matches an allowed_sources network prefix
+	 * - Packet source port matches allowed port ranges (if specified)
+	 * - The matching allowed_sources entry has this tag value
+	 * - Packet proceeds to scheduling (not dropped by other checks)
+	 *
+	 * This counter helps identify:
+	 * - Which allowed source categories are actively used
+	 * - Traffic volume from different source groups
+	 * - Effectiveness of access control policies
+	 */
+	uint64_t passes;
+};
+
+/**
  * Virtual service statistics with identifier.
  *
  * Associates statistics with a specific virtual service and includes
@@ -619,6 +701,50 @@ struct named_vs_stats {
 	 * configuration order of reals in the virtual service.
 	 */
 	struct named_real_stats *reals;
+
+	/**
+	 * Number of allowed source statistics entries.
+	 *
+	 * This is the count of unique non-zero tags across all allowed_sources
+	 * entries in the virtual service configuration. Each unique tag gets
+	 * one statistics entry.
+	 *
+	 * RELATIONSHIP TO CONFIG:
+	 * - allowed_sources_count <= vs_config.allowed_src_count
+	 * - Only non-zero tags are counted
+	 * - Duplicate tags share one statistics entry
+	 *
+	 * EXAMPLES:
+	 * - Config has 3 allowed_src entries with tags [1, 2, 1] → count = 2
+	 * - Config has 2 allowed_src entries with tags [0, 0] → count = 0
+	 * - Config has 4 allowed_src entries with tags [1, 2, 3, 4] → count = 4
+	 */
+	size_t allowed_sources_count;
+
+	/**
+	 * Per-tag statistics for allowed source filtering.
+	 *
+	 * Array of statistics entries, one per unique non-zero tag in the
+	 * virtual service's allowed_sources configuration. Tracks how many
+	 * packets passed filtering for each tag category.
+	 *
+	 * ARRAY PROPERTIES:
+	 * - Length matches allowed_sources_count
+	 * - Heap-allocated, must be freed by caller
+	 * - NULL if allowed_sources_count = 0 (no tagged entries)
+	 * - Entries are not guaranteed to be in any particular order
+	 *
+	 * USE CASES:
+	 * - Monitor traffic from different source categories
+	 * - Validate access control effectiveness
+	 * - Identify unused allowed source entries
+	 * - Track customer or network-specific traffic volumes
+	 *
+	 * MEMORY MANAGEMENT:
+	 * - Allocated by balancer_show_stats()
+	 * - Must be freed by caller (typically via balancer_stats_free())
+	 */
+	struct allowed_sources_stats *allowed_sources;
 };
 
 /**

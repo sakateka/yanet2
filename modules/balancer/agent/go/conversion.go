@@ -344,7 +344,7 @@ func protoToVsConfig(
 	}
 
 	// Convert allowed sources
-	allowedSrc := make([]ffi.AllowedSrc, 0, len(protoVs.AllowedSrcs))
+	allowedSrc := make([]ffi.AllowedSources, 0, len(protoVs.AllowedSrcs))
 	for i, protoAllowedSrc := range protoVs.AllowedSrcs {
 		if protoAllowedSrc == nil {
 			return ffi.VsConfig{}, fmt.Errorf(
@@ -352,53 +352,81 @@ func protoToVsConfig(
 				i,
 			)
 		}
-		if protoAllowedSrc.Net == nil {
+		if protoAllowedSrc.Nets == nil {
 			return ffi.VsConfig{}, fmt.Errorf(
 				"allowed_src[%d].net is nil",
 				i,
 			)
 		}
-		if protoAllowedSrc.Net.Addr == nil {
-			return ffi.VsConfig{}, fmt.Errorf(
-				"allowed_src[%d].net.addr is nil",
-				i,
-			)
-		}
 
-		// Convert network address
-		addr, ok := netip.AddrFromSlice(protoAllowedSrc.Net.Addr.Bytes)
-		if !ok {
-			return ffi.VsConfig{}, fmt.Errorf(
-				"allowed_src[%d]: invalid network address",
-				i,
-			)
-		}
+		nets := make([]xnetip.NetWithMask, len(protoAllowedSrc.Nets))
 
-		// Convert mask bytes
-		var maskBytes []byte
-		if protoAllowedSrc.Net.Mask != nil {
-			maskBytes = protoAllowedSrc.Net.Mask.Bytes
-		}
+		for j, protoNet := range protoAllowedSrc.Nets {
+			if protoNet == nil {
+				return ffi.VsConfig{}, fmt.Errorf(
+					"allowed_src[%d].net[%d] is nil",
+					i, j,
+				)
+			}
 
-		// Validate mask length
-		expectedLen := 4
-		if addr.Is6() {
-			expectedLen = 16
-		}
-		if len(maskBytes) != expectedLen {
-			return ffi.VsConfig{}, fmt.Errorf(
-				"allowed_src[%d]: invalid mask length: got %d, expected %d",
-				i, len(maskBytes), expectedLen,
-			)
-		}
+			// Convert network address
+			addr, ok := netip.AddrFromSlice(protoNet.Addr.Bytes)
+			if !ok {
+				return ffi.VsConfig{}, fmt.Errorf(
+					"allowed_src[%d]: invalid network address",
+					i,
+				)
+			}
 
-		// Create NetWithMask
-		net, err := xnetip.NewNetWithMask(addr, maskBytes)
-		if err != nil {
-			return ffi.VsConfig{}, fmt.Errorf(
-				"allowed_src[%d]: failed to create network: %w",
-				i, err,
-			)
+			// Validate IP version matches VS address
+			if vsAddr.Is4() != addr.Is4() {
+				return ffi.VsConfig{}, fmt.Errorf(
+					"allowed_src[%d].net[%d]: IP version mismatch - VS is %s but allowed_src network is %s",
+					i,
+					j,
+					func() string {
+						if vsAddr.Is4() {
+							return "IPv4"
+						}
+						return "IPv6"
+					}(),
+					func() string {
+						if addr.Is4() {
+							return "IPv4"
+						}
+						return "IPv6"
+					}(),
+				)
+			}
+
+			// Convert mask bytes
+			var maskBytes []byte
+			if protoNet.Mask != nil {
+				maskBytes = protoNet.Mask.Bytes
+			}
+
+			// Validate mask length
+			expectedLen := 4
+			if addr.Is6() {
+				expectedLen = 16
+			}
+			if len(maskBytes) != expectedLen {
+				return ffi.VsConfig{}, fmt.Errorf(
+					"allowed_src[%d]: invalid mask length: got %d, expected %d",
+					i, len(maskBytes), expectedLen,
+				)
+			}
+
+			// Create NetWithMask
+			net, err := xnetip.NewNetWithMask(addr, maskBytes)
+			if err != nil {
+				return ffi.VsConfig{}, fmt.Errorf(
+					"allowed_src[%d]: failed to create network: %w",
+					i, err,
+				)
+			}
+
+			nets[j] = net
 		}
 
 		// Convert port ranges
@@ -422,9 +450,10 @@ func protoToVsConfig(
 			})
 		}
 
-		allowedSrc = append(allowedSrc, ffi.AllowedSrc{
-			Net:        net,
+		allowedSrc = append(allowedSrc, ffi.AllowedSources{
+			Nets:       nets,
 			PortRanges: portRanges,
+			Tag:        protoAllowedSrc.Tag,
 		})
 	}
 
@@ -448,12 +477,12 @@ func protoToVsConfig(
 			Port:           uint16(protoVs.Id.Port),
 			TransportProto: proto,
 		},
-		Flags:      flags,
-		Scheduler:  scheduler,
-		Reals:      reals,
-		AllowedSrc: allowedSrc,
-		PeersV4:    peersV4,
-		PeersV6:    peersV6,
+		Flags:          flags,
+		Scheduler:      scheduler,
+		Reals:          reals,
+		AllowedSources: allowedSrc,
+		PeersV4:        peersV4,
+		PeersV6:        peersV6,
 	}, nil
 }
 
@@ -916,6 +945,22 @@ func ConvertBalancerStatsToProto(
 			})
 		}
 
+		// Convert allowed sources stats for this VS
+		allowedSourcesStats := make(
+			[]*balancerpb.AllowedSourcesStats,
+			0,
+			len(stats.Vs[i].AllowedSources),
+		)
+		for j := range stats.Vs[i].AllowedSources {
+			allowedSourcesStats = append(
+				allowedSourcesStats,
+				&balancerpb.AllowedSourcesStats{
+					Tag:    stats.Vs[i].AllowedSources[j].Tag,
+					Passes: stats.Vs[i].AllowedSources[j].Passes,
+				},
+			)
+		}
+
 		vsStats = append(vsStats, &balancerpb.NamedVsStats{
 			Vs: &balancerpb.VsIdentifier{
 				Addr: &balancerpb.Addr{
@@ -926,8 +971,9 @@ func ConvertBalancerStatsToProto(
 					stats.Vs[i].Identifier.TransportProto,
 				),
 			},
-			Stats: ConvertVsStatsToProto(&stats.Vs[i].Stats),
-			Reals: realStats,
+			Stats:          ConvertVsStatsToProto(&stats.Vs[i].Stats),
+			Reals:          realStats,
+			AllowedSources: allowedSourcesStats,
 		})
 	}
 
@@ -1223,8 +1269,17 @@ func convertVsConfigToProtoWithWlc(
 	}
 
 	// Convert allowed sources
-	allowedSrcs := make([]*balancerpb.AllowedSrc, 0, len(vs.AllowedSrc))
-	for _, allowedSrc := range vs.AllowedSrc {
+	allowedSrcs := make([]*balancerpb.AllowedSources, 0, len(vs.AllowedSources))
+	for _, allowedSrc := range vs.AllowedSources {
+		// Convert networks
+		nets := make([]*balancerpb.Net, 0, len(allowedSrc.Nets))
+		for _, net := range allowedSrc.Nets {
+			nets = append(nets, &balancerpb.Net{
+				Addr: &balancerpb.Addr{Bytes: net.Addr.AsSlice()},
+				Mask: &balancerpb.Addr{Bytes: net.MaskBytes()},
+			})
+		}
+
 		// Convert port ranges
 		protoPortRanges := make(
 			[]*balancerpb.PortsRange,
@@ -1238,12 +1293,10 @@ func convertVsConfigToProtoWithWlc(
 			})
 		}
 
-		allowedSrcs = append(allowedSrcs, &balancerpb.AllowedSrc{
-			Net: &balancerpb.Net{
-				Addr: &balancerpb.Addr{Bytes: allowedSrc.Net.Addr.AsSlice()},
-				Mask: &balancerpb.Addr{Bytes: allowedSrc.Net.MaskBytes()},
-			},
+		allowedSrcs = append(allowedSrcs, &balancerpb.AllowedSources{
+			Nets:  nets,
 			Ports: protoPortRanges,
+			Tag:   allowedSrc.Tag,
 		})
 	}
 
@@ -1413,7 +1466,10 @@ func ConvertAgentInspectToProto(
 
 	balancers := make([]*balancerpb.BalancerInspect, 0, len(inspect.Balancers))
 	for i := range inspect.Balancers {
-		balancers = append(balancers, ConvertNamedBalancerInspectToProto(&inspect.Balancers[i]))
+		balancers = append(
+			balancers,
+			ConvertNamedBalancerInspectToProto(&inspect.Balancers[i]),
+		)
 	}
 
 	return &balancerpb.AgentInspect{
@@ -1432,11 +1488,15 @@ func ConvertNamedBalancerInspectToProto(
 	}
 
 	return &balancerpb.BalancerInspect{
-		Name:                 inspect.Name,
-		PacketHandlerInspect: ConvertPacketHandlerInspectToProto(&inspect.Inspect.PacketHandler),
-		StateInspect:         ConvertStateInspectToProto(&inspect.Inspect.State),
-		OtherUsage:           inspect.Inspect.OtherUsage,
-		TotalUsage:           inspect.Inspect.TotalUsage,
+		Name: inspect.Name,
+		PacketHandlerInspect: ConvertPacketHandlerInspectToProto(
+			&inspect.Inspect.PacketHandler,
+		),
+		StateInspect: ConvertStateInspectToProto(
+			&inspect.Inspect.State,
+		),
+		OtherUsage: inspect.Inspect.OtherUsage,
+		TotalUsage: inspect.Inspect.TotalUsage,
 	}
 }
 
@@ -1449,8 +1509,12 @@ func ConvertPacketHandlerInspectToProto(
 	}
 
 	return &balancerpb.PacketHandlerInspect{
-		VsIpv4Inspect:   ConvertPacketHandlerVsInspectToProto(&inspect.VsIpv4Inspect),
-		VsIpv6Inspect:   ConvertPacketHandlerVsInspectToProto(&inspect.VsIpv6Inspect),
+		VsIpv4Inspect: ConvertPacketHandlerVsInspectToProto(
+			&inspect.VsIpv4Inspect,
+		),
+		VsIpv6Inspect: ConvertPacketHandlerVsInspectToProto(
+			&inspect.VsIpv6Inspect,
+		),
 		SummaryVsUsage:  inspect.SummaryVsUsage,
 		VsIndexUsage:    inspect.VsIndexUsage,
 		RealsIndexUsage: inspect.RealsIndexUsage,
@@ -1470,7 +1534,10 @@ func ConvertPacketHandlerVsInspectToProto(
 
 	vsInspects := make([]*balancerpb.NamedVsInspect, 0, len(inspect.VsInspects))
 	for i := range inspect.VsInspects {
-		vsInspects = append(vsInspects, ConvertNamedVsInspectToProto(&inspect.VsInspects[i]))
+		vsInspects = append(
+			vsInspects,
+			ConvertNamedVsInspectToProto(&inspect.VsInspects[i]),
+		)
 	}
 
 	return &balancerpb.PacketHandlerVsInspect{
@@ -1512,7 +1579,7 @@ func ConvertVsInspectToProto(
 	}
 
 	return &balancerpb.VsInspect{
-		AclUsage:      inspect.AclUsage,
+		AclUsage:      inspect.ACLUsage,
 		RingUsage:     inspect.RingUsage,
 		CountersUsage: inspect.CountersUsage,
 		RealsUsage:    ConvertRealsUsageToProto(&inspect.RealsUsage),
