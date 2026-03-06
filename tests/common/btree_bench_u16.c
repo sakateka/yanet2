@@ -1,8 +1,8 @@
 /**
- * @file btree_bench_u32.c
- * @brief Performance benchmark for btree_u32
+ * @file btree_bench_u16.c
+ * @brief Performance benchmark for btree_u16
  *
- * This benchmark measures btree_u32 search performance with:
+ * This benchmark measures btree_u16 search performance with:
  * - Configurable number of elements (default: 4M)
  * - 1M random searches per iteration
  * - 10 iterations for statistical significance
@@ -12,15 +12,15 @@
  *   sudo sysctl -w vm.nr_hugepages=256
  *
  * Usage:
- *   ./btree_bench_u32 [num_elements]
+ *   ./btree_bench_u16 [num_elements]
  *
  * Examples:
- *   ./btree_bench_u32           # Use default 4M elements
- *   ./btree_bench_u32 1000000   # Use 1M elements
- *   ./btree_bench_u32 10000000  # Use 10M elements
+ *   ./btree_bench_u16           # Use default 4M elements
+ *   ./btree_bench_u16 1000000   # Use 1M elements
+ *   ./btree_bench_u16 10000000  # Use 10M elements
  */
 
-#include "common/btree/u32.h"
+#include "common/btree/u16.h"
 #include "common/memory.h"
 #include "common/memory_block.h"
 #include "lib/logging/log.h"
@@ -115,7 +115,7 @@ setup_allocator(
 
 	block_allocator_put_arena(ba, *raw_mem, size);
 
-	if (memory_context_init(mctx, "btree_bench_u32", ba) != 0) {
+	if (memory_context_init(mctx, "btree_bench_u16", ba) != 0) {
 		LOG(ERROR, "memory_context_init failed");
 		munmap(*raw_mem, size);
 		return -1;
@@ -125,12 +125,12 @@ setup_allocator(
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Benchmark: btree_u32
+// Benchmark: btree_u16
 ////////////////////////////////////////////////////////////////////////////////
 
 static void
-benchmark_btree_u32(size_t num_elements) {
-	LOG(INFO, "=== Benchmarking btree_u32 ===");
+benchmark_btree_u16(size_t num_elements) {
+	LOG(INFO, "=== Benchmarking btree_u16 ===");
 	LOG(INFO, "Elements: %zu", num_elements);
 	LOG(INFO, "Searches per iteration: %d", SEARCHES_PER_ITER);
 	LOG(INFO, "Iterations: %d", NUM_ITERATIONS);
@@ -147,9 +147,9 @@ benchmark_btree_u32(size_t num_elements) {
 	}
 
 	// Allocate and generate sorted data from hugepages: 0, 2, 4, 6, ...
-	LOG(INFO, "Generating %zu uint32_t elements...", num_elements);
-	size_t data_size = num_elements * sizeof(uint32_t);
-	uint32_t *data = (uint32_t *)allocate_hugepage_memory(data_size);
+	LOG(INFO, "Generating %zu uint16_t elements...", num_elements);
+	size_t data_size = num_elements * sizeof(uint16_t);
+	uint16_t *data = (uint16_t *)allocate_hugepage_memory(data_size);
 	if (data == NULL) {
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -159,18 +159,18 @@ benchmark_btree_u32(size_t num_elements) {
 	    data_size / (1024 * 1024));
 
 	for (size_t i = 0; i < num_elements; i++) {
-		data[i] = (uint32_t)(i * 2);
+		data[i] = (uint16_t)(i * 2);
 	}
 
 	// Build btree
-	LOG(INFO, "Building btree_u32...");
-	struct btree_u32 tree;
+	LOG(INFO, "Building btree_u16...");
+	struct btree_u16 tree;
 	uint64_t build_start = get_time_ns();
-	int ret = btree_u32_init(&tree, data, num_elements, &mctx);
+	int ret = btree_u16_init(&tree, data, num_elements, &mctx);
 	uint64_t build_end = get_time_ns();
 
 	if (ret != 0) {
-		LOG(ERROR, "Failed to initialize btree_u32");
+		LOG(ERROR, "Failed to initialize btree_u16");
 		munmap(data, data_size);
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -182,11 +182,11 @@ benchmark_btree_u32(size_t num_elements) {
 
 	// Allocate and prepare random search values from hugepages
 	uint64_t rng_state = 0x123456789ABCDEFULL;
-	size_t search_size = SEARCHES_PER_ITER * sizeof(uint32_t);
-	uint32_t *search_values =
-		(uint32_t *)allocate_hugepage_memory(search_size);
+	size_t search_size = SEARCHES_PER_ITER * sizeof(uint16_t);
+	uint16_t *search_values =
+		(uint16_t *)allocate_hugepage_memory(search_size);
 	if (search_values == NULL) {
-		btree_u32_free(&tree);
+		btree_u16_free(&tree);
 		munmap(data, data_size);
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -199,7 +199,7 @@ benchmark_btree_u32(size_t num_elements) {
 		// Generate random values in range [0, 2*num_elements) to test
 		// hits and misses
 		search_values[i] =
-			(uint32_t)(lcg_rand(&rng_state) % (num_elements * 2));
+			(uint16_t)(lcg_rand(&rng_state) % (num_elements * 2));
 	}
 
 	// Run benchmark iterations
@@ -218,7 +218,7 @@ benchmark_btree_u32(size_t num_elements) {
 		uint32_t result[BATCH_SIZE];
 
 		for (size_t i = 0; i < SEARCHES_PER_ITER; i += BATCH_SIZE) {
-			volatile size_t count = btree_u32_lower_bounds(
+			volatile size_t count = btree_u16_lower_bounds(
 				&tree, search_values + i, BATCH_SIZE, result
 			);
 			(void)count; // Prevent optimization
@@ -234,7 +234,7 @@ benchmark_btree_u32(size_t num_elements) {
 		uint64_t iter_start = get_time_ns();
 
 		for (size_t i = 0; i < SEARCHES_PER_ITER; i += BATCH_SIZE) {
-			volatile size_t count = btree_u32_lower_bounds(
+			volatile size_t count = btree_u16_lower_bounds(
 				&tree, search_values + i, BATCH_SIZE, result
 			);
 			(void)count; // Prevent optimization
@@ -272,7 +272,7 @@ benchmark_btree_u32(size_t num_elements) {
 	double avg_latency_ns = (double)total_time_ns / total_searches;
 
 	LOG(INFO, "");
-	LOG(INFO, "=== btree_u32 Results ===");
+	LOG(INFO, "=== btree_u16 Results ===");
 	LOG(INFO, "Total searches: %.0f", total_searches);
 	LOG(INFO, "Total time: %.2f seconds", total_time_sec);
 	LOG(INFO, "Average time per iteration: %.2f ms", avg_time_ms);
@@ -286,18 +286,18 @@ benchmark_btree_u32(size_t num_elements) {
 
 	// Cleanup
 	munmap(search_values, search_size);
-	btree_u32_free(&tree);
+	btree_u16_free(&tree);
 	munmap(data, data_size);
 	munmap(raw_mem, ARENA_SIZE);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Benchmark: btree_u32 upper_bounds
+// Benchmark: btree_u16 upper_bounds
 ////////////////////////////////////////////////////////////////////////////////
 
 static void
-benchmark_btree_u32_upper_bounds(size_t num_elements) {
-	LOG(INFO, "=== Benchmarking btree_u32 upper_bounds ===");
+benchmark_btree_u16_upper_bounds(size_t num_elements) {
+	LOG(INFO, "=== Benchmarking btree_u16 upper_bounds ===");
 	LOG(INFO, "Elements: %zu", num_elements);
 	LOG(INFO, "Searches per iteration: %d", SEARCHES_PER_ITER);
 	LOG(INFO, "Iterations: %d", NUM_ITERATIONS);
@@ -314,9 +314,9 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 	}
 
 	// Allocate and generate sorted data from hugepages: 0, 2, 4, 6, ...
-	LOG(INFO, "Generating %zu uint32_t elements...", num_elements);
-	size_t data_size = num_elements * sizeof(uint32_t);
-	uint32_t *data = (uint32_t *)allocate_hugepage_memory(data_size);
+	LOG(INFO, "Generating %zu uint16_t elements...", num_elements);
+	size_t data_size = num_elements * sizeof(uint16_t);
+	uint16_t *data = (uint16_t *)allocate_hugepage_memory(data_size);
 	if (data == NULL) {
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -326,18 +326,18 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 	    data_size / (1024 * 1024));
 
 	for (size_t i = 0; i < num_elements; i++) {
-		data[i] = (uint32_t)(i * 2);
+		data[i] = (uint16_t)(i * 2);
 	}
 
 	// Build btree
-	LOG(INFO, "Building btree_u32...");
-	struct btree_u32 tree;
+	LOG(INFO, "Building btree_u16...");
+	struct btree_u16 tree;
 	uint64_t build_start = get_time_ns();
-	int ret = btree_u32_init(&tree, data, num_elements, &mctx);
+	int ret = btree_u16_init(&tree, data, num_elements, &mctx);
 	uint64_t build_end = get_time_ns();
 
 	if (ret != 0) {
-		LOG(ERROR, "Failed to initialize btree_u32");
+		LOG(ERROR, "Failed to initialize btree_u16");
 		munmap(data, data_size);
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -349,11 +349,11 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 
 	// Allocate and prepare random search values from hugepages
 	uint64_t rng_state = 0x123456789ABCDEFULL;
-	size_t search_size = SEARCHES_PER_ITER * sizeof(uint32_t);
-	uint32_t *search_values =
-		(uint32_t *)allocate_hugepage_memory(search_size);
+	size_t search_size = SEARCHES_PER_ITER * sizeof(uint16_t);
+	uint16_t *search_values =
+		(uint16_t *)allocate_hugepage_memory(search_size);
 	if (search_values == NULL) {
-		btree_u32_free(&tree);
+		btree_u16_free(&tree);
 		munmap(data, data_size);
 		munmap(raw_mem, ARENA_SIZE);
 		return;
@@ -366,7 +366,7 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 		// Generate random values in range [0, 2*num_elements) to test
 		// hits and misses
 		search_values[i] =
-			(uint32_t)(lcg_rand(&rng_state) % (num_elements * 2));
+			(uint16_t)(lcg_rand(&rng_state) % (num_elements * 2));
 	}
 
 	// Run benchmark iterations
@@ -385,7 +385,7 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 		uint32_t result[BATCH_SIZE];
 
 		for (size_t i = 0; i < SEARCHES_PER_ITER; i += BATCH_SIZE) {
-			volatile size_t count = btree_u32_upper_bounds(
+			volatile size_t count = btree_u16_upper_bounds(
 				&tree, search_values + i, BATCH_SIZE, result
 			);
 			(void)count; // Prevent optimization
@@ -401,7 +401,7 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 		uint64_t iter_start = get_time_ns();
 
 		for (size_t i = 0; i < SEARCHES_PER_ITER; i += BATCH_SIZE) {
-			volatile size_t count = btree_u32_upper_bounds(
+			volatile size_t count = btree_u16_upper_bounds(
 				&tree, search_values + i, BATCH_SIZE, result
 			);
 			(void)count; // Prevent optimization
@@ -439,7 +439,7 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 	double avg_latency_ns = (double)total_time_ns / total_searches;
 
 	LOG(INFO, "");
-	LOG(INFO, "=== btree_u32 upper_bounds Results ===");
+	LOG(INFO, "=== btree_u16 upper_bounds Results ===");
 	LOG(INFO, "Total searches: %.0f", total_searches);
 	LOG(INFO, "Total time: %.2f seconds", total_time_sec);
 	LOG(INFO, "Average time per iteration: %.2f ms", avg_time_ms);
@@ -453,7 +453,7 @@ benchmark_btree_u32_upper_bounds(size_t num_elements) {
 
 	// Cleanup
 	munmap(search_values, search_size);
-	btree_u32_free(&tree);
+	btree_u16_free(&tree);
 	munmap(data, data_size);
 	munmap(raw_mem, ARENA_SIZE);
 }
@@ -482,7 +482,7 @@ main(int argc, char *argv[]) {
 		num_elements = (size_t)parsed;
 	}
 
-	LOG(INFO, "=== Btree uint32_t Performance Benchmark (New API) ===");
+	LOG(INFO, "=== Btree uint16_t Performance Benchmark (New API) ===");
 	LOG(INFO, "Configuration:");
 	LOG(INFO, "  Elements: %zu", num_elements);
 	LOG(INFO, "  Searches per iteration: %d (1M)", SEARCHES_PER_ITER);
@@ -490,11 +490,11 @@ main(int argc, char *argv[]) {
 	LOG(INFO, "  Arena size: %llu MB", ARENA_SIZE / (1024 * 1024));
 	LOG(INFO, "");
 
-	// Run btree_u32 lower_bounds benchmark
-	benchmark_btree_u32(num_elements);
+	// Run btree_u16 lower_bounds benchmark
+	benchmark_btree_u16(num_elements);
 
-	// Run btree_u32 upper_bounds benchmark
-	benchmark_btree_u32_upper_bounds(num_elements);
+	// Run btree_u16 upper_bounds benchmark
+	benchmark_btree_u16_upper_bounds(num_elements);
 
 	LOG(INFO, "=== Benchmark Complete ===");
 
