@@ -8,9 +8,12 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/yanet-platform/yanet2/common/commonpb"
+	"github.com/yanet-platform/yanet2/common/go/metrics"
 	"github.com/yanet-platform/yanet2/modules/balancer/agent/balancerpb"
 	"github.com/yanet-platform/yanet2/modules/balancer/agent/go/ffi"
 	"go.uber.org/zap"
@@ -29,6 +32,8 @@ type BalancerManager struct {
 
 	// Logger
 	log *zap.SugaredLogger
+
+	handlerMetrics handlersMetrics
 }
 
 func NewBalancerManager(
@@ -40,9 +45,22 @@ func NewBalancerManager(
 		handle:           handle,
 		realUpdateBuffer: []ffi.RealUpdate{},
 		log:              log.With("balancer", name),
+		handlerMetrics:   newHandlersMetrics(),
 	}
 	manager.startBackgroundTasks()
 	return manager
+}
+
+func (b *BalancerManager) newHandlerTracker(handle string, extraLabels ...metrics.Labels) *handlerMetricTracker {
+	labels := metrics.Labels{
+		"config": b.Name(),
+	}
+	for _, extra := range extraLabels {
+		for k, v := range extra {
+			labels[k] = v
+		}
+	}
+	return newHandlerMetricTracker(handle, &b.handlerMetrics, defaultLatencyBoundsMS, labels)
 }
 
 func (b *BalancerManager) Name() string {
@@ -55,6 +73,9 @@ func (b *BalancerManager) Update(
 ) (*ffi.UpdateInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("update")
+	defer tracker.Fix()
 
 	b.log.Debugw("updating balancer configuration")
 
@@ -116,6 +137,9 @@ func (b *BalancerManager) UpdateReals(
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	tracker := b.newHandlerTracker("update_reals", metrics.Labels{"buffer": strconv.FormatBool(buffer)})
+	defer tracker.Fix()
+
 	b.log.Debugw("updating reals", "count", len(updates), "buffer", buffer)
 
 	// Convert protobuf updates to FFI updates
@@ -160,6 +184,9 @@ func (b *BalancerManager) FlushRealUpdates() (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	tracker := b.newHandlerTracker("flush_real_updates")
+	defer tracker.Fix()
+
 	count := len(b.realUpdateBuffer)
 	if count == 0 {
 		b.log.Debugw("no buffered updates to flush")
@@ -202,6 +229,10 @@ func (b *BalancerManager) BufferedUpdates() []*balancerpb.RealUpdate {
 func (b *BalancerManager) Graph() *balancerpb.Graph {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("graph")
+	defer tracker.Fix()
+
 	cfg := b.handle.Config()
 	graph := b.handle.Graph()
 
@@ -213,6 +244,9 @@ func (b *BalancerManager) Info(
 ) (*balancerpb.BalancerInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("info")
+	defer tracker.Fix()
 
 	ffiInfo, err := b.handle.Info(now)
 	if err != nil {
@@ -227,6 +261,9 @@ func (b *BalancerManager) Stats(
 ) (*balancerpb.BalancerStats, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("stats")
+	defer tracker.Fix()
 
 	// Convert protobuf ref to FFI ref
 	ffiRef := &ffi.PacketHandlerRef{
@@ -244,11 +281,194 @@ func (b *BalancerManager) Stats(
 	return ConvertBalancerStatsToProto(ffiStats), nil
 }
 
+////////////////////////////////////////////////////////////////////////////////
+
+func (b *BalancerManager) Metrics(
+	now time.Time,
+	ref *balancerpb.PacketHandlerRef,
+) ([]*commonpb.Metric, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("metrics")
+	defer tracker.Fix()
+
+	// Convert protobuf ref to FFI ref
+	ffiRef := &ffi.PacketHandlerRef{
+		Device:   ref.Device,
+		Pipeline: ref.Pipeline,
+		Function: ref.Function,
+		Chain:    ref.Chain,
+	}
+
+	ffiStats, err := b.handle.Stats(ffiRef)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stats: %s", err)
+	}
+
+	info, err := b.handle.Info(now)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get info: %s", err)
+	}
+
+	config := b.handle.Config()
+
+	refLabels := []*commonpb.Label{
+		{Name: "device", Value: *ref.Device},
+		{Name: "pipeline", Value: *ref.Pipeline},
+		{Name: "function", Value: *ref.Function},
+		{Name: "chain", Value: *ref.Chain},
+		{Name: "config", Value: b.Name()},
+	}
+
+	makeCounter := func(name string, value uint64, extraLabels ...*commonpb.Label) *commonpb.Metric {
+		metric := commonpb.Metric{
+			Name:   name,
+			Labels: append(refLabels, extraLabels...),
+			Value:  &commonpb.Metric_Counter{Counter: value},
+		}
+		return &metric
+	}
+
+	makeGauge := func(name string, value float64, extraLabels ...*commonpb.Label) *commonpb.Metric {
+		metric := commonpb.Metric{
+			Name:   name,
+			Labels: append(refLabels, extraLabels...),
+			Value:  &commonpb.Metric_Gauge{Gauge: value},
+		}
+		return &metric
+	}
+
+	commonMetricsCount := len(
+		commonCounters,
+	) + 2 // +2 for active sessions and session table capacity (from info and config)
+
+	perVsMetrics := len(
+		vsCounters,
+	) + 1 // +1 for active sessions (from info)
+	perRealMetrics := len(
+		realCounters,
+	) + 1 // +1 for active sessions (from info)
+
+	metricsCount := commonMetricsCount + perVsMetrics*len(ffiStats.Vs)
+
+	for vsIdx := range ffiStats.Vs {
+		vs := &ffiStats.Vs[vsIdx]
+		metricsCount += perRealMetrics * len(vs.Reals)
+	}
+
+	metrics := make([]*commonpb.Metric, 0, metricsCount)
+
+	// make common metrics
+	{
+		// active sessions and session table capacity
+		metrics = append(
+			metrics,
+			makeGauge("active_sessions", float64(info.ActiveSessions)),
+			makeGauge(
+				"session_table_capacity",
+				float64(config.Balancer.State.TableCapacity),
+			),
+		)
+
+		// counters
+		for _, counter := range commonCounters {
+			metrics = append(
+				metrics,
+				makeCounter(counter.name, counter.getter(ffiStats)),
+			)
+		}
+	}
+
+	// make vs metrics
+	for vsIdx := range ffiStats.Vs {
+		vs := &ffiStats.Vs[vsIdx]
+		vsInfo := &info.Vs[vsIdx]
+		labelsVS := []*commonpb.Label{
+			{Name: "vip", Value: vs.Identifier.Addr.String()},
+			{Name: "port", Value: strconv.Itoa(int(vs.Identifier.Port))},
+			{Name: "protocol", Value: vs.Identifier.TransportProto.String()},
+		}
+
+		// active sessions
+		metrics = append(
+			metrics,
+			makeGauge(
+				"vs_active_sessions",
+				float64(vsInfo.ActiveSessions),
+				labelsVS...,
+			),
+		)
+
+		// counters
+		for _, counter := range vsCounters {
+			metrics = append(
+				metrics,
+				makeCounter(
+					counter.name,
+					counter.getter(&vs.Stats),
+					labelsVS...),
+			)
+		}
+
+		// make real metrics
+		for realIdx := range vs.Reals {
+			real := &vs.Reals[realIdx]
+			realInfo := &vsInfo.Reals[realIdx]
+			labelsReal := append(labelsVS, &commonpb.Label{Name: "real_ip", Value: real.Dst.String()})
+
+			// active sessions
+			metrics = append(
+				metrics,
+				makeGauge(
+					"real_active_sessions",
+					float64(realInfo.ActiveSessions),
+					labelsReal...,
+				),
+			)
+
+			// counters
+			for _, counter := range realCounters {
+				metrics = append(
+					metrics,
+					makeCounter(
+						counter.name,
+						counter.getter(&real.Stats),
+						labelsReal...,
+					),
+				)
+			}
+		}
+
+		// make acl metrics
+		for aclIdx := range vs.AllowedSources {
+			acl := &vs.AllowedSources[aclIdx]
+			labelsACL := append(labelsVS, &commonpb.Label{Name: "acl_tag", Value: acl.Tag})
+
+			metrics = append(
+				metrics,
+				makeCounter(
+					"vs_acl_hits",
+					acl.Passes,
+					labelsACL...,
+				),
+			)
+		}
+	}
+
+	calls := b.handlerMetrics.collect()
+
+	return append(metrics, calls...), nil
+}
+
 func (b *BalancerManager) Sessions(
 	now time.Time,
 ) ([]*balancerpb.SessionInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("sessions")
+	defer tracker.Fix()
 
 	ffiSessions := b.handle.Sessions(now)
 
@@ -317,6 +537,9 @@ func (b *BalancerManager) backgroundRefreshTask() {
 func (b *BalancerManager) Refresh(now time.Time) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("refresh")
+	defer tracker.Fix()
 
 	b.log.Debug("refreshing")
 
@@ -405,6 +628,9 @@ func (b *BalancerManager) UpdateVS(
 ) (*ffi.UpdateInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("update_vs")
+	defer tracker.Fix()
 
 	b.log.Debugw("updating virtual services", "vs_count", len(vsList))
 
@@ -535,6 +761,9 @@ func (b *BalancerManager) DeleteVS(
 ) (*ffi.UpdateInfo, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	tracker := b.newHandlerTracker("delete_vs")
+	defer tracker.Fix()
 
 	b.log.Debugw("deleting virtual services", "vs_count", len(vsList))
 

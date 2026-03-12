@@ -120,6 +120,7 @@ pub enum Mode {
     Graph(GraphCmd),
     /// Show memory usage inspection
     Inspect(InspectCmd),
+    Metrics(MetricsCmd),
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -633,6 +634,19 @@ pub struct InspectCmd {
 
 impl From<&InspectCmd> for balancerpb::ShowInspectRequest {
     fn from(_cmd: &InspectCmd) -> Self {
+        Self {}
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Metrics Command
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug, Clone, Parser)]
+pub struct MetricsCmd {}
+
+impl From<&MetricsCmd> for balancerpb::GetMetricsRequest {
+    fn from(_cmd: &MetricsCmd) -> Self {
         Self {}
     }
 }

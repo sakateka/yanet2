@@ -8,6 +8,8 @@ import "modules/balancer/agent/balancerpb/inspect.proto";
 import "modules/balancer/agent/balancerpb/module.proto";
 import "modules/balancer/agent/balancerpb/stats.proto";
 
+import "common/commonpb/metric.proto";
+
 option go_package = "github.com/yanet-platform/yanet2/modules/"
 		    "balancer/agent/balancerpb;balancerpb";
 
@@ -128,6 +130,8 @@ service BalancerService {
 	// mappings, real server assignments, and timeout information.
 	rpc ShowSessions(ShowSessionsRequest) returns (ShowSessionsResponse);
 
+	rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+
 	// Update specific virtual services.
 	//
 	// This RPC allows partial updates to the virtual services configuration
@@ -167,6 +171,14 @@ service BalancerService {
 	// Note: VS matcher filters (IPv4/IPv6) will be recompiled since the
 	// set of VS identifiers changes.
 	rpc DeleteVS(DeleteVSRequest) returns (DeleteVSResponse);
+}
+
+message GetMetricsRequest {
+}
+
+message GetMetricsResponse {
+	// List of metrics
+	repeated commonpb.Metric metrics = 1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -369,24 +381,39 @@ message ShowInfoResponse {
 }
 
 // Request to show balancer statistics.
+//
+// If name is specified, returns stats only for that balancer instance.
+// If name is not specified, returns stats for all balancer instances.
+//
+// PacketHandlerRef fields are treated as filters:
+// - if device is specified: only positions for that device are included
+// - same for pipeline, function, chain.
 message ShowStatsRequest {
-	// Balancer instance name (optional, auto-selects if only one exists)
+	// Balancer instance name (optional).
 	optional string name = 1;
+
+	// Packet handler reference filter
+	// (optional fields inside PacketHandlerRef).
 	PacketHandlerRef ref = 2;
 }
 
-// Response containing balancer statistics.
-message ShowStatsResponse {
-	// Balancer instance name
+// A single stats entry bound to a specific balancer instance name and packet
+// handler position.
+message StatsEntry {
+	// Balancer instance name (manager/module config name).
 	string name = 1;
 
+	// Packet handler reference identifying the dataplane position.
 	PacketHandlerRef ref = 2;
 
-	// Packet processing statistics.
-	//
-	// Includes counters for L4 processing, ICMP handling,
-	// per-virtual-service statistics, and per-real-server statistics.
+	// Packet processing statistics for this position.
 	BalancerStats stats = 3;
+}
+
+// Response containing balancer statistics for one or more positions.
+message ShowStatsResponse {
+	// List of stats entries. Each entry includes (name, ref, stats).
+	repeated StatsEntry entries = 1;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
