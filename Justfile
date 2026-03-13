@@ -110,6 +110,15 @@ dbuild-cnt:
 # Common Docker run configuration
 _docker_run IT *COMMAND:
     #!/usr/bin/env bash
+
+    # Since version 2.35.2 git checks ownership of files in repository
+    # and fails if it doesn't match current user. This check triggers
+    # inside container since commands are executed as 'root'. And it strikes
+    # even if you don't use git directly, 'go test' starts to fails with:
+    #    error obtaining VCS status: exit status 128
+    #        Use -buildvcs=false to disable VCS stamping.
+    # Add working directory to safe list to avoid it.
+
     set -euo pipefail
     docker run {{ IT }} --rm \
         --platform linux/amd64 \
@@ -118,7 +127,7 @@ _docker_run IT *COMMAND:
         -v {{ DOCKER_CACHE_DIR }}/gomodcache:/tmp/gomodcache:rw \
         -v {{ DOCKER_CACHE_DIR }}/gocache:/tmp/gocache:rw \
         {{ TAG }} \
-        sh -c 'cd /yanet2 && {{ COMMAND }}'
+        sh -c 'cd /yanet2 && git config --global --add safe.directory /yanet2 && {{ COMMAND }}'
 
 dsetup COVERAGE_MODE="false":
     @just _docker_run -it "just setup {{ COVERAGE_MODE }}"
