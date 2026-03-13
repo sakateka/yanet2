@@ -20,12 +20,16 @@ else
 	endif
 endif
 
-.PHONY: all test clean prepare-vm check-deps test-enhanced test-basic debug-vm debug-dry-run test-login convert convert-one test-converted clean-converted
+.PHONY: all test clean prepare-vm check-deps test-enhanced test-basic debug-vm
+.PHONY: debug-dry-run test-login build-cli
+.PHONY: convert convert-one test-converted clean-converted
 
 # Default target
 all: test
 
 
+build-cli:
+	cargo build --release
 
 # Prepare test environment with autologin
 prepare-vm: check-deps $(QEMU_IMAGE)
@@ -44,19 +48,23 @@ endif
 	@which go > /dev/null || (echo "Please install Go" && exit 1)
 
 # Run all functional tests
-test: prepare-vm
+test: prepare-vm build-cli
 	@echo "Running all functional tests..."
 	go test -count=1 -v ./...
 
 # Run main functional tests
-test-main: prepare-vm
+test-main: prepare-vm build-cli
 	@echo "Running main functional tests..."
 	go test -count=1 -v ./main/...
 
 # Run specific test
-test-run:
+test-run: prepare-vm build-cli
 ifdef TEST
 	go test -count=1 -v -run "$(TEST)" ./...
+else
+	@echo "Error: specify TEST=<test_name>"
+	@echo "Example: make test-run TEST=TestBalancer"
+	@exit 1
 endif
 
 # Clean test artifacts
