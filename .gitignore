@@ -127,3 +127,8 @@ subprojects/.wraplock
 # node
 node_modules/
 .vite/
+
+# debian build
+outdeb/
+debian/tmp/
+debian/debhelper-build-stamp
