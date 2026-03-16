@@ -36,13 +36,13 @@ pub mod filterpb {
         fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
             match (self.addr.len(), self.mask.len()) {
                 (4, 4) => {
-                    let addr = u32::from_be_bytes(<[u8; 4]>::try_from(self.mask.as_slice()).expect("checked above"));
+                    let addr = u32::from_be_bytes(<[u8; 4]>::try_from(self.addr.as_slice()).expect("checked above"));
                     let mask = u32::from_be_bytes(<[u8; 4]>::try_from(self.mask.as_slice()).expect("checked above"));
                     let net = Ipv4Network::from_bits(addr, mask);
                     s.serialize_str(&net.to_string())
                 }
                 (16, 16) => {
-                    let addr = u128::from_be_bytes(<[u8; 16]>::try_from(self.mask.as_slice()).expect("checked above"));
+                    let addr = u128::from_be_bytes(<[u8; 16]>::try_from(self.addr.as_slice()).expect("checked above"));
                     let mask = u128::from_be_bytes(<[u8; 16]>::try_from(self.mask.as_slice()).expect("checked above"));
                     let net = Ipv6Network::from_bits(addr, mask);
                     s.serialize_str(&net.to_string())
@@ -79,13 +79,10 @@ pub enum ModeCmd {
 
 #[derive(Debug, Clone, Parser)]
 pub struct ShowCmd {
-    /// The name of the module to delete
+    /// The name of the module config to show.
     #[arg(long = "cfg", short)]
     pub config_name: String,
 }
-
-#[derive(Debug, Clone, Parser)]
-pub struct ListCmd {}
 
 #[derive(Debug, Clone, Parser)]
 pub struct DeleteCmd {
