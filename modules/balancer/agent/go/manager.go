@@ -7,6 +7,7 @@ package balancer
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net/netip"
 	"strconv"
 	"sync"
@@ -25,7 +26,6 @@ type BalancerManager struct {
 	realUpdateBuffer []ffi.RealUpdate
 
 	// Background task management
-	ctx    context.Context
 	cancel context.CancelFunc
 
 	mu sync.Mutex
@@ -56,9 +56,7 @@ func (b *BalancerManager) newHandlerTracker(handle string, extraLabels ...metric
 		"config": b.Name(),
 	}
 	for _, extra := range extraLabels {
-		for k, v := range extra {
-			labels[k] = v
-		}
+		maps.Copy(labels, extra)
 	}
 	return newHandlerMetricTracker(handle, &b.handlerMetrics, defaultLatencyBoundsMS, labels)
 }
@@ -126,6 +124,9 @@ func (b *BalancerManager) Update(
 			"count", len(updateInfo.ACLReusedVs),
 			"vs_identifiers", updateInfo.ACLReusedVs)
 	}
+
+	// restart background tasks
+	b.startBackgroundTasks()
 
 	return updateInfo, nil
 }
@@ -484,14 +485,17 @@ func (b *BalancerManager) Sessions(
 }
 
 func (b *BalancerManager) startBackgroundTasks() {
-	b.ctx, b.cancel = context.WithCancel(context.Background())
+	b.stopBackgroundTasks()
 
 	if b.handle.Config().RefreshPeriod == 0 {
 		return
 	}
 
+	var ctx context.Context
+	ctx, b.cancel = context.WithCancel(context.Background())
+
 	// Start background refresh task
-	go b.backgroundRefreshTask()
+	go b.backgroundRefreshTask(ctx)
 }
 
 // backgroundRefreshTask runs periodically to:
@@ -499,7 +503,7 @@ func (b *BalancerManager) startBackgroundTasks() {
 // 2. Resize session table if load factor exceeds threshold
 // 3. Adjust WLC weights based on active connections
 // 4. Apply real updates if needed
-func (b *BalancerManager) backgroundRefreshTask() {
+func (b *BalancerManager) backgroundRefreshTask(ctx context.Context) {
 	for {
 		// Get current config to check refresh period
 		b.mu.Lock()
@@ -517,7 +521,7 @@ func (b *BalancerManager) backgroundRefreshTask() {
 
 		// Wait for refresh period or context cancellation
 		select {
-		case <-b.ctx.Done():
+		case <-ctx.Done():
 			b.log.Debugw("background refresh task stopped (context cancelled)")
 			return
 		case <-time.After(refreshPeriod):
@@ -541,7 +545,7 @@ func (b *BalancerManager) Refresh(now time.Time) error {
 	tracker := b.newHandlerTracker("refresh")
 	defer tracker.Fix()
 
-	b.log.Debug("refreshing")
+	b.log.Info("refreshing state")
 
 	// Get current config
 	config := b.handle.Config()
@@ -601,6 +605,7 @@ func (b *BalancerManager) Refresh(now time.Time) error {
 func (b *BalancerManager) stopBackgroundTasks() {
 	if b.cancel != nil {
 		b.cancel()
+		b.cancel = nil
 	}
 }
 
