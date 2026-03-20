@@ -1,15 +1,17 @@
 syntax = "proto3";
 
-package aclpb;
+package routemplspb;
 
 import "common/filterpb/filter.proto";
 
-option go_package = "github.com/yanet-platform/yanet2/modules/acl/controlplane/aclpb;aclpb";
+option go_package = "github.com/yanet-platform/yanet2/modules/route-mpls/controlplane/routemplspb;routemplspb";
 
-service ACLService {
-  // Updates the complete ACL configuration with a new set of rules
+service RouteMPLSService {
+  // Create mpls route module
+  rpc CreateConfig(CreateConfigRequest) returns (CreateConfigResponse);
+  // Update mpls route module
   rpc UpdateConfig(UpdateConfigRequest) returns (UpdateConfigResponse);
-  // Allows to delete acl config if it is not referenced
+  // Allows to delete config if it is not referenced
   // by any pipeline.
   rpc DeleteConfig(DeleteConfigRequest) returns (DeleteConfigResponse);
   // Show specific ACL configuration
@@ -18,9 +20,23 @@ service ACLService {
   rpc ListConfigs(ListConfigsRequest) returns (ListConfigsResponse);
 }
 
-message UpdateConfigRequest {
+message CreateConfigRequest {
   string name = 1;
   repeated Rule rules = 2;
+}
+
+message CreateConfigResponse {}
+
+message UpdateConfigRequest {
+  string name = 1;
+  repeated UpdateEvent updates = 2;
+}
+
+message UpdateEvent {
+  oneof event {
+    Rule update = 1;
+    Rule withdraw = 2;
+  }
 }
 
 message UpdateConfigResponse {}
@@ -30,34 +46,28 @@ message ShowConfigRequest { string name = 1; }
 message ShowConfigResponse {
   string name = 1;
   repeated Rule rules = 2;
-  string fwstate_name = 3;
 }
 
 message Rule {
-  Action action = 1;
-
-  repeated filterpb.Device devices = 2;
-  repeated filterpb.VlanRange vlan_ranges = 3;
-  repeated filterpb.IPNet srcs = 4;
-  repeated filterpb.IPNet dsts = 5;
-  repeated filterpb.ProtoRange proto_ranges = 6;
-  repeated filterpb.PortRange src_port_ranges = 7;
-  repeated filterpb.PortRange dst_port_ranges = 8;
+  filterpb.IPPrefix prefix = 1;
+  NextHop nexthop = 2;
 }
 
-message Action {
+message NextHop {
   ActionKind kind = 1;
-  string counter = 2;
-  bool keep_state = 3;
+  uint32 label = 2;
+  bytes source_ip = 3;
+  bytes destination_ip = 4;
+  uint32 local_pref = 5;
+  repeated uint32 as_path = 6;
+  uint32 med = 7;
+  uint64 weight = 8;
+  string counter = 9;
 }
 
-// Defines possible actions for matched traffic
 enum ActionKind {
-  ACTION_KIND_PASS = 0;
-  ACTION_KIND_DENY = 1;
-  ACTION_KIND_COUNT = 2;
-  ACTION_KIND_CHECK_STATE = 3;
-  ACTION_KIND_CREATE_STATE = 4;
+  ACTION_KIND_NONE = 0;
+  ACTION_KIND_TUNNEL = 1;
 }
 
 // Delete config with specified name.

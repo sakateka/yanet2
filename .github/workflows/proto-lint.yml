@@ -1,0 +1,40 @@
+name: Proto Lint
+
+on:
+  push:
+    paths:
+      - '**/*.proto'
+      - 'lint/protobuf/**'
+  pull_request:
+    paths:
+      - '**/*.proto'
+      - 'lint/protobuf/**'
+
+jobs:
+  proto-fmt:
+    name: Proto formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run clang-format
+        uses: ./.github/actions/clang-format
+        with:
+          include: |
+            *.proto
+          exclude-regex: '^./subprojects/'
+
+  protolint:
+    name: Custom protolint linter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./lint/protobuf/cmd/protolint/
+
+      - name: Run linter
+        run: go run ./lint/protobuf/cmd/protolint/ --exclude subprojects
