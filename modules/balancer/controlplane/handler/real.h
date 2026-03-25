@@ -7,6 +7,7 @@
 #include "api/vs.h"
 #include "common/network.h"
 #include "counters/counters.h"
+#include "modules/balancer/dataplane/active_sessions.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -22,13 +23,6 @@
  * to a contiguous subset of this array via vs->reals (relative pointer).
  */
 struct real {
-	// Source network used for encapsulation/routing to this backend
-	// The address is masked by the mask during initialization
-	const struct net src;
-
-	// Full identifier of the real server
-	const struct real_identifier identifier;
-
 	// Stable index in the handler's real registry
 	// Preserved across config updates for the same real
 	const size_t stable_idx;
@@ -37,12 +31,25 @@ struct real {
 	// Registered as "rl_<stable_idx>" in the counter registry
 	const uint64_t counter_id;
 
+	// Relative pointer to the
+	// array of per-worker sessions tracker
+	struct active_sessions_tracker_shard *tracker_shards;
+
+	// Scheduler weight [0..MAX_REAL_WEIGHT]
+	uint16_t weight;
+
+	// Source network used for encapsulation/routing to this backend
+	// The address is masked by the mask during initialization
+	const struct net src;
+
+	// Full identifier of the real server
+	const struct real_identifier identifier;
+
 	// Mutable state - preserved from previous config or set from config
 	// Whether traffic is allowed to this real. False by default
 	bool enabled;
 
-	// Scheduler weight [0..MAX_REAL_WEIGHT]
-	uint16_t weight;
+	bool tracker_reused;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -51,24 +58,20 @@ struct balancer_state;
 struct counter_registry;
 struct packet_handler;
 
-/**
- * Initialize a real view for the given packet handler index.
- *
- * Looks up or inserts the real in the handler's registry, assigns a stable
- * index, and preserves enabled/weight state from prev_handler if the real
- * existed before.
- *
- * Returns 0 on success, -1 on error.
- */
 int
 real_init(
 	struct real *real,
 	struct packet_handler *handler,
 	struct packet_handler *prev_handler,
 	struct vs_identifier *vs,
-	struct named_real_config *config,
-	struct counter_registry *registry
+	struct named_real_config *named_config,
+	struct counter_registry *registry,
+	size_t workers,
+	struct memory_context *mctx
 );
+
+void
+real_free(struct real *real, size_t workers, struct memory_context *mctx);
 
 /**
  * Resolve real registry index from a counter handle.
