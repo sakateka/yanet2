@@ -465,6 +465,30 @@ func (sc *SocketClient) Close() error {
 	return nil
 }
 
+// ResetConnection closes the existing connection and creates a new one.
+// This ensures a clean stream with no buffered data from previous operations.
+// This method is used for test isolation to prevent packet leakage between tests.
+//
+// The method:
+//   - Closes any existing connection (discarding buffered data)
+//   - Creates a new connection to the same socket
+//   - Returns an error if reconnection fails
+//
+// Returns:
+//   - error: An error if reconnection fails, or nil if successful
+//
+// Example:
+//
+//	if err := client.ResetConnection(); err != nil {
+//	    log.Fatalf("Failed to reset connection: %v", err)
+//	}
+func (sc *SocketClient) ResetConnection() error {
+	if err := sc.Close(); err != nil {
+		sc.log.Debugf("Close error during reset (may be expected): %v", err)
+	}
+	return sc.Connect()
+}
+
 // GetSocketPort returns the TCP port number configured for this socket client.
 // This method is useful for debugging and logging purposes, particularly when
 // working with multiple socket clients on different ports.
