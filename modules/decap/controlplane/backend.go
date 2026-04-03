@@ -29,7 +29,7 @@ func (m *backend) UpdateModule(name string, prefixes []netip.Prefix) (ModuleHand
 	for _, prefix := range prefixes {
 		if err := mod.PrefixAdd(prefix); err != nil {
 			mod.Free()
-			return nil, fmt.Errorf("failed to add prefix: %w", err)
+			return nil, fmt.Errorf("failed to add prefix %v: %w", prefix, err)
 		}
 	}
 
@@ -37,7 +37,7 @@ func (m *backend) UpdateModule(name string, prefixes []netip.Prefix) (ModuleHand
 		[]ffi.ModuleConfig{mod.AsFFIModule()},
 	); err != nil {
 		mod.Free()
-		return nil, fmt.Errorf("failed to update module: %w", err)
+		return nil, fmt.Errorf("failed to update module %q: %w", name, err)
 	}
 
 	return mod, nil
