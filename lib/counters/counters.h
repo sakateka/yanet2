@@ -85,6 +85,9 @@ counter_storage_allocator_init(
 	uint64_t instance_count
 );
 
+void
+counter_storage_allocator_fini(struct counter_storage_allocator *self);
+
 struct counter_value_handle;
 
 struct counter_storage {
