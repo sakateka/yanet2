@@ -191,8 +191,26 @@ func fwstateHandlePackets(cpModule *C.struct_cp_module, packets ...gopacket.Pack
 	return &result, nil
 }
 
+// SyncFrameOption is a functional option for createSyncFrame
+type SyncFrameOption func(*C.struct_fw_state_sync_frame)
+
+// WithFrameFlags sets raw flags byte in the sync frame.
+// `flags` is a union exposed to cgo as [1]byte, so we write through it directly.
+func WithFrameFlags(flags uint8) SyncFrameOption {
+	return func(f *C.struct_fw_state_sync_frame) {
+		*(*uint8)(unsafe.Pointer(&f.flags[0])) = flags
+	}
+}
+
+// WithFrameFib sets fib (direction marker: 0 = forward, 1 = backward)
+func WithFrameFib(fib uint8) SyncFrameOption {
+	return func(f *C.struct_fw_state_sync_frame) {
+		f.fib = C.uint8_t(fib)
+	}
+}
+
 // createSyncFrame creates a properly formatted fw_state_sync_frame
-func createSyncFrame(proto layers.IPProtocol, addrType uint8, srcPort uint16, dstPort uint16, dstIP6, srcIP6 []byte) []byte {
+func createSyncFrame(proto layers.IPProtocol, addrType uint8, srcPort uint16, dstPort uint16, dstIP6, srcIP6 []byte, opts ...SyncFrameOption) []byte {
 	syncFrame := make([]byte, C.sizeof_struct_fw_state_sync_frame)
 
 	// Use unsafe pointer to treat the byte slice as a C struct
@@ -215,7 +233,96 @@ func createSyncFrame(proto layers.IPProtocol, addrType uint8, srcPort uint16, ds
 		}
 	}
 
+	for _, opt := range opts {
+		opt(framePtr)
+	}
+
 	return syncFrame
+}
+
+// StateValueSnapshot is a Go-side snapshot of a fw_state_value entry.
+type StateValueSnapshot struct {
+	Found           bool
+	External        bool
+	FlagsRaw        uint8
+	CreatedAt       uint64
+	UpdatedAt       uint64
+	PacketsForward  uint64
+	PacketsBackward uint64
+	Deadline        uint64
+}
+
+// GetStateValue reads the raw fw_state_value for a given 5-tuple via layermap_get_value_and_deadline.
+// Returns Found=false if the state does not exist.
+func GetStateValue(
+	cpModule *C.struct_cp_module,
+	proto layers.IPProtocol,
+	srcPort uint16,
+	dstPort uint16,
+	srcAddr string,
+	dstAddr string,
+) StateValueSnapshot {
+	m := (*C.struct_fwstate_module_config)(unsafe.Pointer(cpModule))
+	cfg := &m.cfg
+
+	srcIP, err1 := netip.ParseAddr(srcAddr)
+	dstIP, err2 := netip.ParseAddr(dstAddr)
+	if err1 != nil || err2 != nil {
+		return StateValueSnapshot{}
+	}
+
+	var fwmap *C.fwmap_t
+	var keyPtr unsafe.Pointer
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	if srcIP.Is6() && dstIP.Is6() {
+		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfg.fw6state))))
+		key6 := C.struct_fw6_state_key{}
+		key6.hdr.proto = C.uint16_t(proto)
+		key6.hdr.src_port = C.uint16_t(srcPort)
+		key6.hdr.dst_port = C.uint16_t(dstPort)
+		srcBytes := srcIP.As16()
+		dstBytes := dstIP.As16()
+		copy(unsafe.Slice((*byte)(&key6.src_addr[0]), 16), srcBytes[:])
+		copy(unsafe.Slice((*byte)(&key6.dst_addr[0]), 16), dstBytes[:])
+		pinner.Pin(&key6)
+		keyPtr = unsafe.Pointer(&key6)
+	} else {
+		fwmap = (*C.fwmap_t)(C.addr_of((*unsafe.Pointer)(unsafe.Pointer(&cfg.fw4state))))
+		key4 := C.struct_fw4_state_key{}
+		key4.hdr.proto = C.uint16_t(proto)
+		key4.hdr.src_port = C.uint16_t(srcPort)
+		key4.hdr.dst_port = C.uint16_t(dstPort)
+		srcBytes := srcIP.As4()
+		dstBytes := dstIP.As4()
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&key4.src_addr)), 4), srcBytes[:])
+		copy(unsafe.Slice((*byte)(unsafe.Pointer(&key4.dst_addr)), 4), dstBytes[:])
+		pinner.Pin(&key4)
+		keyPtr = unsafe.Pointer(&key4)
+	}
+
+	var value unsafe.Pointer
+	var deadline C.uint64_t
+	var valueFromStale C.bool
+	// now=0 so deadline check inside fwmap_get_value_and_deadline always passes
+	ret := C.layermap_get_value_and_deadline(fwmap, 0, keyPtr, &value, nil, &deadline, &valueFromStale)
+	if ret < 0 || value == nil {
+		return StateValueSnapshot{Found: false}
+	}
+
+	v := (*C.struct_fw_state_value)(value)
+	return StateValueSnapshot{
+		Found:           true,
+		External:        bool(v.external),
+		FlagsRaw:        *(*uint8)(unsafe.Pointer(&v.flags[0])),
+		CreatedAt:       uint64(v.created_at),
+		UpdatedAt:       uint64(v.updated_at),
+		PacketsForward:  uint64(v.packets_forward),
+		PacketsBackward: uint64(v.packets_backward),
+		Deadline:        uint64(deadline),
+	}
 }
 
 // CheckStateExists checks if a state exists in the fwmap

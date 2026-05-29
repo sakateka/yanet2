@@ -23,6 +23,8 @@ type syncPacketConfig struct {
 	srcAddr    string
 	dstAddr    string
 	isExternal bool
+	flags      uint8
+	fib        uint8
 }
 
 // WithPorts sets custom source and destination ports
@@ -45,6 +47,20 @@ func WithAddrs(srcAddr, dstAddr string) SyncPacketOption {
 func WithExternal() SyncPacketOption {
 	return func(c *syncPacketConfig) {
 		c.isExternal = true
+	}
+}
+
+// WithFlags sets raw TCP flags byte on the embedded sync frame
+func WithFlags(flags uint8) SyncPacketOption {
+	return func(c *syncPacketConfig) {
+		c.flags = flags
+	}
+}
+
+// WithFib sets fib (direction) on the embedded sync frame: 0=forward, 1=backward
+func WithFib(fib uint8) SyncPacketOption {
+	return func(c *syncPacketConfig) {
+		c.fib = fib
 	}
 }
 
@@ -100,7 +116,11 @@ func createSyncPacket(t *testing.T, proto layers.IPProtocol, opts ...SyncPacketO
 	// Create sync frame using the helper function
 	dstIP6 := net.ParseIP(cfg.dstAddr)
 	srcIP6 := net.ParseIP(cfg.srcAddr)
-	syncFrame := createSyncFrame(proto, 6, cfg.srcPort, cfg.dstPort, dstIP6, srcIP6)
+	syncFrame := createSyncFrame(
+		proto, 6, cfg.srcPort, cfg.dstPort, dstIP6, srcIP6,
+		WithFrameFlags(cfg.flags),
+		WithFrameFib(cfg.fib),
+	)
 
 	payload := gopacket.Payload(syncFrame)
 
@@ -284,4 +304,154 @@ func TestFWStateTrimStaleLayers(t *testing.T) {
 	// Old state should not exist (layer was trimmed)
 	oldStateExists := CheckStateExists(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
 	require.False(t, oldStateExists, "Old state should not exist after trim")
+}
+
+// TestFWStateUpdateAccumulatesFlags verifies that on subsequent sync frames for
+// the same 5-tuple in the SAME active layer, TCP flags accumulate (logical OR)
+// rather than being overwritten.
+//
+// This is a regression test for a bug previously present in
+// fwmap_update_value_fwstate() (formerly fwmap_copy_value_fwstate): when the
+// entry already existed in the active layer (dst_empty=false), the function
+// did *d = *s and only preserved created_at, fully clobbering flags /
+// packets_* / external with the incoming frame and dropping previously
+// accumulated state.
+//
+// Expected behavior:
+//   - First sync frame sets SYN.
+//   - Second sync frame (for the same key) sets ACK.
+//   - After processing both, stored flags must contain SYN|ACK.
+func TestFWStateUpdateAccumulatesFlags(t *testing.T) {
+	memCtx := testutils.NewMemoryContext("fwstate_acc_flags_test", datasize.MB*64)
+	defer memCtx.Free()
+	cpModule := fwstateModuleConfig(memCtx)
+
+	const synBit = 0x02 // FWSTATE_SYN, src nibble
+	const ackBit = 0x08 // FWSTATE_ACK, src nibble
+
+	pktSyn := createSyncPacket(t, layers.IPProtocolTCP, WithFlags(synBit))
+	_, err := fwstateHandlePackets(cpModule, pktSyn)
+	require.NoError(t, err)
+
+	snap1 := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap1.Found, "state must exist after first sync")
+	require.Equal(t, uint8(synBit), snap1.FlagsRaw, "after first sync only SYN must be set")
+
+	pktAck := createSyncPacket(t, layers.IPProtocolTCP, WithFlags(ackBit))
+	_, err = fwstateHandlePackets(cpModule, pktAck)
+	require.NoError(t, err)
+
+	snap2 := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap2.Found, "state must still exist after second sync")
+	require.Equalf(t, uint8(synBit|ackBit), snap2.FlagsRaw,
+		"flags must accumulate via OR across updates in the same layer (got 0x%02x, want 0x%02x)",
+		snap2.FlagsRaw, synBit|ackBit)
+}
+
+// TestFWStateUpdateAccumulatesPacketCounters verifies that packets_forward /
+// packets_backward counters accumulate across updates in the same active layer
+// rather than being reset to the last sync frame's contribution.
+//
+// Each incoming sync frame contributes +1 to either packets_forward (fib=0) or
+// packets_backward (fib=1) — see fwstate_build_value() in
+// modules/fwstate/dataplane/dataplane.c. Sending N sync frames for the same
+// key MUST result in totals equal to the sum of all per-frame contributions.
+func TestFWStateUpdateAccumulatesPacketCounters(t *testing.T) {
+	memCtx := testutils.NewMemoryContext("fwstate_acc_counters_test", datasize.MB*64)
+	defer memCtx.Free()
+	cpModule := fwstateModuleConfig(memCtx)
+
+	const forwardCount = 3
+	const backwardCount = 2
+
+	for range forwardCount {
+		pkt := createSyncPacket(t, layers.IPProtocolTCP, WithFib(0))
+		_, err := fwstateHandlePackets(cpModule, pkt)
+		require.NoError(t, err)
+	}
+	for range backwardCount {
+		pkt := createSyncPacket(t, layers.IPProtocolTCP, WithFib(1))
+		_, err := fwstateHandlePackets(cpModule, pkt)
+		require.NoError(t, err)
+	}
+
+	snap := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap.Found, "state must exist after sync frames")
+
+	require.Equalf(t, uint64(forwardCount), snap.PacketsForward,
+		"packets_forward must accumulate (got %d, want %d)",
+		snap.PacketsForward, forwardCount)
+	require.Equalf(t, uint64(backwardCount), snap.PacketsBackward,
+		"packets_backward must accumulate (got %d, want %d)",
+		snap.PacketsBackward, backwardCount)
+}
+
+// TestFWStateUpdatePreservesCreatedAt verifies that the original created_at
+// timestamp is preserved across updates within the same active layer by
+// fwmap_update_value_fwstate(). Pairs with the accumulation tests above to
+// pin down all preservation/merge semantics on the in-layer update path.
+func TestFWStateUpdatePreservesCreatedAt(t *testing.T) {
+	memCtx := testutils.NewMemoryContext("fwstate_created_at_test", datasize.MB*64)
+	defer memCtx.Free()
+	cpModule := fwstateModuleConfig(memCtx)
+
+	pkt1 := createSyncPacket(t, layers.IPProtocolTCP)
+	_, err := fwstateHandlePackets(cpModule, pkt1)
+	require.NoError(t, err)
+
+	snap1 := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap1.Found)
+	createdAt := snap1.CreatedAt
+	require.Greater(t, createdAt, uint64(0))
+
+	// Sleep a tiny bit so that current_time advances between calls.
+	// Even without an explicit sleep, the next call uses clock_get_time_ns()
+	// which is monotonic — but we rely on observable difference only for
+	// updated_at, not for the test assertion itself.
+	pkt2 := createSyncPacket(t, layers.IPProtocolTCP)
+	_, err = fwstateHandlePackets(cpModule, pkt2)
+	require.NoError(t, err)
+
+	snap2 := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap2.Found)
+
+	require.Equal(t, createdAt, snap2.CreatedAt,
+		"created_at must be preserved across updates")
+}
+
+// TestFWStateMergeFromStaleLayer verifies that when an entry exists only in a
+// stale (next) layer and a new sync arrives in a fresh active layer, the
+// cross-layer promotion path (fwmap_promote_value_fwstate) is used: flags are
+// OR-ed and packet counters are summed. This pins the cross-layer merge
+// behaviour so that a regression turning it back into "overwrite" is caught.
+func TestFWStateMergeFromStaleLayer(t *testing.T) {
+	memCtx := testutils.NewMemoryContext("fwstate_merge_stale_test", datasize.MB*64)
+	defer memCtx.Free()
+	cpModule := fwstateModuleConfig(memCtx)
+
+	const synBit = 0x02
+	const ackBit = 0x08
+
+	// Populate stale layer with SYN + 1 forward packet.
+	pkt1 := createSyncPacket(t, layers.IPProtocolTCP, WithFlags(synBit), WithFib(0))
+	_, err := fwstateHandlePackets(cpModule, pkt1)
+	require.NoError(t, err)
+
+	// Push that layer down, allocate a new active layer.
+	InsertNewLayer(cpModule)
+
+	// Insert into the fresh active layer with ACK + 1 backward packet.
+	pkt2 := createSyncPacket(t, layers.IPProtocolTCP, WithFlags(ackBit), WithFib(1))
+	_, err = fwstateHandlePackets(cpModule, pkt2)
+	require.NoError(t, err)
+
+	snap := GetStateValue(cpModule, layers.IPProtocolTCP, 12345, 9999, "2001:db8::1", "2001:db8::2")
+	require.True(t, snap.Found, "merged state must be visible from active layer")
+	require.Equalf(t, uint8(synBit|ackBit), snap.FlagsRaw,
+		"flags must be merged across layers (got 0x%02x, want 0x%02x)",
+		snap.FlagsRaw, synBit|ackBit)
+	require.Equalf(t, uint64(1), snap.PacketsForward,
+		"packets_forward from stale layer must be carried over (got %d)", snap.PacketsForward)
+	require.Equalf(t, uint64(1), snap.PacketsBackward,
+		"packets_backward from active layer must be summed in (got %d)", snap.PacketsBackward)
 }

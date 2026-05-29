@@ -199,10 +199,10 @@ layermap_put(
 ) {
 	fwmap_copy_key_fn_t copy_key_fn = (fwmap_copy_key_fn_t
 	)fwmap_func_registry[active_layer->copy_key_fn_id];
-	fwmap_copy_value_fn_t copy_value_fn = (fwmap_copy_value_fn_t
-	)fwmap_func_registry[active_layer->copy_value_fn_id];
-	fwmap_merge_value_fn_t merge_value_fn = (fwmap_merge_value_fn_t
-	)fwmap_func_registry[active_layer->merge_value_fn_id];
+	fwmap_update_value_fn_t update_value_fn = (fwmap_update_value_fn_t
+	)fwmap_func_registry[active_layer->update_value_fn_id];
+	fwmap_promote_value_fn_t promote_value_fn = (fwmap_promote_value_fn_t
+	)fwmap_func_registry[active_layer->promote_value_fn_id];
 
 	fwmap_entry_t entry =
 		fwmap_entry(active_layer, worker_idx, now, ttl, key, lock);
@@ -228,7 +228,7 @@ layermap_put(
 				&value_from_stale
 			);
 			if (result >= 0) {
-				merge_value_fn(
+				promote_value_fn(
 					entry.value,
 					value,
 					old_value,
@@ -245,7 +245,7 @@ layermap_put(
 		}
 	}
 
-	copy_value_fn(
+	update_value_fn(
 		entry.value, value, entry.empty, active_layer->value_size
 	);
 	return (int64_t)entry.idx;

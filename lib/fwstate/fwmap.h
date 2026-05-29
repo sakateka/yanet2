@@ -35,12 +35,12 @@ typedef enum {
 	FWMAP_RAND_DEFAULT,
 	FWMAP_RAND_SECURE,
 	FWMAP_COPY_KEY_DEFAULT,
-	FWMAP_COPY_VALUE_DEFAULT,
-	FWMAP_MERGE_VALUE_DEFAULT,
+	FWMAP_UPDATE_VALUE_DEFAULT,
+	FWMAP_PROMOTE_VALUE_DEFAULT,
 	FWMAP_COPY_KEY_FW4,
 	FWMAP_COPY_KEY_FW6,
-	FWMAP_COPY_VALUE_FWSTATE,
-	FWMAP_MERGE_VALUE_FWSTATE,
+	FWMAP_UPDATE_VALUE_FWSTATE,
+	FWMAP_PROMOTE_VALUE_FWSTATE,
 	FWMAP_KEY_EQUAL_FW4,
 	FWMAP_KEY_EQUAL_FW6,
 	FWMAP_FUNC_COUNT
@@ -66,12 +66,23 @@ typedef bool (*fwmap_key_equal_fn_t)(
 // Prevents hash collision attacks and ensures different distributions.
 typedef uint64_t (*fwmap_rand_fn_t)(void);
 
-// Copy function types for custom key/value copying.
+// Copy/merge function types for custom key/value handling.
+//
+// - copy_key: copies the key into a freshly allocated slot.
+// - update_value: applied when the key already lives in (or is being inserted
+//   into) the active layer. The "old" value, if any, is already located at
+//   *dst; dst_empty tells whether this is the first write to the slot.
+//   Implementations are expected to merge with the existing dst contents when
+//   !dst_empty (e.g. OR-accumulate flags, sum packet counters).
+// - promote_value: applied exactly once when a key found only in a stale
+//   (lower) layer is being promoted into a fresh slot of the active layer.
+//   The previous value lives in *old_value (in the stale layer); the incoming
+//   value is *new_value; *dst is empty.
 typedef void (*fwmap_copy_key_fn_t)(void *dst, const void *src, size_t size);
-typedef void (*fwmap_copy_value_fn_t)(
+typedef void (*fwmap_update_value_fn_t)(
 	void *dst, const void *src, bool dst_empty, size_t size
 );
-typedef void (*fwmap_merge_value_fn_t)(
+typedef void (*fwmap_promote_value_fn_t)(
 	void *dst, const void *new_value, const void *old_value, size_t size
 );
 
@@ -86,8 +97,8 @@ typedef struct fwmap_config {
 	fwmap_func_id_t key_equal_fn_id;
 	fwmap_func_id_t rand_fn_id;
 	fwmap_func_id_t copy_key_fn_id;
-	fwmap_func_id_t copy_value_fn_id;
-	fwmap_func_id_t merge_value_fn_id;
+	fwmap_func_id_t update_value_fn_id;
+	fwmap_func_id_t promote_value_fn_id;
 } fwmap_config_t;
 
 typedef struct fwmap_bucket {
@@ -129,8 +140,8 @@ typedef struct fwmap {
 	uint8_t hash_fn_id;
 	uint8_t key_equal_fn_id;
 	uint8_t copy_key_fn_id;
-	uint8_t copy_value_fn_id;
-	uint8_t merge_value_fn_id;
+	uint8_t update_value_fn_id;
+	uint8_t promote_value_fn_id;
 
 	// Alignment offsets for cache-aligned allocations
 	uint8_t map_alloc_offset;
@@ -255,7 +266,7 @@ fwmap_default_copy_key(void *dst, const void *src, size_t size) {
 }
 
 static inline void
-fwmap_default_copy_value(
+fwmap_default_update_value(
 	void *dst, const void *src, bool dst_empty, size_t size
 ) {
 	(void)dst_empty;
@@ -263,7 +274,7 @@ fwmap_default_copy_value(
 }
 
 static inline void
-fwmap_default_merge_value(
+fwmap_default_promote_value(
 	void *dst, const void *old_value, const void *new_value, size_t size
 ) {
 	(void)dst, (void)old_value, (void)new_value, (void)size;
@@ -286,11 +297,11 @@ fwmap_config_set_defaults(fwmap_config_t *config) {
 	if (config->copy_key_fn_id == FWMAP_UNINITIALIZED) {
 		config->copy_key_fn_id = FWMAP_COPY_KEY_DEFAULT;
 	}
-	if (config->copy_value_fn_id == FWMAP_UNINITIALIZED) {
-		config->copy_value_fn_id = FWMAP_COPY_VALUE_DEFAULT;
+	if (config->update_value_fn_id == FWMAP_UNINITIALIZED) {
+		config->update_value_fn_id = FWMAP_UPDATE_VALUE_DEFAULT;
 	}
-	if (config->merge_value_fn_id == FWMAP_UNINITIALIZED) {
-		config->merge_value_fn_id = FWMAP_MERGE_VALUE_DEFAULT;
+	if (config->promote_value_fn_id == FWMAP_UNINITIALIZED) {
+		config->promote_value_fn_id = FWMAP_PROMOTE_VALUE_DEFAULT;
 	}
 }
 
@@ -817,8 +828,8 @@ fwmap_new(const fwmap_config_t *user_config, struct memory_context *ctx) {
 	map->hash_fn_id = config.hash_fn_id;
 	map->key_equal_fn_id = config.key_equal_fn_id;
 	map->copy_key_fn_id = config.copy_key_fn_id;
-	map->copy_value_fn_id = config.copy_value_fn_id;
-	map->merge_value_fn_id = config.merge_value_fn_id;
+	map->update_value_fn_id = config.update_value_fn_id;
+	map->promote_value_fn_id = config.promote_value_fn_id;
 
 	map->index_mask = index_size - 1;
 	// Shift amount equals the number of bits set in the chunk_index_mask
@@ -1218,8 +1229,8 @@ fwmap_put(
 ) {
 	fwmap_copy_key_fn_t copy_key_fn =
 		(fwmap_copy_key_fn_t)fwmap_func_registry[map->copy_key_fn_id];
-	fwmap_copy_value_fn_t copy_value_fn = (fwmap_copy_value_fn_t
-	)fwmap_func_registry[map->copy_value_fn_id];
+	fwmap_update_value_fn_t update_value_fn = (fwmap_update_value_fn_t
+	)fwmap_func_registry[map->update_value_fn_id];
 
 	fwmap_entry_t entry = fwmap_entry(map, worker_idx, now, ttl, key, lock);
 	if (!entry.key) {
@@ -1228,7 +1239,7 @@ fwmap_put(
 	if (entry.empty) {
 		copy_key_fn(entry.key, key, map->key_size);
 	}
-	copy_value_fn(entry.value, value, entry.empty, map->value_size);
+	update_value_fn(entry.value, value, entry.empty, map->value_size);
 
 	return (int64_t)entry.idx;
 }
@@ -1304,12 +1315,12 @@ static void *fwmap_func_registry[FWMAP_FUNC_COUNT] = {
 	[FWMAP_RAND_DEFAULT] = (void *)fwmap_rand_default,
 	[FWMAP_RAND_SECURE] = (void *)fwmap_rand_secure,
 	[FWMAP_COPY_KEY_DEFAULT] = (void *)fwmap_default_copy_key,
-	[FWMAP_COPY_VALUE_DEFAULT] = (void *)fwmap_default_copy_value,
-	[FWMAP_MERGE_VALUE_DEFAULT] = (void *)fwmap_default_merge_value,
+	[FWMAP_UPDATE_VALUE_DEFAULT] = (void *)fwmap_default_update_value,
+	[FWMAP_PROMOTE_VALUE_DEFAULT] = (void *)fwmap_default_promote_value,
 	[FWMAP_COPY_KEY_FW4] = (void *)fwmap_copy_key_fw4,
 	[FWMAP_COPY_KEY_FW6] = (void *)fwmap_copy_key_fw6,
-	[FWMAP_COPY_VALUE_FWSTATE] = (void *)fwmap_copy_value_fwstate,
-	[FWMAP_MERGE_VALUE_FWSTATE] = (void *)fwmap_merge_value_fwstate,
+	[FWMAP_UPDATE_VALUE_FWSTATE] = (void *)fwmap_update_value_fwstate,
+	[FWMAP_PROMOTE_VALUE_FWSTATE] = (void *)fwmap_promote_value_fwstate,
 	[FWMAP_KEY_EQUAL_FW4] = (void *)fwmap_fw4_key_equal,
 	[FWMAP_KEY_EQUAL_FW6] = (void *)fwmap_fw6_key_equal
 };

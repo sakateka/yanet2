@@ -60,8 +60,8 @@ fwstate_test_config(struct cp_module **cp_module) {
 		.key_equal_fn_id = FWMAP_KEY_EQUAL_FW4,
 		.rand_fn_id = FWMAP_RAND_DEFAULT,
 		.copy_key_fn_id = FWMAP_COPY_KEY_FW4,
-		.copy_value_fn_id = FWMAP_COPY_VALUE_FWSTATE,
-		.merge_value_fn_id = FWMAP_MERGE_VALUE_FWSTATE,
+		.update_value_fn_id = FWMAP_UPDATE_VALUE_FWSTATE,
+		.promote_value_fn_id = FWMAP_PROMOTE_VALUE_FWSTATE,
 		.index_size = 1024,
 		.extra_bucket_count = 64,
 	};
@@ -81,8 +81,8 @@ fwstate_test_config(struct cp_module **cp_module) {
 		.key_equal_fn_id = FWMAP_KEY_EQUAL_FW6,
 		.rand_fn_id = FWMAP_RAND_DEFAULT,
 		.copy_key_fn_id = FWMAP_COPY_KEY_FW6,
-		.copy_value_fn_id = FWMAP_COPY_VALUE_FWSTATE,
-		.merge_value_fn_id = FWMAP_MERGE_VALUE_FWSTATE,
+		.update_value_fn_id = FWMAP_UPDATE_VALUE_FWSTATE,
+		.promote_value_fn_id = FWMAP_PROMOTE_VALUE_FWSTATE,
 		.index_size = 1024,
 		.extra_bucket_count = 64,
 	};
