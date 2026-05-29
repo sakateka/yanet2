@@ -136,8 +136,8 @@ fwstate_init_config(
 	config->copy_key_fn_id = copy_key_fn_id;
 
 	config->value_size = sizeof(struct fw_state_value);
-	config->copy_value_fn_id = FWMAP_COPY_VALUE_FWSTATE;
-	config->merge_value_fn_id = FWMAP_MERGE_VALUE_FWSTATE;
+	config->update_value_fn_id = FWMAP_UPDATE_VALUE_FWSTATE;
+	config->promote_value_fn_id = FWMAP_PROMOTE_VALUE_FWSTATE;
 
 	config->hash_seed = 0;
 	config->hash_fn_id = FWMAP_HASH_FNV1A;

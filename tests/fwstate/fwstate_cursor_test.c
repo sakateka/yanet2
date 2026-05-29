@@ -66,8 +66,8 @@ test_env_create(void *arena, const char *name) {
 	cfg.key_equal_fn_id = FWMAP_KEY_EQUAL_FW4;
 	cfg.rand_fn_id = FWMAP_RAND_DEFAULT;
 	cfg.copy_key_fn_id = FWMAP_COPY_KEY_FW4;
-	cfg.copy_value_fn_id = FWMAP_COPY_VALUE_FWSTATE;
-	cfg.merge_value_fn_id = FWMAP_MERGE_VALUE_FWSTATE;
+	cfg.update_value_fn_id = FWMAP_UPDATE_VALUE_FWSTATE;
+	cfg.promote_value_fn_id = FWMAP_PROMOTE_VALUE_FWSTATE;
 	cfg.index_size = 128;
 	cfg.extra_bucket_count = 8;
 

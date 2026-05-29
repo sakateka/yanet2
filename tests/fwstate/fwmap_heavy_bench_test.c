@@ -194,7 +194,7 @@ test_multithreaded_benchmark(void *mt_arena) {
 			(void *)bench_key_equal;
 		fwmap_func_registry[FWMAP_COPY_KEY_DEFAULT] =
 			(void *)bench_copy_key;
-		fwmap_func_registry[FWMAP_COPY_VALUE_DEFAULT] =
+		fwmap_func_registry[FWMAP_UPDATE_VALUE_DEFAULT] =
 			(void *)bench_copy_value;
 		registered = true;
 	}
@@ -208,7 +208,7 @@ test_multithreaded_benchmark(void *mt_arena) {
 		.key_equal_fn_id = FWMAP_KEY_EQUAL_DEFAULT,
 		.rand_fn_id = FWMAP_RAND_DEFAULT,
 		.copy_key_fn_id = FWMAP_COPY_KEY_DEFAULT,
-		.copy_value_fn_id = FWMAP_COPY_VALUE_DEFAULT,
+		.update_value_fn_id = FWMAP_UPDATE_VALUE_DEFAULT,
 		.index_size = index_size,
 		.extra_bucket_count = index_size >> 8,
 	};
