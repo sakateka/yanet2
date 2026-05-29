@@ -1,8 +1,11 @@
 #pragma once
 
+#include <netinet/in.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#include "config.h"
 
 #define FW_STATE_ADDR_TYPE_IP4 4
 #define FW_STATE_ADDR_TYPE_IP6 6
@@ -129,3 +132,33 @@ struct fw_state_sync_frame {
 	uint32_t flow_id6;   // IPv6 flow label
 	uint32_t extra;	     // Reserved for future use
 } __attribute__((__packed__));
+
+/// Select the appropriate TTL for a firewall state entry based on its
+/// protocol type and TCP flags.
+/// Ported from the dataplane implementation
+/// (yanet/dataplane/slow_worker.cpp:496).
+static inline uint64_t
+fwstate_entry_ttl(
+	uint16_t proto, uint8_t raw_flags, const struct fwstate_timeouts *t
+) {
+	union fw_state_flags_u flags = {.raw = raw_flags};
+
+	uint64_t ttl = t->default_;
+	if (proto == IPPROTO_UDP) {
+		ttl = t->udp;
+	} else if (proto == IPPROTO_TCP) {
+		ttl = t->tcp;
+
+		uint8_t tcp_flags = flags.tcp.src | flags.tcp.dst;
+		if (tcp_flags & FWSTATE_ACK) {
+			ttl = t->tcp_syn_ack;
+		} else if (tcp_flags & FWSTATE_SYN) {
+			ttl = t->tcp_syn;
+		}
+		if (tcp_flags & FWSTATE_FIN) {
+			ttl = t->tcp_fin;
+		}
+	}
+
+	return ttl;
+}

@@ -196,7 +196,7 @@ test_ttl_selection(void) {
 	flags.tcp.src = FWSTATE_ACK;
 	flags.tcp.dst = FWSTATE_ACK;
 	assert(fwstate_entry_ttl(IPPROTO_TCP, flags.raw, &test_timeouts) ==
-	       test_timeouts.tcp);
+	       test_timeouts.tcp_syn_ack);
 
 	/* UDP */
 	flags.raw = 0;

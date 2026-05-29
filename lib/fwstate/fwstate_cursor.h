@@ -21,33 +21,6 @@ typedef struct fwstate_cursor_entry {
 	bool expired;
 } fwstate_cursor_entry_t;
 
-/// Select the appropriate TTL for a firewall state entry based on its
-/// protocol type and TCP flags.
-static inline uint64_t
-fwstate_entry_ttl(
-	uint16_t proto, uint8_t raw_flags, const struct fwstate_timeouts *t
-) {
-	union fw_state_flags_u flags = {.raw = raw_flags};
-	if (proto == IPPROTO_UDP) {
-		return t->udp;
-	}
-	if (proto == IPPROTO_TCP) {
-		if (flags.tcp.src & FWSTATE_FIN ||
-		    flags.tcp.dst & FWSTATE_FIN) {
-			return t->tcp_fin;
-		}
-		if ((flags.tcp.src & FWSTATE_SYN) &&
-		    (flags.tcp.dst & FWSTATE_ACK)) {
-			return t->tcp_syn_ack;
-		}
-		if (flags.tcp.src & FWSTATE_SYN) {
-			return t->tcp_syn;
-		}
-		return t->tcp;
-	}
-	return t->default_;
-}
-
 static inline int
 fwstate_cursor_read_entry(
 	fwmap_t *map,
