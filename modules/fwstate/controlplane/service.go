@@ -11,9 +11,66 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/yanet-platform/yanet2/common/go/grpcmetrics"
+	"github.com/yanet-platform/yanet2/common/go/metrics"
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/modules/fwstate/controlplane/fwstatepb/v1"
 )
+
+// Option configures an FWStateService.
+type Option func(*options)
+
+// options holds the optional parameters for FWStateService construction.
+type options struct {
+	Metrics grpcmetrics.Factory
+	Log     *zap.Logger
+}
+
+func newOptions() *options {
+	return &options{
+		Log: zap.NewNop(),
+	}
+}
+
+// WithLog sets the service logger.
+func WithLog(log *zap.Logger) Option {
+	return func(o *options) {
+		o.Log = log
+	}
+}
+
+// WithMetrics enables collection of gRPC call metrics using the supplied
+// factory.
+//
+// The factory owns label extraction and bucketing; the service injects its own
+// retention provider at construction time. Use [NewMetricsFactory] to build a
+// factory scoped to this module's services.
+func WithMetrics(factory grpcmetrics.Factory) Option {
+	return func(o *options) {
+		o.Metrics = factory
+	}
+}
+
+// NewMetricsFactory returns a [grpcmetrics.Factory] pre-bound to this module's
+// own labeler and service filter, applying any extra options (e.g. custom
+// histogram buckets) supplied by the caller.
+//
+// The [grpcmetrics.Retention] is injected by the service itself at construction
+// time, so it must not be passed here.
+func NewMetricsFactory(extra ...grpcmetrics.Option) grpcmetrics.Factory {
+	opts := make([]grpcmetrics.Option, 0, len(extra)+2)
+	opts = append(opts, grpcmetrics.WithLabeler(labeler))
+
+	// Scope the collector to this module's own services.
+	opts = append(opts, grpcmetrics.WithServiceFilter(
+		func(service string) bool {
+			return service == FWStateServiceName ||
+				service == FWStateMetricsServiceName
+		},
+	))
+	opts = append(opts, extra...)
+	return grpcmetrics.NewFactory(opts...)
+}
 
 const (
 	// defaultListEntriesBatchSize is the batch size used when the caller
@@ -28,6 +85,17 @@ const (
 	// maxSyncPort is the highest value accepted for port_multicast and
 	// port_unicast, matching the width of the C-side uint16 port field.
 	maxSyncPort uint32 = 65535
+)
+
+// FWStateServiceName and MetricsServiceName are the fully-qualified gRPC
+// service names exposed by this module, derived from the generated service
+// descriptors so they cannot drift from the proto definitions.
+//
+// They are used to scope the module's [grpcmetrics.ServerMetrics] to its own
+// services when several modules share a single [grpc.Server].
+var (
+	FWStateServiceName        = fwstatepb.FWStateService_ServiceDesc.ServiceName
+	FWStateMetricsServiceName = fwstatepb.MetricsService_ServiceDesc.ServiceName
 )
 
 // clampBatchSize returns a batch size that is within the allowed range:
@@ -77,6 +145,7 @@ type FWStateService struct {
 	agent       *ffi.Agent
 	configs     map[string]*FwStateConfig
 	aclProvider ACLServiceProvider
+	metrics     *grpcmetrics.ServerMetrics
 
 	// Pending outdated layers to be freed after successful UpdateModules
 	pendingOutdatedLayers []*OutdatedLayers
@@ -84,13 +153,55 @@ type FWStateService struct {
 	log *zap.Logger
 }
 
-// NewFWStateService creates a new FWState service
-func NewFWStateService(agent *ffi.Agent, aclProvider ACLServiceProvider, log *zap.Logger) *FWStateService {
-	return &FWStateService{
+// NewFWStateService creates a new FWState service.
+//
+// When the WithMetrics option is supplied, gRPC call metrics are collected and
+// exposed through the module's MetricsService.
+func NewFWStateService(
+	agent *ffi.Agent,
+	aclProvider ACLServiceProvider,
+	options ...Option,
+) *FWStateService {
+	opts := newOptions()
+	for _, o := range options {
+		o(opts)
+	}
+
+	m := &FWStateService{
 		agent:       agent,
 		configs:     make(map[string]*FwStateConfig),
 		aclProvider: aclProvider,
-		log:         log,
+		log:         opts.Log,
+	}
+	if opts.Metrics != nil {
+		m.metrics = opts.Metrics(m.retention)
+	}
+
+	return m
+}
+
+// UnaryServerInterceptor returns the service's gRPC metrics interceptor, or
+// nil when metrics are not configured.
+func (m *FWStateService) UnaryServerInterceptor() grpc.UnaryServerInterceptor {
+	if m.metrics == nil {
+		return nil
+	}
+
+	return m.metrics.UnaryServerInterceptor()
+}
+
+func labeler(fullMethod string, req any) metrics.Labels {
+	switch r := req.(type) {
+	case *fwstatepb.UpdateConfigRequest:
+		return metrics.Labels{"config": r.GetName()}
+	case *fwstatepb.DeleteConfigRequest:
+		return metrics.Labels{"config": r.GetName()}
+	case *fwstatepb.ShowConfigRequest:
+		return metrics.Labels{"config": r.GetName()}
+	case *fwstatepb.GetStatsRequest:
+		return metrics.Labels{"config": r.GetName()}
+	default:
+		return nil
 	}
 }
 

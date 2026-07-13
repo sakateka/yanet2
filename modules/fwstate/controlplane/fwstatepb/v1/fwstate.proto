@@ -4,6 +4,7 @@ package modules.fwstate.controlplane.fwstatepb.v1;
 
 import "common/commonpb/v1/ipaddr.proto";
 import "common/commonpb/v1/macaddr.proto";
+import "common/commonpb/v1/metric.proto";
 
 option go_package = "github.com/yanet-platform/yanet2/modules/fwstate/controlplane/fwstatepb/v1;fwstatepb";
 
@@ -23,6 +24,12 @@ service FWStateService {
   rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
   // Bidirectional stream for listing map entries.
   rpc ListEntries(stream ListEntriesRequest) returns (stream ListEntriesResponse);
+}
+
+// MetricsService exposes FWState module metrics.
+service MetricsService {
+  // GetMetrics returns a snapshot of FWState module metrics.
+  rpc GetMetrics(common.commonpb.v1.GetMetricsRequest) returns (common.commonpb.v1.GetMetricsResponse);
 }
 
 message UpdateConfigRequest {
