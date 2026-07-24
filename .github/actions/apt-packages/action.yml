@@ -1,0 +1,22 @@
+name: 'apt packages (cached)'
+description: 'Refresh the apt index, then install packages via cache-apt-pkgs-action'
+
+inputs:
+  packages:
+    description: 'Space-separated list of apt packages to install'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: refresh apt index
+      shell: bash
+      run: sudo apt-get update
+
+    # On a cache hit this action extracts archives rather than installing, so the dpkg
+    # database will not list the packages and a dpkg presence check cannot work here.
+    # Refreshing the index above prevents a failed install being cached as an empty result.
+    - uses: awalsh128/cache-apt-pkgs-action@v1.6.3
+      with:
+        packages: ${{ inputs.packages }}
+        version: 2

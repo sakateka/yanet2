@@ -8,6 +8,7 @@ on:
       - 'lint/encapsulation/**'
       - '.golangci.yml'
       - '.github/workflows/go-lint.yml'
+      - '.github/actions/apt-packages/**'
   pull_request:
     paths:
       - '**/*.go'
@@ -15,6 +16,7 @@ on:
       - 'lint/encapsulation/**'
       - '.golangci.yml'
       - '.github/workflows/go-lint.yml'
+      - '.github/actions/apt-packages/**'
 
 jobs:
   loglint:
@@ -61,10 +63,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: awalsh128/cache-apt-pkgs-action@latest
+      - uses: ./.github/actions/apt-packages
         with:
           packages: protobuf-compiler libpcap-dev
-          version: 1.0
 
       - name: Install Go protobuf plugins
         run: |
