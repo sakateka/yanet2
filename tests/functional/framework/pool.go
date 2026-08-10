@@ -39,7 +39,7 @@ type poolResult struct {
 }
 
 func guestPathsForTemplate(snapshotName string) GuestPaths {
-	if snapshotName == "baseline" {
+	if snapshotName != BootedSnapshotName {
 		// Baseline templates are captured after PrepareLocalStorage, so their
 		// binaries and configuration live in guest tmpfs rather than on 9P.
 		return LocalGuestPaths()
@@ -169,7 +169,17 @@ func (p *VMPool) StartAll() error {
 
 	if _, err := os.Stat(p.bootedTemplate); err == nil && HasBootedSnapshot(p.bootedTemplate) {
 		p.log.Infof("Booted template found at %s; starting all slots from it", p.bootedTemplate)
-		return p.startAllFromTemplate(p.bootedTemplate, BootedSnapshotName)
+		if err := p.startAllFromTemplate(p.bootedTemplate, BootedSnapshotName); err != nil {
+			p.log.Warnf("Booted template unhealthy, discarding and re-bootstrapping: %v", err)
+			_ = os.Remove(p.bootedTemplate)
+			for _, entry := range p.vms {
+				_ = entry.fw.Stop()
+				entry.manager.TemplateOverlay = ""
+				entry.manager.TemplateSnapshotName = ""
+			}
+			return p.bootstrapTemplate()
+		}
+		return nil
 	}
 
 	// Slow path: bootstrap from a cold boot.
@@ -204,13 +214,16 @@ func (p *VMPool) validateBootedTemplate() error {
 	valFW.cli = cli
 
 	p.log.Infof("Starting validation VM from booted template...")
+	defer valFW.Stop() //nolint:errcheck
 	if _, err := valFW.Start(); err != nil {
 		return fmt.Errorf("validation VM start failed: %w", err)
 	}
-	defer valFW.Stop() //nolint:errcheck
 
 	if err := valMgr.WaitForReady(VMReadyTimeout()); err != nil {
 		return fmt.Errorf("validation VM not ready after start: %w", err)
+	}
+	if err := valFW.thawRootFilesystem(); err != nil {
+		return fmt.Errorf("validation VM filesystem thaw failed after start: %w", err)
 	}
 
 	for i := 1; i <= 3; i++ {
@@ -224,15 +237,15 @@ func (p *VMPool) validateBootedTemplate() error {
 		if err := valMgr.RestoreBooted(); err != nil {
 			return fmt.Errorf("cycle %d: restore failed: %w", i, err)
 		}
+		if err := valFW.thawRootFilesystem(); err != nil {
+			return fmt.Errorf("cycle %d: filesystem thaw failed: %w", i, err)
+		}
 
 		// Remount 9P and run a simple smoke command.
 		if err := valFW.Mount9P(); err != nil {
 			p.log.Debugf("validation mount 9P (non-fatal): %v", err)
 		}
 
-		if _, err := valFW.ExecuteCommand("echo ok"); err != nil {
-			return fmt.Errorf("cycle %d: smoke command failed: %w", i, err)
-		}
 		p.log.Infof("Validation cycle %d/3 passed", i)
 	}
 
@@ -262,6 +275,16 @@ func (p *VMPool) startAllFromTemplate(templateOverlay string, snapshotName strin
 	if firstErr != nil {
 		return firstErr
 	}
+
+	for i, entry := range p.vms {
+		if err := entry.manager.WaitForReady(VMReadyTimeout()); err != nil {
+			return fmt.Errorf("VM%d not ready after start from template: %w", i, err)
+		}
+		if err := entry.fw.thawRootFilesystem(); err != nil {
+			return fmt.Errorf("VM%d filesystem thaw failed after start from template: %w", i, err)
+		}
+	}
+
 	for i := range p.vms {
 		p.available <- i
 	}
@@ -282,17 +305,34 @@ func (p *VMPool) bootstrapTemplate() error {
 		return fmt.Errorf("VM0 not ready during bootstrap: %w", err)
 	}
 
+	// Wait for cloud-init to finish before snapshotting. It disables the guest
+	// maintenance writers during image preparation.
+	quiesceCmd := "cloud-init status --wait 2>/dev/null; sync"
+	if _, err := vm0.fw.ExecuteCommandWithTimeout(quiesceCmd, 60*time.Second); err != nil {
+		p.log.Warnf("Guest quiesce before savevm returned error (non-fatal): %v", err)
+	}
+
 	// Unmount 9P so savevm can proceed (QEMU blocks savevm with VirtFS active).
 	vm0.manager.Ninepmounted.Store(true)
 	if err := vm0.fw.Unmount9P(); err != nil {
 		p.log.Warnf("Failed to unmount 9P before snapshot (non-fatal): %v", err)
 	}
 
+	if err := vm0.fw.freezeRootFilesystem(); err != nil {
+		_ = vm0.fw.Stop()
+		return fmt.Errorf("failed to freeze filesystem before booted snapshot: %w", err)
+	}
+
 	// Save the booted snapshot and get the overlay path.
 	overlayPath, err := vm0.manager.SaveBootedOverlay()
+	thawErr := vm0.fw.thawRootFilesystem()
 	if err != nil {
 		_ = vm0.fw.Stop()
 		return fmt.Errorf("failed to save booted snapshot: %w", err)
+	}
+	if thawErr != nil {
+		_ = vm0.fw.Stop()
+		return fmt.Errorf("failed to thaw filesystem after booted snapshot: %w", thawErr)
 	}
 
 	// Cache the overlay as the canonical template before stopping VM0
