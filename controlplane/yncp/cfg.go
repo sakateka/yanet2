@@ -1,7 +1,7 @@
 package yncp
 
 import (
-	"gopkg.in/yaml.v3"
+	"errors"
 
 	"go.uber.org/zap/zapcore"
 
@@ -10,8 +10,8 @@ import (
 	"github.com/yanet-platform/yanet2/controlplane/gateway"
 )
 
-type Config config
-type config struct {
+// Config is the control plane configuration.
+type Config struct {
 	// Logging configuration.
 	Logging logging.Config `json:"logging" yaml:"logging"`
 	// MemoryPath is the path to the shared-memory file that is used to
@@ -19,14 +19,27 @@ type config struct {
 	MemoryPath string `yaml:"memory_path"`
 	// Gateway configuration.
 	Gateway *gateway.Config `json:"gateway" yaml:"gateway"`
-	// Modules configuration.
+	// Modules configuration. A module absent from the document is not
+	// started.
 	Modules bundle.ModulesConfig `json:"modules" yaml:"modules"`
-	// Devices configuration.
+	// Devices configuration. A device absent from the document is not
+	// started.
 	Devices bundle.DevicesConfig `json:"devices" yaml:"devices"`
 }
 
 func (m *Config) Default() {
 	*m = *DefaultConfig()
+}
+
+// Validate rejects a document that clears the defaulted gateway block, be it
+// a bare "gateway:" key or an explicit "gateway: null", either of which
+// yaml.v3 decodes into a nil Gateway rather than leaving the default intact.
+func (m *Config) Validate() error {
+	if m.Gateway == nil {
+		return errors.New("gateway: must not be empty or null")
+	}
+
+	return nil
 }
 
 func DefaultConfig() *Config {
@@ -36,29 +49,5 @@ func DefaultConfig() *Config {
 		},
 		MemoryPath: "/dev/hugepages/yanet",
 		Gateway:    gateway.DefaultConfig(),
-		Modules:    bundle.DefaultModulesConfig(),
-		Devices:    bundle.DefaultDevicesConfig(),
 	}
-}
-
-// UnmarshalYAML serves as a proxy for validation.
-//
-// To avoid infinite recursion, the validating wrapper casts itself to the
-// private config struct. This allows the decoder to operate on it using the
-// default behavior for handling Go structs without an unmarshal method.
-func (m *Config) UnmarshalYAML(value *yaml.Node) error {
-	err := value.Decode((*config)(m))
-	if err != nil {
-		return err
-	}
-	return m.Validate()
-}
-
-// Validate validates the control plane configuration.
-func (m *Config) Validate() error {
-	err := m.Modules.Validate()
-	if err != nil {
-		return err
-	}
-	return m.Devices.Validate()
 }

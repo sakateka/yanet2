@@ -8,7 +8,9 @@ import (
 // Config represents trafgen device configuration.
 type Config struct {
 	// InstanceID specifies which dataplane instance this device serves.
-	InstanceID uint32 `yaml:"instance_id"`
+	//
+	// Required: a listed device must set it explicitly, even to 0.
+	InstanceID xcfg.Required[uint32] `yaml:"instance_id"`
 	// MemoryPath is the path to the shared-memory file that is used to
 	// communicate with dataplane.
 	MemoryPath xcfg.NonEmptyString `yaml:"memory_path"`
@@ -27,4 +29,9 @@ func DefaultConfig() *Config {
 		Endpoint:           xcfg.MustNonEmptyString("[::1]:0"),
 		GatewayEndpoint:    xcfg.MustNonEmptyString("[::1]:8080"),
 	}
+}
+
+// Default resets Config to DefaultConfig.
+func (m *Config) Default() {
+	*m = *DefaultConfig()
 }

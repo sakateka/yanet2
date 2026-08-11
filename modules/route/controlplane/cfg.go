@@ -8,7 +8,9 @@ import (
 // Config is the route module shim configuration.
 type Config struct {
 	// InstanceID specifies which dataplane instance this module serves.
-	InstanceID uint32 `yaml:"instance_id"`
+	//
+	// Required: a listed module must set it explicitly, even to 0.
+	InstanceID xcfg.Required[uint32] `yaml:"instance_id"`
 	// MemoryPath is the path to the shared-memory file that is used to
 	// communicate with dataplane.
 	MemoryPath xcfg.NonEmptyString `yaml:"memory_path"`
@@ -32,4 +34,9 @@ func DefaultConfig() *Config {
 		MemoryRequirements: xcfg.MustNonZero(16 * datasize.MB),
 		Endpoint:           xcfg.MustNonEmptyString("[::1]:0"),
 	}
+}
+
+// Default resets Config to DefaultConfig.
+func (m *Config) Default() {
+	*m = *DefaultConfig()
 }

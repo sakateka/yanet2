@@ -266,3 +266,53 @@ another_free_key: value
 `
 	require.NoError(t, xcfg.CheckKnownKeys[knownKeysInlineMap]([]byte(input)))
 }
+
+type requiredWrappedInner struct {
+	A string `yaml:"a"`
+	B string `yaml:"b"`
+}
+
+type requiredWrapped struct {
+	Sub xcfg.Required[requiredWrappedInner] `yaml:"sub"`
+}
+
+func Test_CheckKnownKeys_UnexportedStructWithUnmarshalYAMLNotFlagged(t *testing.T) {
+	// Required[T] has only unexported fields but decodes a mapping through
+	// its own UnmarshalYAML — the walk must not report the mapping's keys
+	// as unknown just because Required[T] has no exported field set of its
+	// own.
+	input := "sub:\n  a: x\n  b: y\n"
+	require.NoError(t, xcfg.CheckKnownKeys[requiredWrapped]([]byte(input)))
+
+	var out requiredWrapped
+	require.NoError(t, yaml.Unmarshal([]byte(input), &out))
+	require.Equal(t, "x", out.Sub.Unwrap().A)
+	require.Equal(t, "y", out.Sub.Unwrap().B)
+}
+
+type optionalWrapped struct {
+	Sub xcfg.Optional[requiredWrappedInner] `yaml:"sub"`
+}
+
+// Test_CheckKnownKeys_OptionalSeesThroughToWrappedFields asserts that a
+// stray key nested inside an Optional[T] block is still reported.
+//
+// Optional[T] has the same unexported-field, UnmarshalYAML shape as
+// Required[T], which the previous test proves is otherwise treated as
+// opaque to the walk. Without Optional's WalkType hook this key would be
+// silently accepted instead, undoing WithKnownFields for every optional
+// module or device block.
+func Test_CheckKnownKeys_OptionalSeesThroughToWrappedFields(t *testing.T) {
+	input := "sub:\n  a: x\n  b: y\n  bogus: z\n"
+	err := xcfg.CheckKnownKeys[optionalWrapped]([]byte(input))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "sub.bogus")
+}
+
+// Test_CheckKnownKeys_OptionalCleanDocumentNotFlagged is the positive
+// control for Test_CheckKnownKeys_OptionalSeesThroughToWrappedFields,
+// proving the hook does not over-report on a document with no stray keys.
+func Test_CheckKnownKeys_OptionalCleanDocumentNotFlagged(t *testing.T) {
+	input := "sub:\n  a: x\n  b: y\n"
+	require.NoError(t, xcfg.CheckKnownKeys[optionalWrapped]([]byte(input)))
+}

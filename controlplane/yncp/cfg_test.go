@@ -11,14 +11,92 @@ import (
 )
 
 // Test_ShippedDefaultConfig_NoUnknownKeys guards the shipped default config
-// against a key that matches no field in yncp.Config.
-//
-// Config.UnmarshalYAML re-decodes through a fresh, non-strict yaml.v3
-// decoder, so xcfg.WithKnownFields cannot see a stray key here.
-// xcfg.CheckKnownKeys walks the reflected struct shape directly instead,
-// which is unaffected by that re-decode.
+// against a key that matches no field in yncp.Config, including one nested
+// inside a module or device block whose own UnmarshalYAML re-decodes
+// through a fresh yaml.v3 decoder.
 func Test_ShippedDefaultConfig_NoUnknownKeys(t *testing.T) {
 	data, err := os.ReadFile("../etc/yanet/controlplane.d/default.yaml")
 	require.NoError(t, err)
 	require.NoError(t, xcfg.CheckKnownKeys[yncp.Config](data))
+}
+
+// Test_ShippedDefaultConfig_LoadsIntendedEnabledSet asserts that the shipped
+// default config starts all ten bundled modules plus the plain and vlan
+// devices, leaves trafgen disabled, and sets an explicit gateway instance.
+func Test_ShippedDefaultConfig_LoadsIntendedEnabledSet(t *testing.T) {
+	cfg, err := xcfg.LoadConfig[yncp.Config]("../etc/yanet/controlplane.d/default.yaml")
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.Modules.Route.Unwrap())
+	require.NotNil(t, cfg.Modules.RouteMPLS.Unwrap())
+	require.NotNil(t, cfg.Modules.Decap.Unwrap())
+	require.NotNil(t, cfg.Modules.DSCP.Unwrap())
+	require.NotNil(t, cfg.Modules.Forward.Unwrap())
+	require.NotNil(t, cfg.Modules.Mirror.Unwrap())
+	require.NotNil(t, cfg.Modules.NAT64.Unwrap())
+	require.NotNil(t, cfg.Modules.Pdump.Unwrap())
+	require.NotNil(t, cfg.Modules.ACL.Unwrap())
+	require.NotNil(t, cfg.Modules.Blackhole.Unwrap())
+
+	require.NotNil(t, cfg.Devices.Plain.Unwrap())
+	require.NotNil(t, cfg.Devices.Vlan.Unwrap())
+	require.Nil(t, cfg.Devices.Trafgen.Unwrap())
+
+	require.NoError(t, cfg.Gateway.InstanceID.Validate())
+	require.Equal(t, uint32(0), cfg.Gateway.InstanceID.Unwrap())
+}
+
+// Test_ModuleWithoutInstanceID_FailsValidation asserts that a listed module
+// omitting instance_id fails with a dotted path naming that module.
+func Test_ModuleWithoutInstanceID_FailsValidation(t *testing.T) {
+	input := "gateway:\n  instance_id: 0\n" +
+		"modules:\n  route: {}\n"
+	cfg := yncp.DefaultConfig()
+	err := xcfg.Decode([]byte(input), cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "modules.route.instance_id")
+}
+
+// Test_GatewayWithoutInstanceID_FailsValidation asserts that a gateway block
+// omitting instance_id fails with a dotted path naming the gateway.
+func Test_GatewayWithoutInstanceID_FailsValidation(t *testing.T) {
+	var cfg yncp.Config
+	err := xcfg.Decode([]byte("gateway: {}\n"), &cfg)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "gateway.instance_id")
+}
+
+// Test_ExplicitNullGateway_FailsValidation asserts that a document clearing
+// the defaulted gateway block, either as a bare "gateway:" key or as an
+// explicit "gateway: null", fails to load with an error naming the gateway
+// instead of panicking on a nil dereference downstream.
+func Test_ExplicitNullGateway_FailsValidation(t *testing.T) {
+	for name, input := range map[string]string{
+		"bare key":   "gateway:\n",
+		"null value": "gateway: null\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := yncp.DefaultConfig()
+			err := xcfg.Decode([]byte(input), cfg)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "gateway")
+		})
+	}
+}
+
+// Test_ModuleBlock_StrayNestedKey_RejectedByKnownFields asserts that a key
+// nested inside a module's own block, not just at the document's top level,
+// is rejected when loading through the director's WithKnownFields path.
+func Test_ModuleBlock_StrayNestedKey_RejectedByKnownFields(t *testing.T) {
+	input := "modules:\n  decap:\n" +
+		"    instance_id: 0\n" +
+		"    memory_path: /dev/hugepages/yanet\n" +
+		"    memory_requirements: 16MB\n" +
+		"    endpoint: \"[::1]:0\"\n" +
+		"    gateway_endpoint: \"[::1]:8080\"\n" +
+		"    bogus: z\n"
+	var cfg yncp.Config
+	err := xcfg.Decode([]byte(input), &cfg, xcfg.WithKnownFields())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "modules.decap.bogus")
 }

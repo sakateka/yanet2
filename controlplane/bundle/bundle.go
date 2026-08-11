@@ -28,8 +28,12 @@ import (
 type serviceConstructor func() (gateway.Service, error)
 
 type serviceFactory struct {
-	name string
-	new  serviceConstructor
+	Name string
+	// Configured reports whether the corresponding config block was
+	// present in the loaded document. A factory with Configured == false
+	// is skipped: no service is constructed and no agent is attached.
+	Configured bool
+	New        serviceConstructor
 }
 
 // Bundle is the standard YANET distribution bundle of built-in modules and
@@ -87,81 +91,94 @@ func buildServices(
 ) ([]gateway.Service, error) {
 	factories := []serviceFactory{
 		{
-			name: "route module",
-			new: func() (gateway.Service, error) {
-				return route.NewRouteModule(modulesCfg.Route, route.WithLog(log))
+			Name:       "route module",
+			Configured: modulesCfg.Route.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return route.NewRouteModule(modulesCfg.Route.Unwrap(), route.WithLog(log))
 			},
 		},
 		{
-			name: "route mpls module",
-			new: func() (gateway.Service, error) {
-				return route_mpls.NewRouteMPLSModule(modulesCfg.RouteMPLS, route_mpls.WithLog(log))
+			Name:       "route mpls module",
+			Configured: modulesCfg.RouteMPLS.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return route_mpls.NewRouteMPLSModule(modulesCfg.RouteMPLS.Unwrap(), route_mpls.WithLog(log))
 			},
 		},
 		{
-			name: "decap module",
-			new: func() (gateway.Service, error) {
-				return decap.NewDecapModule(modulesCfg.Decap, decap.WithLog(log))
+			Name:       "decap module",
+			Configured: modulesCfg.Decap.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return decap.NewDecapModule(modulesCfg.Decap.Unwrap(), decap.WithLog(log))
 			},
 		},
 		{
-			name: "dscp module",
-			new: func() (gateway.Service, error) {
-				return dscp.NewDSCPModule(modulesCfg.DSCP, dscp.WithLog(log))
+			Name:       "dscp module",
+			Configured: modulesCfg.DSCP.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return dscp.NewDSCPModule(modulesCfg.DSCP.Unwrap(), dscp.WithLog(log))
 			},
 		},
 		{
-			name: "forward module",
-			new: func() (gateway.Service, error) {
-				return forward.NewForwardModule(modulesCfg.Forward, forward.WithLog(log))
+			Name:       "forward module",
+			Configured: modulesCfg.Forward.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return forward.NewForwardModule(modulesCfg.Forward.Unwrap(), forward.WithLog(log))
 			},
 		},
 		{
-			name: "mirror module",
-			new: func() (gateway.Service, error) {
-				return mirror.NewMirrorModule(modulesCfg.Mirror, mirror.WithLog(log))
+			Name:       "mirror module",
+			Configured: modulesCfg.Mirror.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return mirror.NewMirrorModule(modulesCfg.Mirror.Unwrap(), mirror.WithLog(log))
 			},
 		},
 		{
-			name: "nat64 module",
-			new: func() (gateway.Service, error) {
-				return nat64.NewNAT64Module(modulesCfg.NAT64, nat64.WithLog(log))
+			Name:       "nat64 module",
+			Configured: modulesCfg.NAT64.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return nat64.NewNAT64Module(modulesCfg.NAT64.Unwrap(), nat64.WithLog(log))
 			},
 		},
 		{
-			name: "pdump module",
-			new: func() (gateway.Service, error) {
-				return pdump.NewPdumpModule(modulesCfg.Pdump, pdump.WithLog(log))
+			Name:       "pdump module",
+			Configured: modulesCfg.Pdump.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return pdump.NewPdumpModule(modulesCfg.Pdump.Unwrap(), pdump.WithLog(log))
 			},
 		},
 		{
-			name: "acl module",
-			new: func() (gateway.Service, error) {
-				return acl.NewACLModule(modulesCfg.ACL, acl.WithModuleLog(log))
+			Name:       "acl module",
+			Configured: modulesCfg.ACL.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return acl.NewACLModule(modulesCfg.ACL.Unwrap(), acl.WithModuleLog(log))
 			},
 		},
 		{
-			name: "blackhole module",
-			new: func() (gateway.Service, error) {
-				return blackhole.NewBlackholeModule(modulesCfg.Blackhole, blackhole.WithLog(log))
+			Name:       "blackhole module",
+			Configured: modulesCfg.Blackhole.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return blackhole.NewBlackholeModule(modulesCfg.Blackhole.Unwrap(), blackhole.WithLog(log))
 			},
 		},
 		{
-			name: "plain device",
-			new: func() (gateway.Service, error) {
-				return plain.NewDevicePlainDevice(devicesCfg.Plain, plain.WithLog(log))
+			Name:       "plain device",
+			Configured: devicesCfg.Plain.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return plain.NewDevicePlainDevice(devicesCfg.Plain.Unwrap(), plain.WithLog(log))
 			},
 		},
 		{
-			name: "vlan device",
-			new: func() (gateway.Service, error) {
-				return vlan.NewDeviceVlanDevice(devicesCfg.Vlan, vlan.WithLog(log))
+			Name:       "vlan device",
+			Configured: devicesCfg.Vlan.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return vlan.NewDeviceVlanDevice(devicesCfg.Vlan.Unwrap(), vlan.WithLog(log))
 			},
 		},
 		{
-			name: "trafgen device",
-			new: func() (gateway.Service, error) {
-				return trafgen.NewTrafgenDevice(devicesCfg.Trafgen, trafgen.WithLog(log))
+			Name:       "trafgen device",
+			Configured: devicesCfg.Trafgen.Unwrap() != nil,
+			New: func() (gateway.Service, error) {
+				return trafgen.NewTrafgenDevice(devicesCfg.Trafgen.Unwrap(), trafgen.WithLog(log))
 			},
 		},
 	}
@@ -169,9 +186,14 @@ func buildServices(
 	services := make([]gateway.Service, 0, len(factories))
 
 	for _, factory := range factories {
-		service, err := factory.new()
+		if !factory.Configured {
+			log.Info("skipping service with no config", zap.String("service", factory.Name))
+			continue
+		}
+
+		service, err := factory.New()
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize %s: %w", factory.name, err)
+			return nil, fmt.Errorf("failed to initialize %s: %w", factory.Name, err)
 		}
 
 		services = append(services, service)

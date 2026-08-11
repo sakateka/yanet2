@@ -20,6 +20,14 @@ type validatable interface {
 	Validate() error
 }
 
+// validatableElem is implemented by a wrapper whose validation lives on the
+// value it wraps rather than on the wrapper itself, such as Optional[T],
+// letting validate recurse into that value under the wrapper's own dotted
+// path instead of stopping at the wrapper's unexported field.
+type validatableElem interface {
+	Elem() reflect.Value
+}
+
 // Option configures LoadConfig and Decode.
 type Option func(*options)
 
@@ -36,14 +44,11 @@ func newOptions() *options {
 // WithKnownFields rejects YAML documents that contain keys not present in
 // the destination type.
 //
-// Without this option an unknown key is silently dropped, which lets typos
-// and renamed fields go unnoticed and leaves the corresponding field at its
-// default value. With this option such a key becomes a decode error, so a
-// stale or misspelled key in a deployed config fails loudly at startup
-// instead of silently keeping a default that may be wrong for the
-// environment. Strictness does not propagate into a field whose type
-// implements a custom UnmarshalYAML that decodes via node.Decode, because
-// yaml.v3 creates a fresh, non-strict decoder for that call.
+// Without this option an unknown key is silently dropped, letting typos and
+// renamed fields go unnoticed while the corresponding field silently keeps
+// its default. With this option such a key becomes a decode error, including
+// for a key nested under a field whose type implements a custom
+// UnmarshalYAML — see CheckKnownKeys for the mechanism.
 func WithKnownFields() Option {
 	return func(o *options) {
 		o.KnownFields = true
@@ -88,6 +93,10 @@ func Decode(buf []byte, dst any, options ...Option) error {
 		if err := dec.Decode(dst); err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
+
+		if err := checkKnownKeys(buf, reflect.TypeOf(dst)); err != nil {
+			return err
+		}
 	} else {
 		if err := yaml.Unmarshal(buf, dst); err != nil {
 			return err
@@ -106,7 +115,6 @@ func validate(v reflect.Value, path string) error {
 		v = v.Elem()
 	}
 
-	// Check if the value itself implements validatable.
 	if v.CanAddr() {
 		if val, ok := v.Addr().Interface().(validatable); ok {
 			if err := val.Validate(); err != nil {
@@ -115,6 +123,19 @@ func validate(v reflect.Value, path string) error {
 				}
 				return &PathError{Path: path, Err: err}
 			}
+		}
+
+		// A wrapper whose wrapped value carries the validation recurses
+		// into that value under the same path, rather than being treated
+		// as a plain field with no Validate of its own. Checked after
+		// validatable so a wrapper implementing both still runs its own
+		// Validate.
+		if elemer, ok := v.Addr().Interface().(validatableElem); ok {
+			ev := elemer.Elem()
+			if !ev.IsValid() {
+				return nil
+			}
+			return validate(ev, path)
 		}
 	}
 
