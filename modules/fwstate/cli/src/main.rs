@@ -1,7 +1,10 @@
-use core::{fmt, net::Ipv6Addr};
+use core::{
+    fmt,
+    net::{IpAddr, Ipv6Addr},
+};
 use std::collections::HashMap;
 
-use args::{DeleteCmd, DirectionArg, EntriesCmd, LinkCmd, MetricsCmd, ModeCmd, ShowCmd, StatsCmd, UpdateCmd};
+use args::{DeleteCmd, DirectionArg, EntriesCmd, Family, LinkCmd, MetricsCmd, ModeCmd, ShowCmd, StatsCmd, UpdateCmd};
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use clap_complete::{CompleteEnv, engine::CompletionCandidate};
 use commonpb::pb::{GetMetricsRequest, IpAddress, MacAddress, Metric as ProtoMetric};
@@ -64,6 +67,44 @@ fn parse_ipv6(s: &str) -> Result<IpAddress, String> {
 pub struct FWStateService {
     service: Service<FwStateServiceClient<LayeredChannel>>,
     metrics: Service<MetricsServiceClient<LayeredChannel>>,
+}
+
+/// State an `entries` dump carries across its batches and both maps.
+struct DumpState {
+    /// Entries printed so far, which `--count` limits.
+    printed: u32,
+    /// Whether the human-readable header row is already out. Deferred until
+    /// the first entry arrives, so a zero-entry result prints no header.
+    header_printed: bool,
+    /// Config generation the last response reported.
+    generation: Option<u64>,
+}
+
+impl DumpState {
+    fn new() -> Self {
+        Self {
+            printed: 0,
+            header_printed: false,
+            generation: None,
+        }
+    }
+
+    /// Warns when a response reports a different generation than the one
+    /// before it.
+    ///
+    /// A bump means layers were relinked, so the cursor and `--layer` stop
+    /// denoting what they did when the dump began, and the remaining
+    /// entries can repeat or be missed. Rows already printed were accurate
+    /// when read, so the dump goes on and only warns.
+    fn note_generation(&mut self, generation: u64) {
+        match self.generation.replace(generation) {
+            Some(previous) if previous != generation => log::warn!(
+                "fwstate config changed mid-dump (generation {previous} -> {generation}): \
+                 entries may repeat or be missed"
+            ),
+            _ => {}
+        }
+    }
 }
 
 impl FWStateService {
@@ -310,12 +351,42 @@ impl FWStateService {
             DirectionArg::Backward => Direction::Backward,
         };
 
+        let limit = cmd.count;
+        let mut state = DumpState::new();
+
+        for family in cmd.families() {
+            if limit > 0 && state.printed >= limit {
+                break;
+            }
+            self.list_entries_map(&cmd, family, direction, format, &mut state)
+                .await?;
+        }
+
+        if state.printed == 0 {
+            output::empty(format_args!(
+                "No firewall state entries found for '{}'.",
+                cmd.config_name
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn list_entries_map(
+        &mut self,
+        cmd: &EntriesCmd,
+        family: Family,
+        direction: Direction,
+        format: CommonFormat,
+        state: &mut DumpState,
+    ) -> Result<(), Error> {
+        let limit = cmd.count;
         let (tx, rx) = mpsc::channel(1);
         let stream = ReceiverStream::new(rx);
 
         let initial_req = ListEntriesRequest {
             config_name: cmd.config_name.clone(),
-            is_ipv6: cmd.ipv6,
+            is_ipv6: family.is_ipv6(),
             layer_index: cmd.layer,
             include_expired: cmd.include_expired,
             direction: direction as i32,
@@ -334,30 +405,26 @@ impl FWStateService {
             .map_err(self.service.status("list entries"))?
             .into_inner();
 
-        let limit = cmd.count;
-        let mut total: u32 = 0;
-        // Deferred until the first entry actually arrives, so a zero-entry
-        // result does not print a header row over an empty table.
-        let mut header_printed = false;
-
         while let Some(resp) = response_stream
             .message()
             .await
             .map_err(self.service.status("list entries"))?
         {
+            state.note_generation(resp.generation);
+
             for entry in &resp.entries {
-                if limit > 0 && total >= limit {
+                if limit > 0 && state.printed >= limit {
                     break;
                 }
 
                 match format {
                     CommonFormat::Human => {
-                        if !header_printed {
+                        if !state.header_printed {
                             println!(
-                                "{:<6} {:<45} {:<45} {:<8} {:<9} {:<7}",
+                                "{:<6} {:<48} {:<48} {:<8} {:<9} {:<7}",
                                 "IDX", "SRC", "DST", "PROTO", "FLAGS S|D", "EXPRD"
                             );
-                            header_printed = true;
+                            state.header_printed = true;
                         }
 
                         print_entry(entry);
@@ -370,16 +437,16 @@ impl FWStateService {
                     }
                 }
 
-                total += 1;
+                state.printed += 1;
             }
 
-            if (limit > 0 && total >= limit) || !resp.has_more {
+            if (limit > 0 && state.printed >= limit) || !resp.has_more {
                 break;
             }
 
             let next_req = ListEntriesRequest {
                 config_name: cmd.config_name.clone(),
-                is_ipv6: cmd.ipv6,
+                is_ipv6: family.is_ipv6(),
                 layer_index: cmd.layer,
                 include_expired: cmd.include_expired,
                 direction: direction as i32,
@@ -389,13 +456,6 @@ impl FWStateService {
             tx.send(next_req)
                 .await
                 .map_err(|err| self.service.status("list entries")(Status::internal(format!("send error: {err}"))))?;
-        }
-
-        if total == 0 {
-            output::empty(format_args!(
-                "No firewall state entries found for '{}'.",
-                cmd.config_name
-            ));
         }
 
         Ok(())
@@ -458,8 +518,25 @@ impl FWStateService {
     }
 }
 
-fn format_addr(addr: Option<&IpAddress>) -> String {
-    addr.map(|a| a.to_string()).unwrap_or_else(|| "?".to_string())
+/// Formats an address and port as an endpoint, bracketing IPv6.
+///
+/// Without brackets the port merges into the trailing hextet: `2001:db8::2`
+/// on port 80 would read as `2001:db8::2:80`. An IPv4-mapped IPv6 address is
+/// unmapped first, and a malformed one reads as `invalid`, both as
+/// `IpAddress` renders them on its own. An absent address reads as `?`.
+fn format_endpoint(addr: Option<&IpAddress>, port: u32) -> String {
+    let Some(addr) = addr else {
+        return format!("?:{port}");
+    };
+
+    match IpAddr::try_from(addr) {
+        Ok(IpAddr::V4(v4)) => format!("{v4}:{port}"),
+        Ok(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => format!("{v4}:{port}"),
+            None => format!("[{v6}]:{port}"),
+        },
+        Err(..) => format!("invalid:{port}"),
+    }
 }
 
 /// Format IANA protocol number as a human-readable name.
@@ -527,24 +604,19 @@ impl fmt::Display for FwStateFlags {
 }
 
 fn print_entry(entry: &fwstatepb::FwStateEntry) {
-    let (src_addr, dst_addr, src_port, dst_port, proto) = match &entry.key {
-        Some(k) => (
-            format_addr(k.src_addr.as_ref()),
-            format_addr(k.dst_addr.as_ref()),
-            k.src_port,
-            k.dst_port,
-            k.proto,
+    let (src, dst, proto) = match &entry.key {
+        Some(key) => (
+            format_endpoint(key.src_addr.as_ref(), key.src_port),
+            format_endpoint(key.dst_addr.as_ref(), key.dst_port),
+            key.proto,
         ),
-        None => ("?".into(), "?".into(), 0, 0, 0),
+        None => (format_endpoint(None, 0), format_endpoint(None, 0), 0),
     };
 
     let flags = entry.value.as_ref().map(|v| v.flags).unwrap_or(0);
 
-    let src = format!("{}:{}", src_addr, src_port);
-    let dst = format!("{}:{}", dst_addr, dst_port);
-
     println!(
-        "{:<6} {:<45} {:<45} {:<8} {:<9} {:<7}",
+        "{:<6} {:<48} {:<48} {:<8} {:<9} {:<7}",
         entry.idx,
         src,
         dst,
@@ -774,11 +846,35 @@ fn config_candidates() -> Vec<CompletionCandidate> {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
 
     #[test]
     fn cmd_is_valid() {
         Cmd::command().debug_assert();
+    }
+
+    #[test]
+    fn format_endpoint_brackets_ipv6_only() {
+        let v4: IpAddress = "192.0.2.10".parse().unwrap();
+        let v6: IpAddress = "2001:db8::2".parse().unwrap();
+
+        assert_eq!("192.0.2.10:10000", format_endpoint(Some(&v4), 10000));
+        assert_eq!("[2001:db8::2]:80", format_endpoint(Some(&v6), 80));
+    }
+
+    #[test]
+    fn format_endpoint_leaves_ipv4_mapped_bare() {
+        let mapped: IpAddress = "::ffff:192.0.2.10".parse().unwrap();
+
+        assert_eq!("192.0.2.10:80", format_endpoint(Some(&mapped), 80));
+    }
+
+    #[test]
+    fn format_endpoint_renders_absent_and_malformed() {
+        let malformed = IpAddress { addr: vec![0u8; 5] };
+
+        assert_eq!("?:0", format_endpoint(None, 0));
+        assert_eq!("invalid:80", format_endpoint(Some(&malformed), 80));
     }
 }
