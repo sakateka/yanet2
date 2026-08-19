@@ -9,6 +9,8 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - uses: ./.github/actions/apt-failover
+
     - name: refresh apt index
       shell: bash
       run: sudo apt-get update
