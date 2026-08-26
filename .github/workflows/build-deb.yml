@@ -30,6 +30,7 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/actions/**"
+      - ".github/scripts/**"
       - ".github/workflows/build-deb.yml"
       # A later match wins, so these negations drop the documentation and
       # web sources that would otherwise ride in on the source trees above.
@@ -64,6 +65,7 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/actions/**"
+      - ".github/scripts/**"
       - ".github/workflows/build-deb.yml"
       - "!**.md"
       - "!modules/**/web/**"
@@ -92,18 +94,35 @@ jobs:
       - id: set
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ github.event.inputs.include_2204 }}" == "true" ]]; then
-            echo 'matrix={"unbtver":["24.04","22.04"]}' >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"unbtver":"24.04","arch":"amd64","runner":"ubuntu-24.04","artifact":"debs-24.04-amd64"},{"unbtver":"24.04","arch":"arm64","runner":"ubuntu-24.04-arm","artifact":"debs-24.04-arm64"},{"unbtver":"22.04","arch":"amd64","runner":"ubuntu-22.04","artifact":"debs-22.04-amd64"}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'matrix={"unbtver":["24.04"]}' >> $GITHUB_OUTPUT
+            echo 'matrix={"include":[{"unbtver":"24.04","arch":"amd64","runner":"ubuntu-24.04","artifact":"debs-24.04-amd64"},{"unbtver":"24.04","arch":"arm64","runner":"ubuntu-24.04-arm","artifact":"debs-24.04-arm64"}]}' >> "$GITHUB_OUTPUT"
           fi
 
+  test-deb-artifacts:
+    name: Test Debian artifact scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run Debian artifact tests
+        run: |
+          set -euo pipefail
+          bash -n scripts/verify-deb-artifacts.sh \
+            .github/scripts/release-deb-artifacts.sh \
+            .github/scripts/verify-deb-artifacts_test.sh \
+            .github/scripts/release-deb-artifacts_test.sh
+          .github/scripts/verify-deb-artifacts_test.sh
+          .github/scripts/release-deb-artifacts_test.sh
+
   build-deb:
-    needs: set-matrix
+    name: Build DEB (${{ matrix.unbtver }}, ${{ matrix.arch }})
+    needs: [set-matrix, test-deb-artifacts]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.set-matrix.outputs.matrix) }}
 
-    runs-on: ubuntu-${{ matrix.unbtver }}
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -120,7 +139,7 @@ jobs:
       - uses: hendrikmuhs/ccache-action@v1.2.23
         name: ccache
         with:
-          key: ${{ runner.os }}-deb-ccache-${{ matrix.unbtver }}
+          key: ${{ runner.os }}-deb-ccache-${{ matrix.unbtver }}-${{ matrix.arch }}
           max-size: 2G
           verbose: 2
           save: ${{ github.ref == 'refs/heads/main' }}
@@ -139,7 +158,7 @@ jobs:
       - name: Cache rust
         uses: Swatinem/rust-cache@v2.9.2
         with:
-          shared-key: deb-${{ matrix.unbtver }}
+          shared-key: deb-${{ matrix.unbtver }}-${{ matrix.arch }}
           cache-targets: false
 
       - name: Install packaging tools
@@ -162,12 +181,26 @@ jobs:
           sudo -E env "PATH=$PATH" ./scripts/build-deb.sh
           sudo chown -R $(id -u) ~/.cargo  # fix caching for Rust
 
+      - name: Verify package artifacts
+        run: sudo ./scripts/verify-deb-artifacts.sh outdeb '${{ matrix.arch }}'
+
+      - name: Verify runner architecture
+        run: |
+          set -euo pipefail
+          actual_host_arch=$(dpkg --print-architecture)
+          expected_host_arch='${{ matrix.arch }}'
+          if [[ "$actual_host_arch" != "$expected_host_arch" ]]; then
+            echo "Runner architecture mismatch: $actual_host_arch (expected $expected_host_arch)" >&2
+            exit 1
+          fi
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: debs-${{ matrix.unbtver }}
+          name: ${{ matrix.artifact }}
           path: |
             outdeb/*.changes
+            outdeb/*.buildinfo
             outdeb/*.deb
             outdeb/*.ddeb
 
@@ -184,14 +217,23 @@ jobs:
         with:
           path: artifacts
 
-      - name: Verify downloaded packages
-        run: ./scripts/verify-deb-artifacts.sh artifacts
-
-      - name: Flatten artifacts
+      - name: Install Debian verification tools
+        timeout-minutes: 10
         run: |
-          mkdir -p outdeb
-          find artifacts -type f \( -name "*.changes" -o -name "*.deb" -o -name "*.ddeb" \) -exec cp {} outdeb/ \;
-          ./scripts/verify-deb-artifacts.sh outdeb
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends devscripts
+
+      # Normal tag pushes validate and publish the two 24.04 architectures. A
+      # manual dispatch on a tag with include_2204=true additionally validates
+      # the optional Ubuntu 22.04 amd64 set, but does not publish it.
+      - name: Verify and flatten Debian artifacts
+        run: |
+          set -euo pipefail
+          helper_args=(artifacts outdeb)
+          if [[ "${{ github.event_name }}" == 'workflow_dispatch' && "${{ github.event.inputs.include_2204 }}" == 'true' ]]; then
+            helper_args+=(--include-2204)
+          fi
+          .github/scripts/release-deb-artifacts.sh "${helper_args[@]}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
