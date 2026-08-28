@@ -104,7 +104,7 @@ struct fw_state_value {
 	uint64_t last_ttl : 48;
 	// Timestamp when the state was created
 	uint64_t created_at;
-	// Timestamp when the last sync packet was emitted
+	// Timestamp when the state was last refreshed.
 	uint64_t updated_at;
 	// Number of backward packets matching this state
 	uint64_t packets_backward;

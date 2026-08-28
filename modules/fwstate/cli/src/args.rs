@@ -2,6 +2,7 @@ use core::{net::Ipv6Addr, time::Duration};
 
 use clap::Parser;
 use clap_complete::engine::ArgValueCandidates;
+use netip::MacAddr;
 
 /// Parse duration from string (e.g., "60s", "5m", "1h")
 fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -64,6 +65,10 @@ pub struct UpdateCmd {
     #[arg(long)]
     pub src_addr: Option<Ipv6Addr>,
 
+    /// Destination MAC address (e.g., "00:11:22:33:44:55").
+    #[arg(long)]
+    pub dst_ether: Option<MacAddr>,
+
     /// Multicast IPv6 address (e.g., "ff02::1")
     #[arg(long)]
     pub dst_addr_multicast: Option<Ipv6Addr>,
@@ -71,6 +76,18 @@ pub struct UpdateCmd {
     /// Multicast port
     #[arg(long)]
     pub port_multicast: Option<u16>,
+
+    /// Unicast IPv6 address (e.g., "2001:db8::2").
+    #[arg(long)]
+    pub dst_addr_unicast: Option<Ipv6Addr>,
+
+    /// Unicast port.
+    #[arg(long)]
+    pub port_unicast: Option<u16>,
+
+    /// Remove unicast while keeping a configured multicast endpoint.
+    #[arg(long, conflicts_with_all = ["dst_addr_unicast", "port_unicast"])]
+    pub clear_unicast: bool,
 
     /// TCP SYN-ACK timeout (e.g., "60s", "5m", "1h")
     #[arg(long, value_parser = parse_duration)]

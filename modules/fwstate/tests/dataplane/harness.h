@@ -65,6 +65,9 @@ test_fwstate_handle_packets(
 	struct packet_front *packet_front
 );
 
+void
+fwstate_test_mark_internal(struct packet_front *packet_front);
+
 // Helper to get actual pointer from an offset pointer.
 void *
 addr_of(void **field);

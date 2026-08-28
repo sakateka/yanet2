@@ -7,10 +7,12 @@ package fwstate
 //#cgo LDFLAGS: -L../../../../build/lib/controlplane/config -lconfig_cp
 //#cgo LDFLAGS: -L../../../../build/lib/dataplane/config -lconfig_dp
 //#cgo LDFLAGS: -L../../../../build/lib/counters -lcounters
+//#cgo LDFLAGS: -L../../../../build/lib/dataplane/worker -lworker_dp
 //#cgo LDFLAGS: -L../../../../build/lib/dataplane/packet -lpacket
 //#cgo LDFLAGS: -L../../../../build/lib/fwstate -lfwstate
 //#cgo LDFLAGS: -L../../../../build/lib/logging -llogging
 //#cgo LDFLAGS: -L../../../../build/lib/errors -lerrors
+//#cgo LDFLAGS: -lnuma
 /*
 #include <harness.h>
 */
@@ -82,6 +84,9 @@ func fwstateModuleConfig(memCtx testutils.MemoryContext) (*C.struct_cp_module, *
 	// Configure sync settings and link both map objects by name.
 	// Multicast IPv6 address: ff02::1
 	var syncCfg C.struct_fwstate_sync_config
+	syncCfg.dst_ether.addr[0] = 0x33
+	syncCfg.dst_ether.addr[1] = 0x33
+	syncCfg.dst_ether.addr[5] = 0x01
 	multicastAddr := [16]C.uint8_t{0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
 	for i := range 16 {
 		syncCfg.dst_addr_multicast[i] = multicastAddr[i]
@@ -132,6 +137,11 @@ func SetSyncSuppressTimeout(cpModule *C.struct_cp_module, ns uint64) {
 	m.sync_config.sync_suppress_timeout = C.uint64_t(ns)
 }
 
+func disableSyncMulticast(cpModule *C.struct_cp_module) {
+	m := (*C.struct_fwstate_module_config)(unsafe.Pointer(cpModule))
+	m.sync_config.port_multicast = 0
+}
+
 // SetSyncTCPTimeouts overrides the TCP established (tcp) and teardown
 // (tcp_fin) timeouts so a test can distinguish an established refresh from a
 // shorter-TTL state transition.
@@ -142,6 +152,14 @@ func SetSyncTCPTimeouts(cpModule *C.struct_cp_module, tcp, tcpFin uint64) {
 }
 
 func fwstateHandlePackets(cpModule *C.struct_cp_module, storage *C.struct_counter_storage, packets ...gopacket.Packet) (*dataplane.PacketFrontPayload, error) {
+	return fwstateHandlePacketsWithOrigin(cpModule, storage, true, packets...)
+}
+
+func fwstateHandleWirePackets(cpModule *C.struct_cp_module, storage *C.struct_counter_storage, packets ...gopacket.Packet) (*dataplane.PacketFrontPayload, error) {
+	return fwstateHandlePacketsWithOrigin(cpModule, storage, false, packets...)
+}
+
+func fwstateHandlePacketsWithOrigin(cpModule *C.struct_cp_module, storage *C.struct_counter_storage, internal bool, packets ...gopacket.Packet) (*dataplane.PacketFrontPayload, error) {
 	pinner := runtime.Pinner{}
 	defer pinner.Unpin()
 
@@ -150,12 +168,17 @@ func fwstateHandlePackets(cpModule *C.struct_cp_module, storage *C.struct_counte
 		return nil, fmt.Errorf("failed to create packet front: %w", err)
 	}
 
+	cPacketFront := (*C.struct_packet_front)(unsafe.Pointer(pf))
+	if internal {
+		C.fwstate_test_mark_internal(cPacketFront)
+	}
+
 	// Create a dummy dp_worker
 	dpWorker := &C.struct_dp_worker{
 		idx:          0,
 		current_time: C.clock_get_time_ns(nil),
 	}
-	C.test_fwstate_handle_packets(dpWorker, cpModule, storage, (*C.struct_packet_front)(unsafe.Pointer(pf)))
+	C.test_fwstate_handle_packets(dpWorker, cpModule, storage, cPacketFront)
 	result := pf.Payload()
 	return &result, nil
 }

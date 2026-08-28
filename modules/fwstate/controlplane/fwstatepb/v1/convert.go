@@ -13,8 +13,12 @@ func (m *SyncConfig) ToC() cfwstate.SyncConfig {
 	var cfg cfwstate.SyncConfig
 	src := m.GetSrcAddr().GetAddr()
 	copy(cfg.SrcAddr[:], src)
+	dstEther := m.GetDstEther().EUI48()
+	copy(cfg.DstEther[:], dstEther[:])
 	copy(cfg.DstAddrMulticast[:], m.GetDstAddrMulticast().GetAddr())
 	cfg.PortMulticast = uint16(m.GetPortMulticast())
+	copy(cfg.DstAddrUnicast[:], m.GetDstAddrUnicast().GetAddr())
+	cfg.PortUnicast = uint16(m.GetPortUnicast())
 	cfg.TcpSynAck = m.GetTcpSynAck()
 	cfg.TcpSyn = m.GetTcpSyn()
 	cfg.TcpFin = m.GetTcpFin()
@@ -35,11 +39,17 @@ func (m *SyncConfig) ToCWithDefaults(current cfwstate.SyncConfig) cfwstate.SyncC
 	if len(m.GetSrcAddr().GetAddr()) == 0 {
 		cfg.SrcAddr = current.SrcAddr
 	}
-	if len(m.GetDstAddrMulticast().GetAddr()) == 0 {
-		cfg.DstAddrMulticast = current.DstAddrMulticast
+	if m.GetDstEther() == nil {
+		cfg.DstEther = current.DstEther
 	}
-	if pbPortMulticast == 0 {
+	destinationsProvided := len(m.GetDstAddrMulticast().GetAddr()) != 0 ||
+		pbPortMulticast != 0 || len(m.GetDstAddrUnicast().GetAddr()) != 0 ||
+		m.GetPortUnicast() != 0
+	if !destinationsProvided {
+		cfg.DstAddrMulticast = current.DstAddrMulticast
 		cfg.PortMulticast = current.PortMulticast
+		cfg.DstAddrUnicast = current.DstAddrUnicast
+		cfg.PortUnicast = current.PortUnicast
 	}
 	if cfg.TcpSynAck == 0 {
 		cfg.TcpSynAck = current.TcpSynAck
@@ -67,10 +77,11 @@ func (m *SyncConfig) ToCWithDefaults(current cfwstate.SyncConfig) cfwstate.SyncC
 }
 
 func FromCSyncConfig(cfg cfwstate.SyncConfig) *SyncConfig {
-	return &SyncConfig{
+	pb := &SyncConfig{
 		SrcAddr:             &commonpb.IPAddress{Addr: append([]byte(nil), cfg.SrcAddr[:]...)},
-		DstAddrMulticast:    &commonpb.IPAddress{Addr: append([]byte(nil), cfg.DstAddrMulticast[:]...)},
+		DstEther:            commonpb.NewMACAddressEUI48(cfg.DstEther),
 		PortMulticast:       uint32(cfg.PortMulticast),
+		PortUnicast:         uint32(cfg.PortUnicast),
 		TcpSynAck:           cfg.TcpSynAck,
 		TcpSyn:              cfg.TcpSyn,
 		TcpFin:              cfg.TcpFin,
@@ -79,4 +90,11 @@ func FromCSyncConfig(cfg cfwstate.SyncConfig) *SyncConfig {
 		Default:             cfg.Default,
 		SyncSuppressTimeout: cfg.SyncSuppressTimeout,
 	}
+	if cfg.PortMulticast != 0 {
+		pb.DstAddrMulticast = &commonpb.IPAddress{Addr: append([]byte(nil), cfg.DstAddrMulticast[:]...)}
+	}
+	if cfg.PortUnicast != 0 {
+		pb.DstAddrUnicast = &commonpb.IPAddress{Addr: append([]byte(nil), cfg.DstAddrUnicast[:]...)}
+	}
+	return pb
 }

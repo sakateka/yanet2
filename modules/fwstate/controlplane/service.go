@@ -94,8 +94,7 @@ const (
 	// moduleType is the registered shared-memory type for fwstate configs.
 	moduleType = "fwstate"
 
-	// maxSyncPort is the highest value accepted for port_multicast,
-	// matching the width of the C-side uint16 port field.
+	// maxSyncPort is the highest value accepted for sync destination ports.
 	maxSyncPort uint32 = 65535
 )
 
@@ -464,12 +463,14 @@ func (m *FWStateService) unpublishConfig(name string) {
 // validateSyncPorts rejects sync config ports that do not fit into the
 // C-side uint16 port field.
 //
-// A zero port means "unset / keep current" and is allowed here. The
-// required-destination check in validateSyncConfig rejects a request
-// that leaves the multicast destination unset.
+// A zero port is allowed at this boundary because it can represent an omitted
+// destination; validation of the merged config enforces complete pairs.
 func validateSyncPorts(cfg *fwstatepb.SyncConfig) error {
 	if portMulticast := cfg.GetPortMulticast(); portMulticast > maxSyncPort {
 		return status.Errorf(codes.InvalidArgument, "port_multicast %d exceeds maximum allowed value %d", portMulticast, maxSyncPort)
+	}
+	if portUnicast := cfg.GetPortUnicast(); portUnicast > maxSyncPort {
+		return status.Errorf(codes.InvalidArgument, "port_unicast %d exceeds maximum allowed value %d", portUnicast, maxSyncPort)
 	}
 	return nil
 }
@@ -483,13 +484,40 @@ func validateSyncConfig(cfg *fwstatepb.SyncConfig) error {
 		missing = append(missing, "src_addr")
 	}
 
-	// The module matches incoming sync packets against the multicast
-	// destination, so both the address and the port are required.
-	if len(cfg.GetDstAddrMulticast().GetAddr()) != 16 || isAllZeroBytes(cfg.GetDstAddrMulticast().GetAddr()) {
-		missing = append(missing, "dst_addr_multicast")
+	if dstEther := cfg.GetDstEther(); dstEther == nil {
+		missing = append(missing, "dst_ether")
+	} else if dstEther.GetAddr()>>48 != 0 {
+		return status.Error(codes.InvalidArgument, "dst_ether must be an EUI-48 address")
+	} else {
+		eui := dstEther.EUI48()
+		if isAllZeroBytes(eui[:]) {
+			missing = append(missing, "dst_ether")
+		}
 	}
-	if cfg.GetPortMulticast() == 0 {
-		missing = append(missing, "port_multicast")
+
+	multicastAddress := cfg.GetDstAddrMulticast()
+	multicastConfigured := !isAllZeroBytes(multicastAddress.GetAddr()) || cfg.GetPortMulticast() != 0
+	if multicastConfigured {
+		if len(multicastAddress.GetAddr()) != 16 || isAllZeroBytes(multicastAddress.GetAddr()) {
+			missing = append(missing, "dst_addr_multicast")
+		}
+		if cfg.GetPortMulticast() == 0 {
+			missing = append(missing, "port_multicast")
+		}
+	}
+
+	unicastAddress := cfg.GetDstAddrUnicast()
+	unicastConfigured := !isAllZeroBytes(unicastAddress.GetAddr()) || cfg.GetPortUnicast() != 0
+	if unicastConfigured {
+		if len(unicastAddress.GetAddr()) != 16 || isAllZeroBytes(unicastAddress.GetAddr()) {
+			missing = append(missing, "dst_addr_unicast")
+		}
+		if cfg.GetPortUnicast() == 0 {
+			missing = append(missing, "port_unicast")
+		}
+	}
+	if !multicastConfigured && !unicastConfigured {
+		missing = append(missing, "sync destination")
 	}
 
 	if len(missing) > 0 {

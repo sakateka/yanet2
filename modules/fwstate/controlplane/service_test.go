@@ -18,6 +18,7 @@ func TestValidateSyncPorts(t *testing.T) {
 	cases := []struct {
 		name          string
 		portMulticast uint32
+		portUnicast   uint32
 		wantErr       bool
 	}{
 		{
@@ -35,12 +36,18 @@ func TestValidateSyncPorts(t *testing.T) {
 			portMulticast: 65536,
 			wantErr:       true,
 		},
+		{
+			name:        "unicast just above boundary",
+			portUnicast: 65536,
+			wantErr:     true,
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &fwstatepb.SyncConfig{
 				PortMulticast: tc.portMulticast,
+				PortUnicast:   tc.portUnicast,
 			}
 
 			err := validateSyncPorts(cfg)
@@ -55,12 +62,11 @@ func TestValidateSyncPorts(t *testing.T) {
 	}
 }
 
-// TestValidateSyncConfigMulticastRequired checks that the multicast
-// destination pair is validated as required.
-func TestValidateSyncConfigMulticastRequired(t *testing.T) {
+func TestValidateSyncConfigDestinations(t *testing.T) {
 	newConfig := func() *fwstatepb.SyncConfig {
 		return &fwstatepb.SyncConfig{
 			SrcAddr:       &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+			DstEther:      &commonpb.MACAddress{Addr: 0x333300000001},
 			PortMulticast: 1,
 		}
 	}
@@ -88,6 +94,46 @@ func TestValidateSyncConfigMulticastRequired(t *testing.T) {
 		err := validateSyncConfig(cfg)
 		require.NoError(t, err)
 	})
+
+	t.Run("MAC outside EUI-48", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.DstEther = &commonpb.MACAddress{Addr: 0x100333300000001}
+		cfg.DstAddrMulticast = &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}}
+
+		err := validateSyncConfig(cfg)
+		require.Error(t, err)
+		require.Equal(t, codes.InvalidArgument, status.Code(err))
+		require.Contains(t, err.Error(), "EUI-48")
+	})
+
+	t.Run("unicast only", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.PortMulticast = 0
+		cfg.DstAddrUnicast = &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}}
+		cfg.PortUnicast = 2
+
+		require.NoError(t, validateSyncConfig(cfg))
+	})
+
+	t.Run("unicast address without port", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.PortMulticast = 0
+		cfg.DstAddrUnicast = &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}}
+
+		err := validateSyncConfig(cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "port_unicast")
+	})
+
+	t.Run("unicast port without address", func(t *testing.T) {
+		cfg := newConfig()
+		cfg.PortMulticast = 0
+		cfg.PortUnicast = 2
+
+		err := validateSyncConfig(cfg)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "dst_addr_unicast")
+	})
 }
 
 // TestUpdateConfigRequiresMapNames checks that a request without both map
@@ -96,6 +142,7 @@ func TestValidateSyncConfigMulticastRequired(t *testing.T) {
 func TestUpdateConfigRequiresMapNames(t *testing.T) {
 	syncConfig := &fwstatepb.SyncConfig{
 		SrcAddr:          &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+		DstEther:         &commonpb.MACAddress{Addr: 0x333300000001},
 		DstAddrMulticast: &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
 		PortMulticast:    9999,
 	}
@@ -144,6 +191,7 @@ func TestUpdateConfigRequiresMapNames(t *testing.T) {
 func TestUpdateConfigRejectsUnrepresentableMapNames(t *testing.T) {
 	syncConfig := &fwstatepb.SyncConfig{
 		SrcAddr:          &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+		DstEther:         &commonpb.MACAddress{Addr: 0x333300000001},
 		DstAddrMulticast: &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
 		PortMulticast:    9999,
 	}
