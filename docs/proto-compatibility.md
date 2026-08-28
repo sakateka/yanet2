@@ -32,7 +32,8 @@ The following versioned package families are covered by the breaking gate.
 **Operators** — `operators/<name>/.../v1/`
 - `operators.pipeline.operatorpb.v1`
 - `operators.route.operatorpb.v1`
-- `operators.forward.operatorpb.v1`
+- `operators.forward.operatorpb.v1` and `operators.decap.operatorpb.v1` exist only as runtime service
+  names of the static module operator (`common/go/operator/static.go`), not as proto packages
 - `operators.bird_adapter.adapterpb.v1` (directory `bird-adapter`, package `bird_adapter` — see Exclusions)
 
 `modules/balancer2` (`modules.balancer2.controlplane.balancerpb.v1`) is **pre-v1** and explicitly excluded from the breaking gate. See Freeze Status.
@@ -105,6 +106,7 @@ The following entries in `buf.yaml` intentionally deviate from the defaults. Eac
 
 **`breaking.ignore`**
 - `modules/balancer2` — pre-v1 rewrite in flight; API shape is not yet stable. Remove this line from `buf.yaml` when balancer2 reaches v1.
+- `operators/forward/operatorpb` and `operators/decap/operatorpb` — the readiness packages of the forward and decap operators were deleted on purpose: their wire route (`/operators.<name>.operatorpb.v1.ReadinessService/Ready`, `readinesspb` messages) is kept as a runtime service name registered by the static module operator, so callers that address the route by name (the announcer, the gateway proxy) are unaffected, and no generated client of these packages existed outside the operators themselves.
 
 **`lint.except`** — six identifier-naming rules are disabled globally because enforcing them would require renaming existing wire identifiers, which would itself be a breaking change:
 - `ENUM_VALUE_PREFIX`
