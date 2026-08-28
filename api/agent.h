@@ -100,10 +100,23 @@ agent_attach(
 	yanet_error **err
 );
 
-// Extend agent size.
+// Returns the memory limit of the agent.
+//
+// @param agent Handle to the agent
+//
+// @return Total size reserved for the agent, in bytes.
+uint64_t
+agent_memory_limit(struct agent *agent);
+
+// Grows an attached agent's shared memory by the given increment.
+//
+// @param agent Handle to the agent
+// @param size Number of bytes to add
+// @param err Error output parameter
+//
 // @return 0 on success, -1 on error.
 int
-agent_resize(struct agent *agent, size_t new_size, yanet_error **err);
+agent_extend(struct agent *agent, uint64_t size, yanet_error **err);
 
 // Returns number of dataplane instances in the specified shared memory segment.
 //
