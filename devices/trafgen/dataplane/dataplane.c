@@ -1,7 +1,6 @@
 #include "dataplane.h"
 
 #include <stdint.h>
-#include <string.h>
 
 #include "config.h"
 
@@ -51,6 +50,9 @@ trafgen_emit_frame(
 		return 1;
 	}
 
+	// worker_packet_alloc returns zero-initialised packet metadata, so the
+	// caller's only obligations are setting the device ids and parsing the
+	// packet.
 	struct packet *packet = worker_packet_alloc(dp_worker);
 	if (packet == NULL) {
 		return -1;
@@ -64,8 +66,6 @@ trafgen_emit_frame(
 	}
 	rte_memcpy(data, frames + offsets[frame_idx], len);
 
-	memset(packet, 0, sizeof(*packet));
-	packet->mbuf = mbuf;
 	packet->rx_device_id = dp_worker->device_id;
 	packet->tx_device_id = dp_worker->device_id;
 

@@ -24,6 +24,8 @@ struct dataplane_ut_config {
 	size_t cp_memory;
 	size_t dp_memory;
 	size_t worker_count;
+	// Zero selects PACKET_RECIRC_LIMIT_DEFAULT.
+	uint16_t packet_recirc_limit;
 
 	const char *const *devices;
 	size_t device_count;
@@ -93,6 +95,14 @@ struct dataplane_ut_round_result {
 	struct packet_list drop;
 };
 
+// Release all mbufs owned by a completed round result.
+void
+dataplane_ut_round_result_free(struct dataplane_ut_round_result *result);
+
+// Return the number of mock-mempool mbufs currently owned by callers.
+size_t
+dataplane_ut_mempool_outstanding(struct dataplane_ut *ut);
+
 // Run one pipeline round on worker_idx with the given input.
 //
 // input is drained to empty on return; result->output and result->drop
@@ -120,36 +130,28 @@ dataplane_ut_build_optimized(void);
 // Run rounds pipeline rounds on worker, recycling the packets in input each
 // time without allocating or printing.
 //
-// Before the loop, every packet is popped from input and its initial
-// tx_device_id and rx_device_id are recorded. Each round rebuilds input from
-// those snapshot pointers, resets next/tx_device_id/rx_device_id on each
-// packet, and calls dataplane_ut_run. The per-round result is discarded —
-// dataplane_ut_run moves packet nodes without freeing them, so the snapshot
-// pointers remain valid for every subsequent round.
+// Before the loop, every packet and its metadata are snapshotted. Each round
+// rebuilds input from those snapshot pointers and calls dataplane_ut_run. The
+// per-round result is discarded after newly emitted packets are reclaimed.
 //
 // After the loop, input is rebuilt from the snapshot so the caller's list
 // holds all packets in a consistent state for freeing. The snapshot array is
 // freed before returning.
 //
-// When reset_payload is nonzero, each packet's payload bytes are also
-// snapshotted at capture and restored before every round, so modules that
-// rewrite headers in place (for example route decrementing TTL) see fresh
-// input each round. Only the bytes are restored: mbuf geometry and parse
-// metadata are not, so modules that grow, shrink, or re-slice packets stay
-// out of scope. A failed per-packet snapshot allocation leaves that packet
-// without payload reset.
+// Mbuf geometry is snapshotted and validated before every round. When
+// reset_payload is nonzero, each packet's payload bytes are also snapshotted
+// and restored, so modules that rewrite headers in place (for example route
+// decrementing TTL) see fresh input each round. Modules that grow, shrink, or
+// re-slice packets stay out of scope and cause the run to fail.
 //
-// Returns immediately (leaving input intact) when rounds == 0 or
-// input is empty. Returns immediately on malloc failure.
+// Returns 0 on success, -ENOMEM when a snapshot cannot be allocated, and
+// -EINVAL when a handler changes mbuf geometry. Allocation failures leave input
+// intact; every other return leaves it rebuilt from the fixed packet set.
 //
-// Caveat: this primitive assumes each round's handlers only forward or drop the
-// fixed packet set. A handler that allocates, frees, or replicates packets per
-// round breaks the recycling contract: any new mbuf emitted (for example the
-// fwstate state-sync path, which calls worker_packet_alloc +
-// packet_front_output) is held only by the discarded per-round result, not by
-// the snapshot, so it leaks one mbuf per round. Do not benchmark configurations
-// that emit or drop-free packets through this primitive.
-void
+// Handlers must not free or replicate the fixed packet set. Any newly emitted
+// packet is reclaimed from the discarded per-round result before the next
+// round, but a freed snapshot packet cannot be restored.
+int
 dataplane_ut_run_rounds(
 	struct dataplane_ut *ut,
 	size_t worker,

@@ -1,9 +1,14 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
 #define PACKET_HEADER_TYPE_UNKNOWN 0
+
+#define PACKET_RECIRC_LIMIT_DEFAULT UINT16_C(64)
+#define PACKET_RECIRC_LIMIT_MIN UINT16_C(4)
+#define PACKET_RECIRC_LIMIT_MAX UINT16_C(256)
 
 enum packet_flag {
 	PACKET_FLAG_FRAGMENTED,
@@ -42,6 +47,9 @@ struct packet {
 	uint16_t flags;
 	uint16_t vlan;
 
+	uint16_t recirc_remaining;
+	uint8_t recirc_initialized;
+
 	uint32_t flow_label; // 12 unused bits + 20 bits of the label
 
 	uint16_t fragment_offset;
@@ -53,6 +61,33 @@ struct packet {
 	struct network_header network_header;
 	struct transport_header transport_header;
 };
+
+// Initialize a packet lineage's redirect credits once. Lazy because packets
+// enter a pipeline before its module execution context supplies the configured
+// limit, and the field is treated as "full budget" by every reader until the
+// first explicit consumption. Callers must invoke this before the first
+// redirect consumption on a freshly allocated packet, including after a
+// successful clone.
+static inline void
+packet_recirc_init(struct packet *packet, uint16_t limit) {
+	if (!packet->recirc_initialized) {
+		packet->recirc_remaining = limit;
+		packet->recirc_initialized = 1;
+	}
+}
+
+// Consume one redirect from the packet lineage's assigned credits.
+static inline bool
+packet_recirc_try_redirect(struct packet *packet, uint16_t limit) {
+	packet_recirc_init(packet, limit);
+
+	if (packet->recirc_remaining == 0) {
+		return false;
+	}
+
+	packet->recirc_remaining -= 1;
+	return true;
+}
 
 struct packet_list {
 	struct packet *first;

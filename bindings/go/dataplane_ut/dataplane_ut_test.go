@@ -37,6 +37,29 @@ func TestHarnessLifecycle(t *testing.T) {
 	require.NotNil(t, shm)
 }
 
+// verifies that NewHarness rejects a packet recirculation limit outside
+// the 4..256 range on the Go side instead of passing it to the C layer.
+func Test_NewHarness_RejectsInvalidPacketRecircLimit(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		limit uint16
+	}{
+		{name: "below_minimum", limit: 3},
+		{name: "above_maximum", limit: 257},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness, err := NewHarness(Config{
+				CPMemory:          uint64(datasize.MB * 32),
+				DPMemory:          uint64(datasize.MB * 4),
+				WorkerCount:       1,
+				PacketRecircLimit: testCase.limit,
+			})
+			require.Error(t, err)
+			require.Nil(t, harness)
+		})
+	}
+}
+
 // TestTimeRoundTrip verifies that SetCurrentTime and CurrentTime agree and
 // that AdvanceTime correctly accumulates the delta.
 func TestTimeRoundTrip(t *testing.T) {

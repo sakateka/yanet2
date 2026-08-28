@@ -71,17 +71,27 @@ func setupRouteHarness(
 	tb testing.TB,
 	deviceName string,
 ) (*dataplaneut.Harness, *ffi.Agent, route.Backend) {
+	return setupRouteHarnessWithLimit(tb, deviceName, 0)
+}
+
+// Builds a route harness with an explicit packet-lineage redirect limit.
+func setupRouteHarnessWithLimit(
+	tb testing.TB,
+	deviceName string,
+	packetRecircLimit uint16,
+) (*dataplaneut.Harness, *ffi.Agent, route.Backend) {
 	tb.Helper()
 
-	cfg := dataplaneut.Config{
-		CPMemory:      uint64(routeCPSize),
-		DPMemory:      uint64(routeDPSize),
-		WorkerCount:   1,
-		Devices:       []string{deviceName},
-		Modules:       []string{"route"},
-		DevicesToLoad: []string{"plain"},
+	config := dataplaneut.Config{
+		CPMemory:          uint64(routeCPSize),
+		DPMemory:          uint64(routeDPSize),
+		WorkerCount:       1,
+		PacketRecircLimit: packetRecircLimit,
+		Devices:           []string{deviceName},
+		Modules:           []string{"route"},
+		DevicesToLoad:     []string{"plain"},
 	}
-	h, err := dataplaneut.NewHarness(cfg)
+	h, err := dataplaneut.NewHarness(config)
 	require.NoError(tb, err)
 	tb.Cleanup(h.Free)
 
@@ -774,6 +784,60 @@ func TestRoute_DeviceTranslation_Drop(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, result.Output, "packet with unregistered device must be dropped")
 	require.Len(t, result.Drop, 1, "expected exactly one dropped packet")
+}
+
+// verifies that equal-length TTL updates can use the full redirect budget
+// before the target entry accounts the drop.
+func Test_Route_OutputSelfLoopStopsAtTotalLimit(t *testing.T) {
+	h, agent, backend := setupRouteHarnessWithLimit(t, "port0", 5)
+	applyFIB(t, backend, "loop", []FIBEntry{{
+		Prefix:   netip.MustParsePrefix("10.0.0.0/24"),
+		Nexthops: []FIBNexthop{routeNextHop},
+	}})
+	require.NoError(t, agent.UpdateFunction(ffi.FunctionConfig{
+		Name: "loop",
+		Chains: []ffi.FunctionChainConfig{{
+			Weight: 1,
+			Chain: ffi.ChainConfig{
+				Name: "loop_chain",
+				Modules: []ffi.ChainModuleConfig{{
+					Type: "route",
+					Name: "loop",
+				}},
+			},
+		}},
+	}))
+	require.NoError(t, agent.UpdatePipeline(ffi.PipelineConfig{
+		Name:      "loop",
+		Functions: []string{"loop"},
+	}))
+	require.NoError(t, agent.UpdatePipeline(ffi.PipelineConfig{
+		Name:      "feeder",
+		Functions: []string{"loop"},
+	}))
+	_, err := plain.UpdateDevices(agent, []ffi.DeviceConfig{{
+		Name:   "port0",
+		Input:  []ffi.DevicePipelineConfig{{Name: "feeder", Weight: 1}},
+		Output: []ffi.DevicePipelineConfig{{Name: "loop", Weight: 1}},
+	}})
+	require.NoError(t, err)
+
+	packet := buildRouteIPv4Packet(t, "10.0.0.5", 64)
+	packetSize := uint64(len(packet.Data()))
+	result, err := h.HandlePackets(packet)
+	require.NoError(t, err)
+	require.Empty(t, result.Output)
+	require.Len(t, result.Drop, 1)
+
+	deviceCounters := dataplaneut.ValueCounters(
+		h.SharedMemory().DPConfig(0).DeviceCounters("port0"),
+	)
+	require.Equal(
+		t,
+		[]uint64{1, packetSize},
+		deviceCounters["output_recirc_drop"],
+	)
+	require.Equal(t, []uint64{5, 5 * packetSize}, deviceCounters["output_rx"])
 }
 
 // routeCounterNames lists every per-outcome counter registered by the route
