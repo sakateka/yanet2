@@ -9,6 +9,18 @@ gateways:
   - name: numa0
     endpoint: "[::1]:8080"
 
+# The operator's own gRPC server.
+#
+# `endpoint` is what it binds, with port 0 picking a free one.
+# `advertise_endpoint` overrides the address registered with gateways. Leave it
+# empty when the bound address is reachable; set it for a wildcard or loopback
+# bind that gateways reach through another address. Names are registered as
+# written and resolved by the gateway on each dial.
+#
+#   server:
+#     endpoint: "[::]:8080"
+#     advertise_endpoint: "yanet-route-operator.yanet:8080"
+
 # Per-gateway device ownership: maps a gateway name to the devices its
 # dataplane instance owns. The operator pushes each gateway only the FIB
 # nexthops on its devices. An empty or unlisted gateway gets the full FIB.
