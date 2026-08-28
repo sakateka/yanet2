@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -175,7 +176,7 @@ func TestReplyBudget_ExhaustedStillCollectsReply(t *testing.T) {
 func newTestClient(t *testing.T, handle func(conn net.Conn)) *framework.SocketClient {
 	t.Helper()
 
-	socketPath := filepath.Join(t.TempDir(), "socket.sock")
+	socketPath := newTestUnixSocketPath(t)
 	listener, err := net.Listen("unix", socketPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { listener.Close() })
@@ -195,6 +196,24 @@ func newTestClient(t *testing.T, handle func(conn net.Conn)) *framework.SocketCl
 	t.Cleanup(func() { client.Close() })
 
 	return client
+}
+
+// newTestUnixSocketPath returns a unique path short enough for Unix socket
+// limits, independent of the configured temporary root and test name.
+//
+// Cleanup preserves the prior testing.TempDir behavior and runs after both
+// success and ordinary test failure. The directory contains only the socket
+// entry, not diagnostic state worth preserving after the test.
+func newTestUnixSocketPath(t *testing.T) string {
+	t.Helper()
+
+	directory, err := os.MkdirTemp("/tmp", "y2-")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, os.RemoveAll(directory))
+	})
+
+	return filepath.Join(directory, "s")
 }
 
 // buildReplyFrame constructs a minimal Ethernet frame addressed to

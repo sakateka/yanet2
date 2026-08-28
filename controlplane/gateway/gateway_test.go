@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -112,6 +113,24 @@ func NewTestListener(t *testing.T) net.Listener {
 	t.Cleanup(func() { _ = listener.Close() })
 
 	return listener
+}
+
+// newTestUnixSocketPath returns a unique path short enough for Unix socket
+// limits, independent of the configured temporary root and test name.
+//
+// Cleanup preserves the prior testing.TempDir behavior and runs after both
+// success and ordinary test failure. The directory contains only the socket
+// entry, not diagnostic state worth preserving after the test.
+func newTestUnixSocketPath(t *testing.T) string {
+	t.Helper()
+
+	directory, err := os.MkdirTemp("/tmp", "y2-")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, os.RemoveAll(directory))
+	})
+
+	return filepath.Join(directory, "s")
 }
 
 // blockingReadinessService is a fake Service whose Watch handler blocks on
@@ -409,7 +428,7 @@ func TestServiceRunner_Run_ShutsDownWithOpenStream(t *testing.T) {
 		_ = gatewayGroup.Wait()
 	})
 
-	backendAddr := filepath.Join(t.TempDir(), "runner.sock")
+	backendAddr := newTestUnixSocketPath(t)
 	runner := gateway.NewServiceRunner(
 		&blockingReadinessService{endpoint: backendAddr},
 		gatewayListener.Addr().String(),
