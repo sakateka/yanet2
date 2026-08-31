@@ -41,6 +41,23 @@ func TestFunctionUpdateRejectsMissingMessages(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "nil module id in chain",
+			request: &ynpb.UpdateFunctionRequest{
+				Function: &ynpb.Function{
+					Id: &commonpb.FunctionId{Name: "f"},
+					Chains: []*ynpb.FunctionChain{
+						{
+							Weight: 1,
+							Chain: &ynpb.Chain{
+								Name:    "c",
+								Modules: []*commonpb.ModuleId{nil},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 
 	svc := builtin.NewFunction(0, nil)
@@ -53,12 +70,36 @@ func TestFunctionUpdateRejectsMissingMessages(t *testing.T) {
 	}
 }
 
+// Test_Function_Update_EmptyName verifies that Update rejects an id with
+// an empty name instead of creating a function named "".
+func Test_Function_Update_EmptyName(t *testing.T) {
+	svc := builtin.NewFunction(0, nil)
+
+	_, err := svc.Update(t.Context(), &ynpb.UpdateFunctionRequest{
+		Function: &ynpb.Function{
+			Id: &commonpb.FunctionId{},
+		},
+	})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
 // TestFunctionDeleteRejectsMissingID verifies that Delete rejects a request
 // with no id instead of dereferencing it to build the function name.
 func TestFunctionDeleteRejectsMissingID(t *testing.T) {
 	svc := builtin.NewFunction(0, nil)
 
 	_, err := svc.Delete(t.Context(), &ynpb.DeleteFunctionRequest{})
+	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+// Test_Function_Delete_EmptyName verifies that Delete rejects an id with
+// an empty name instead of deleting a function named "".
+func Test_Function_Delete_EmptyName(t *testing.T) {
+	svc := builtin.NewFunction(0, nil)
+
+	_, err := svc.Delete(t.Context(), &ynpb.DeleteFunctionRequest{
+		Id: &commonpb.FunctionId{},
+	})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
