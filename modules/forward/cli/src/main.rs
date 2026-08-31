@@ -1,21 +1,15 @@
-use core::fmt::{self, Display, Formatter};
-use std::{
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, CommandFactory, Parser};
 use clap_complete::{
     CompleteEnv,
     engine::{ArgValueCandidates, CompletionCandidate},
 };
-use commonpb::pb::{IPv4Network, IPv6Network};
 use forwardpb::{
     DeleteConfigRequest, ListConfigsRequest, ShowConfigRequest, UpdateConfigRequest,
     forward_service_client::ForwardServiceClient,
 };
-use netip::IpNetwork;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serializer};
 use tonic::codec::CompressionEncoding;
 use ync::{
     client::{ConnectionArgs, LayeredChannel, Service},
@@ -26,7 +20,7 @@ use ync::{
 
 #[allow(clippy::std_instead_of_core, non_snake_case)]
 pub mod forwardpb {
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     tonic::include_proto!("modules.forward.controlplane.forwardpb.v1");
 }
@@ -75,214 +69,106 @@ pub struct UpdateCmd {
     /// The name of the module config to operate on.
     #[arg(long = "name", short = 'n', add = ArgValueCandidates::new(config_candidates))]
     pub config: String,
-    /// Ruleset file path.
-    #[arg(required = true, long = "rules", value_name = "PATH")]
-    pub rules: PathBuf,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct VlanRange {
-    from: u32,
-    to: u32,
-}
-
-impl From<VlanRange> for filterpb::pb::VlanRange {
-    fn from(r: VlanRange) -> Self {
-        Self { from: r.from, to: r.to }
-    }
-}
-
-impl From<filterpb::pb::VlanRange> for VlanRange {
-    fn from(r: filterpb::pb::VlanRange) -> Self {
-        Self { from: r.from, to: r.to }
-    }
-}
-
-/// Forwarding direction for a rule's action.
-///
-/// The uppercase spelling is canonical, matching `ForwardMode`'s proto enum
-/// names. The PascalCase spellings are accepted because the schema used them
-/// previously.
-#[derive(Debug, Deserialize)]
-enum ModeKind {
-    #[serde(rename = "NONE", alias = "None")]
-    None,
-    #[serde(rename = "IN", alias = "In")]
-    In,
-    #[serde(rename = "OUT", alias = "Out")]
-    Out,
-    /// An unrecognised proto enum value.
+    /// Path to the module config file: the update request in YAML.
     ///
-    /// `show` renders the raw number so one rule from a newer module cannot
-    /// hide the rest of a configuration. `update` rejects it.
-    #[serde(skip)]
-    Unknown(i32),
+    /// The file spells the wire request, exactly what the generic operator
+    /// pushes and what `show` prints: rules with an `action`, `devices` as
+    /// named objects, family-typed `sources4/6` and `destinations4/6`
+    /// networks, a mode by its declared name or number. An undeclared mode
+    /// number, which `show` still prints raw, is refused. The `name` may
+    /// be omitted, it is then taken from `--name`, and a file naming
+    /// another config is refused.
+    #[arg(value_name = "PATH")]
+    pub file: PathBuf,
 }
 
-impl Display for ModeKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
-        match self {
-            Self::None => write!(f, "NONE"),
-            Self::In => write!(f, "IN"),
-            Self::Out => write!(f, "OUT"),
-            Self::Unknown(mode) => write!(f, "{mode}"),
-        }
+/// Serializes a forward mode as its declared name, an undeclared number as
+/// the number itself, so one rule from a newer module cannot hide the rest
+/// of a configuration.
+fn serialize_forward_mode<S: Serializer>(mode: &i32, serializer: S) -> Result<S::Ok, S::Error> {
+    match forwardpb::ForwardMode::try_from(*mode) {
+        Ok(mode) => serializer.serialize_str(mode.as_str_name()),
+        Err(_) => serializer.serialize_i32(*mode),
     }
 }
 
-impl Serialize for ModeKind {
-    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(self)
+/// Deserializes a forward mode from its declared name or number, a null
+/// as NONE.
+///
+/// An undeclared value is refused here, because the service would
+/// silently coerce it to NONE rather than reject it.
+fn deserialize_forward_mode<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NameOrNumber {
+        Number(i32),
+        Name(String),
+    }
+
+    match Option::<NameOrNumber>::deserialize(deserializer)? {
+        None => Ok(forwardpb::ForwardMode::None as i32),
+        Some(NameOrNumber::Number(mode)) => forwardpb::ForwardMode::try_from(mode)
+            .map(|mode| mode as i32)
+            .map_err(|_| serde::de::Error::custom(format!("unknown forward mode {mode}"))),
+        Some(NameOrNumber::Name(name)) => forwardpb::ForwardMode::from_str_name(&name)
+            .map(|mode| mode as i32)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown forward mode {name:?}"))),
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct ForwardRule {
-    target: String,
-    mode: ModeKind,
-    counter: String,
-    devices: Vec<String>,
-    vlan_ranges: Vec<VlanRange>,
-    srcs: Vec<String>,
-    dsts: Vec<String>,
+/// Deserializes a null as the field's zero value, as the operator's YAML
+/// decoder reads it.
+fn null_as_default<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
-impl TryFrom<ForwardRule> for forwardpb::Rule {
-    type Error = Box<dyn core::error::Error>;
-
-    fn try_from(forward_rule: ForwardRule) -> Result<Self, Self::Error> {
-        let mode: i32 = match forward_rule.mode {
-            ModeKind::None => forwardpb::ForwardMode::None.into(),
-            ModeKind::In => forwardpb::ForwardMode::In.into(),
-            ModeKind::Out => forwardpb::ForwardMode::Out.into(),
-            ModeKind::Unknown(mode) => return Err(format!("unknown forward mode {mode}").into()),
-        };
-
-        let (sources4, sources6) = partition_nets(forward_rule.srcs)?;
-        let (destinations4, destinations6) = partition_nets(forward_rule.dsts)?;
-
-        Ok(Self {
-            action: Some(forwardpb::Action {
-                target: forward_rule.target,
-                mode,
-                counter: forward_rule.counter,
-            }),
-            devices: forward_rule.devices.into_iter().map(|m| m.into()).collect(),
-            vlan_ranges: forward_rule.vlan_ranges.into_iter().map(Into::into).collect(),
-            sources4,
-            sources6,
-            destinations4,
-            destinations6,
-        })
-    }
-}
-
-/// Partitions a mixed-family network list into the family-typed wire
-/// messages, preserving the within-family order.
-fn partition_nets(nets: Vec<String>) -> Result<(Vec<IPv4Network>, Vec<IPv6Network>), Box<dyn core::error::Error>> {
-    let mut v4 = Vec::new();
-    let mut v6 = Vec::new();
-    for net in nets {
-        match IpNetwork::parse(&net)? {
-            IpNetwork::V4(net) => v4.push(net.into()),
-            IpNetwork::V6(net) => v6.push(net.into()),
+/// Loads the update request from its YAML file.
+///
+/// The reading matches the generic operator's: merge keys expand, a null
+/// field takes its zero value, an empty document is the zero request and
+/// a bare document separator is tolerated.
+fn load_request<P>(path: P) -> Result<UpdateConfigRequest, Box<dyn core::error::Error>>
+where
+    P: AsRef<Path>,
+{
+    let content = std::fs::read_to_string(path)?;
+    let mut documents = Vec::new();
+    for document in serde_yaml::Deserializer::from_str(&content) {
+        let value = serde_yaml::Value::deserialize(document)?;
+        if !value.is_null() {
+            documents.push(value);
         }
     }
 
-    Ok((v4, v6))
+    let mut value = match documents.pop() {
+        None => return Ok(UpdateConfigRequest::default()),
+        Some(_) if !documents.is_empty() => {
+            return Err("the file holds more than one document".into());
+        }
+        Some(value) => value,
+    };
+    value.apply_merge()?;
+    Ok(serde_yaml::from_value(value)?)
 }
 
-/// Renders the family-typed wire lists back into one mixed list, IPv4
-/// entries first.
-fn render_nets(v4: Vec<IPv4Network>, v6: Vec<IPv6Network>) -> Vec<String> {
-    v4.into_iter()
-        .map(|net| net.to_string())
-        .chain(v6.into_iter().map(|net| net.to_string()))
-        .collect()
-}
-
-impl TryFrom<forwardpb::Rule> for ForwardRule {
-    type Error = Box<dyn core::error::Error>;
-
-    fn try_from(rule: forwardpb::Rule) -> Result<Self, Self::Error> {
-        let action = rule.action.ok_or("forward rule is missing its action")?;
-        let mode = match forwardpb::ForwardMode::try_from(action.mode) {
-            Ok(forwardpb::ForwardMode::None) => ModeKind::None,
-            Ok(forwardpb::ForwardMode::In) => ModeKind::In,
-            Ok(forwardpb::ForwardMode::Out) => ModeKind::Out,
-            Err(_) => ModeKind::Unknown(action.mode),
-        };
-
-        Ok(Self {
-            target: action.target,
-            mode,
-            counter: action.counter,
-            devices: rule.devices.into_iter().map(|d| d.name).collect(),
-            vlan_ranges: rule.vlan_ranges.into_iter().map(VlanRange::from).collect(),
-            srcs: render_nets(rule.sources4, rule.sources6),
-            dsts: render_nets(rule.destinations4, rule.destinations6),
-        })
+/// Binds the config name into a loaded request, refusing a file that names
+/// another config.
+fn bind_request_name(request: &mut UpdateConfigRequest, name: &str) -> Result<(), String> {
+    if request.name.is_empty() {
+        request.name = name.to_string();
+        return Ok(());
     }
-}
-
-/// A forward module configuration as read from or written to a rule file.
-///
-/// Every rule field is always emitted, including an empty sequence as `[]`
-/// and an empty counter as an empty string, and none of them is optional on
-/// `update` either.
-///
-/// The `srcs` and `dsts` lists are mixed-family in the file but travel
-/// family-split on the wire, so `show` renders IPv4 entries before IPv6
-/// entries and only within-family order survives a round trip. A network
-/// parses in CIDR or address/mask form, normalising an address that
-/// carries host bits outside its mask. Any parseable mask is sent as-is,
-/// and the server enforces the filter compiler's mask classes: contiguous
-/// for IPv4, bi-contiguous for IPv6. A stored IPv6 mask with its hole
-/// exactly at the `/64` boundary renders in expanded-mask form and
-/// round-trips through `update`.
-///
-/// A `counter` left empty on `update` is not stored empty: the server
-/// materialises it to `to_<target>` before storing, bounded to whatever
-/// length the shared-memory counter registry accepts by cutting it back
-/// to the last whole character that still fits, so `show` renders that
-/// name instead of an empty string once the rule has gone through
-/// `update`, and a non-empty `counter` is used verbatim.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ForwardConfig {
-    rules: Vec<ForwardRule>,
-}
-
-impl TryFrom<ForwardConfig> for Vec<forwardpb::Rule> {
-    type Error = Box<dyn core::error::Error>;
-
-    fn try_from(config: ForwardConfig) -> Result<Self, Self::Error> {
-        config.rules.into_iter().map(forwardpb::Rule::try_from).collect()
+    if request.name != name {
+        return Err(format!(
+            "the file names config {:?}, but --name is {:?}",
+            request.name, name
+        ));
     }
-}
-
-impl TryFrom<Vec<forwardpb::Rule>> for ForwardConfig {
-    type Error = Box<dyn core::error::Error>;
-
-    fn try_from(rules: Vec<forwardpb::Rule>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            rules: rules
-                .into_iter()
-                .map(ForwardRule::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-}
-
-impl ForwardConfig {
-    pub fn load<P>(path: P) -> Result<Self, Box<dyn core::error::Error>>
-    where
-        P: AsRef<Path>,
-    {
-        let file = File::open(path)?;
-        let config = serde_yaml::from_reader(file)?;
-
-        Ok(config)
-    }
+    Ok(())
 }
 
 /// The fully-qualified gRPC service name used in error messages.
@@ -314,21 +200,21 @@ impl ForwardService {
             .map_err(self.service.status("show"))?
             .into_inner();
 
-        let config = ForwardConfig::try_from(response.rules)
-            .map_err(|e: Box<dyn core::error::Error>| self.service.invalid("show", e.to_string()))?;
-
         output::data(
-            || &config,
+            || &response,
             || {
+                // The document is printed even without rules, so a
+                // redirected show yields a file update accepts, an
+                // undeclared mode number excepted.
                 print!(
                     "{}",
-                    serde_yaml::to_string(&config).expect("forward config YAML serialization must not fail")
+                    serde_yaml::to_string(&response).expect("forward config YAML serialization must not fail")
                 );
 
-                if config.rules.is_empty() {
+                if response.rules.is_empty() {
                     output::empty_with_hint(
                         format_args!("No forward rules found for '{}'.", cmd.config_name),
-                        format_args!("create one with 'yanet-cli-forward update --name <name> --rules <path>'"),
+                        format_args!("create one with 'yanet-cli-forward update --name <name> --file <path>'"),
                     );
                 }
             },
@@ -353,7 +239,7 @@ impl ForwardService {
                 if response.configs.is_empty() {
                     output::empty_with_hint(
                         format_args!("No forward configurations found."),
-                        format_args!("create one with 'yanet-cli-forward update --name <name> --rules <path>'"),
+                        format_args!("create one with 'yanet-cli-forward update --name <name> --file <path>'"),
                     );
                     return;
                 }
@@ -380,12 +266,7 @@ impl ForwardService {
         Ok(())
     }
 
-    pub async fn update_config(&mut self, cmd: UpdateCmd) -> Result<(), Error> {
-        let config = ForwardConfig::load(&cmd.rules).map_err(|e| self.service.invalid("update", e.to_string()))?;
-        let rules: Vec<forwardpb::Rule> = config
-            .try_into()
-            .map_err(|e: Box<dyn core::error::Error>| self.service.invalid("update", e.to_string()))?;
-        let request = UpdateConfigRequest { name: cmd.config.clone(), rules };
+    pub async fn update_config(&mut self, cmd: UpdateCmd, request: UpdateConfigRequest) -> Result<(), Error> {
         self.service
             .client()
             .update_config(request)
@@ -399,11 +280,29 @@ impl ForwardService {
 }
 
 async fn run(cmd: Cmd) -> Result<(), Error> {
+    // The update file is read and bound before the connection, so bad
+    // local input fails deterministically with or without a reachable
+    // gateway.
+    let update = match &cmd.mode {
+        ModeCmd::Update(update) => {
+            let endpoint = cmd.connection.endpoint.as_str();
+            let mut request =
+                load_request(&update.file).map_err(|e| Error::invalid_argument("update", endpoint, e.to_string()))?;
+            bind_request_name(&mut request, &update.config)
+                .map_err(|e| Error::invalid_argument("update", endpoint, e))?;
+            Some(request)
+        }
+        _ => None,
+    };
+
     let mut service = ForwardService::new(&cmd.connection).await?;
 
     match cmd.mode {
         ModeCmd::Delete(cmd) => service.delete_config(cmd).await,
-        ModeCmd::Update(cmd) => service.update_config(cmd).await,
+        ModeCmd::Update(cmd) => {
+            let request = update.expect("prepared for the update mode");
+            service.update_config(cmd, request).await
+        }
         ModeCmd::Show(cmd) => service.show_config(cmd).await,
         ModeCmd::List => service.list_configs().await,
     }
@@ -443,6 +342,8 @@ fn config_candidates() -> Vec<CompletionCandidate> {
 
 #[cfg(test)]
 mod test {
+    use commonpb::pb::{IPv4Network, IPv6Network};
+
     use super::*;
 
     fn v4_net(net: &str) -> IPv4Network {
@@ -470,14 +371,16 @@ mod test {
                     filterpb::pb::VlanRange { from: 200, to: 300 },
                 ],
                 sources4: vec![v4_net("192.0.2.0/24")],
-                sources6: vec![v6_net("2001:db8::/32")],
+                // The second mask hole sits exactly at the /64 boundary,
+                // which the filter compiler accepts.
+                sources6: vec![v6_net("2001:db8::/32"), v6_net("2001:db8::/ffff:ffff:ffff:0:ffff::")],
                 destinations4: vec![v4_net("203.0.113.0/24")],
                 destinations6: vec![v6_net("2001:db8:1::/48")],
             },
             forwardpb::Rule {
                 action: Some(forwardpb::Action {
-                    target: "target-in".to_string(),
-                    mode: forwardpb::ForwardMode::In as i32,
+                    target: "target-out".to_string(),
+                    mode: forwardpb::ForwardMode::Out as i32,
                     counter: String::new(),
                 }),
                 devices: vec![],
@@ -487,162 +390,241 @@ mod test {
                 destinations4: vec![],
                 destinations6: vec![],
             },
-            forwardpb::Rule {
-                action: Some(forwardpb::Action {
-                    target: "target-out".to_string(),
-                    mode: forwardpb::ForwardMode::Out as i32,
-                    counter: "counter-out".to_string(),
-                }),
-                devices: vec![filterpb::pb::Device { name: "eth2".to_string() }],
-                vlan_ranges: vec![filterpb::pb::VlanRange { from: 10, to: 20 }],
-                sources4: vec![v4_net("10.0.0.0/8")],
-                sources6: vec![],
-                destinations4: vec![v4_net("10.1.0.0/16")],
-                destinations6: vec![],
-            },
         ]
     }
 
     #[test]
-    fn a_shown_config_round_trips_through_yaml_back_into_the_original_rules() {
-        let rules = sample_rules();
+    fn test_shown_config_round_trips_into_the_update_request() {
+        let shown = forwardpb::ShowConfigResponse {
+            name: "forward0".to_string(),
+            rules: sample_rules(),
+        };
 
-        let config = ForwardConfig::try_from(rules.clone()).expect("pb rules must convert into a forward config");
-        let yaml = serde_yaml::to_string(&config).expect("forward config must serialize");
-        let parsed: ForwardConfig = serde_yaml::from_str(&yaml).expect("forward config must deserialize");
-        let reconstructed: Vec<forwardpb::Rule> = parsed.try_into().expect("forward config must convert back");
+        let yaml = serde_yaml::to_string(&shown).expect("shown config must serialize");
+        let parsed: UpdateConfigRequest = serde_yaml::from_str(&yaml).expect("shown config must parse back");
 
-        assert_eq!(rules, reconstructed);
+        assert_eq!(shown.name, parsed.name);
+        assert_eq!(shown.rules, parsed.rules);
     }
 
     #[test]
-    fn a_rule_file_accepts_the_full_mode_vocabulary() {
-        let uppercase = r#"
+    fn test_file_fields_default_when_omitted() {
+        let yaml = r#"
 rules:
-  - target: "t1"
-    mode: "NONE"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
-  - target: "t2"
-    mode: "IN"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
-  - target: "t3"
-    mode: "OUT"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
-"#;
-        let legacy = r#"
-rules:
-  - target: "t1"
-    mode: "None"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
-  - target: "t2"
-    mode: "In"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
-  - target: "t3"
-    mode: "Out"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs: []
-    dsts: []
+  - action:
+      target: "01:00.0"
+      mode: OUT
+      counter: recirc
+    devices:
+      - name: "01:00.0"
+    sources4:
+      - "0.0.0.0/0"
 "#;
 
-        for yaml in [uppercase, legacy] {
-            let config: ForwardConfig = serde_yaml::from_str(yaml).expect("mode spellings must parse");
-            assert!(matches!(config.rules[0].mode, ModeKind::None));
-            assert!(matches!(config.rules[1].mode, ModeKind::In));
-            assert!(matches!(config.rules[2].mode, ModeKind::Out));
+        let parsed: UpdateConfigRequest = serde_yaml::from_str(yaml).expect("a sparse file must parse");
+
+        assert_eq!("", parsed.name);
+        assert_eq!(
+            forwardpb::ForwardMode::Out as i32,
+            parsed.rules[0].action.as_ref().expect("action").mode
+        );
+        assert!(parsed.rules[0].vlan_ranges.is_empty());
+        assert!(parsed.rules[0].sources6.is_empty());
+    }
+
+    #[test]
+    fn test_file_rejects_an_unknown_key() {
+        let yaml = "rules:\n  - action:\n      target: t\n    srcs: []\n";
+
+        let parsed: Result<UpdateConfigRequest, _> = serde_yaml::from_str(yaml);
+
+        assert!(
+            parsed
+                .expect_err("the legacy srcs key must be refused")
+                .to_string()
+                .contains("srcs")
+        );
+    }
+
+    #[test]
+    fn test_mode_serializes_by_name_and_an_undeclared_number_as_is() {
+        let declared = forwardpb::Action {
+            target: "t".to_string(),
+            mode: forwardpb::ForwardMode::Out as i32,
+            counter: String::new(),
+        };
+        let undeclared = forwardpb::Action { mode: 99, ..declared.clone() };
+
+        assert!(
+            serde_yaml::to_string(&declared)
+                .expect("must serialize")
+                .contains("mode: OUT")
+        );
+        assert!(
+            serde_yaml::to_string(&undeclared)
+                .expect("must serialize")
+                .contains("mode: 99")
+        );
+    }
+
+    #[test]
+    fn test_mode_parses_a_declared_name_or_number_and_refuses_the_rest() {
+        let by_name: forwardpb::Action = serde_yaml::from_str("mode: IN\n").expect("a declared name must parse");
+        let by_number: forwardpb::Action = serde_yaml::from_str("mode: 2\n").expect("a declared number must parse");
+        let unknown_name: Result<forwardpb::Action, _> = serde_yaml::from_str("mode: BOGUS\n");
+        let unknown_number: Result<forwardpb::Action, _> = serde_yaml::from_str("mode: 99\n");
+
+        assert_eq!(forwardpb::ForwardMode::In as i32, by_name.mode);
+        assert_eq!(forwardpb::ForwardMode::Out as i32, by_number.mode);
+        assert!(
+            unknown_name
+                .expect_err("an undeclared name must be refused")
+                .to_string()
+                .contains("BOGUS")
+        );
+        assert!(
+            unknown_number
+                .expect_err("an undeclared number must be refused")
+                .to_string()
+                .contains("99")
+        );
+    }
+
+    #[test]
+    fn test_empty_and_comment_only_files_are_the_zero_request() {
+        for content in ["", "# nothing yet\n"] {
+            let path = std::env::temp_dir().join(format!("fwd-empty-{}-{}.yaml", std::process::id(), content.len()));
+            std::fs::write(&path, content).expect("the fixture must be written");
+
+            let request = load_request(&path).expect("an empty document must load");
+            std::fs::remove_file(&path).ok();
+
+            assert_eq!(UpdateConfigRequest::default(), request);
         }
     }
 
     #[test]
-    fn mixed_family_networks_partition_by_family_preserving_order() {
+    fn test_extern_messages_default_and_refuse_unknown_keys() {
+        let sparse: forwardpb::Rule =
+            serde_yaml::from_str("vlan_ranges:\n  - {}\n").expect("an empty vlan range must default");
+        let unknown: Result<forwardpb::Rule, _> = serde_yaml::from_str("devices:\n  - name: eth0\n    mtu: 9000\n");
+
+        assert_eq!(vec![filterpb::pb::VlanRange { from: 0, to: 0 }], sparse.vlan_ranges);
+        assert!(
+            unknown
+                .expect_err("an unknown device key must be refused")
+                .to_string()
+                .contains("mtu")
+        );
+    }
+
+    #[test]
+    fn test_unknown_null_valued_keys_are_still_refused() {
+        let yaml = "rulez: null\n";
+        let path = std::env::temp_dir().join(format!("fwd-nullkey-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).expect("the fixture must be written");
+
+        let refused = load_request(&path).expect_err("a misspelled null-valued key must be refused");
+        std::fs::remove_file(&path).ok();
+
+        assert!(refused.to_string().contains("rulez"));
+    }
+
+    #[test]
+    fn test_null_fields_read_as_zero_values() {
+        let yaml = "name: forward0\nrules:\n  - action:\n      target: t\n      mode: OUT\n      counter: c\n    devices: null\n    sources4: null\n";
+        let path = std::env::temp_dir().join(format!("fwd-null-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).expect("the fixture must be written");
+
+        let request = load_request(&path).expect("null fields must load");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!("forward0", request.name);
+        assert!(request.rules[0].devices.is_empty());
+    }
+
+    #[test]
+    fn test_trailing_separator_is_tolerated_but_a_second_document_is_not() {
+        let trailing = "name: forward0\n---\n";
+        let second = "name: forward0\n---\nname: forward1\n";
+        let dir = std::env::temp_dir();
+        let trailing_path = dir.join(format!("fwd-sep-{}.yaml", std::process::id()));
+        let second_path = dir.join(format!("fwd-two-{}.yaml", std::process::id()));
+        std::fs::write(&trailing_path, trailing).expect("the fixture must be written");
+        std::fs::write(&second_path, second).expect("the fixture must be written");
+
+        let tolerated = load_request(&trailing_path).expect("a bare separator must be tolerated");
+        let refused = load_request(&second_path).expect_err("a second document must be refused");
+        std::fs::remove_file(&trailing_path).ok();
+        std::fs::remove_file(&second_path).ok();
+
+        assert_eq!("forward0", tolerated.name);
+        assert!(refused.to_string().contains("more than one document"));
+    }
+
+    #[test]
+    fn test_file_rejects_duplicate_keys() {
+        let yaml = "rules:\n  - action:\n      target: t\n      mode: OUT\n      mode: NONE\n";
+
+        let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(yaml);
+
+        assert!(
+            parsed
+                .expect_err("a duplicate mapping key must be refused")
+                .to_string()
+                .contains("duplicate")
+        );
+    }
+
+    #[test]
+    fn test_file_expands_merge_keys() {
         let yaml = r#"
 rules:
-  - target: "t"
-    mode: "NONE"
-    counter: ""
-    devices: []
-    vlan_ranges: []
-    srcs:
-      - 2001:db8::/32
-      - 192.0.2.0/24
-      - 10.0.0.0/8
-    dsts: []
+  - &base
+    action:
+      target: base
+      mode: OUT
+      counter: base
+    vlan_ranges:
+      - from: 0
+        to: 100
+  - <<: *base
+    devices:
+      - name: eth0
 "#;
+        let path = std::env::temp_dir().join(format!("fwd-merge-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).expect("the fixture must be written");
 
-        let config: ForwardConfig = serde_yaml::from_str(yaml).expect("mixed families must parse");
-        let rules: Vec<forwardpb::Rule> = config.try_into().expect("mixed families must convert");
+        let request = load_request(&path).expect("a merged document must load");
+        std::fs::remove_file(&path).ok();
 
-        assert_eq!(vec![v4_net("192.0.2.0/24"), v4_net("10.0.0.0/8")], rules[0].sources4);
-        assert_eq!(vec![v6_net("2001:db8::/32")], rules[0].sources6);
+        assert_eq!(2, request.rules.len());
+        assert_eq!("base", request.rules[1].action.as_ref().expect("merged action").target);
+        assert_eq!(
+            vec![filterpb::pb::Device { name: "eth0".to_string() }],
+            request.rules[1].devices
+        );
+        assert_eq!(request.rules[0].vlan_ranges, request.rules[1].vlan_ranges);
     }
 
     #[test]
-    fn a_bi_contiguous_v6_mask_round_trips_through_the_rule_file() {
-        let rule = forwardpb::Rule {
-            action: Some(forwardpb::Action {
-                target: "t".to_string(),
-                mode: forwardpb::ForwardMode::None as i32,
-                counter: "c".to_string(),
-            }),
-            devices: vec![],
-            vlan_ranges: vec![],
-            sources4: vec![],
-            // The mask hole sits exactly at the /64 boundary, which the
-            // filter compiler accepts.
-            sources6: vec![v6_net("2001:db8::/ffff:ffff:ffff:0:ffff::")],
-            destinations4: vec![],
-            destinations6: vec![],
+    fn test_bind_request_name_fills_checks_and_refuses() {
+        let mut nameless = UpdateConfigRequest::default();
+        bind_request_name(&mut nameless, "forward0").expect("an empty name must bind");
+        assert_eq!("forward0", nameless.name);
+
+        let mut matching = UpdateConfigRequest {
+            name: "forward0".to_string(),
+            ..Default::default()
         };
+        bind_request_name(&mut matching, "forward0").expect("a matching name must pass");
 
-        let config = ForwardConfig::try_from(vec![rule.clone()]).expect("a bi-contiguous v6 network must render");
-        let yaml = serde_yaml::to_string(&config).expect("forward config must serialize");
-        let parsed: ForwardConfig = serde_yaml::from_str(&yaml).expect("forward config must deserialize");
-        let rebuilt: Vec<forwardpb::Rule> = parsed.try_into().expect("forward config must convert back");
-
-        assert_eq!(vec![rule], rebuilt);
-    }
-
-    #[test]
-    fn an_unrecognised_mode_number_is_shown_but_rejected_by_update() {
-        let rule = forwardpb::Rule {
-            action: Some(forwardpb::Action {
-                target: "t".to_string(),
-                mode: 99,
-                counter: String::new(),
-            }),
-            devices: vec![],
-            vlan_ranges: vec![],
-            sources4: vec![],
-            sources6: vec![],
-            destinations4: vec![],
-            destinations6: vec![],
+        let mut mismatched = UpdateConfigRequest {
+            name: "other".to_string(),
+            ..Default::default()
         };
-
-        let config = ForwardConfig::try_from(vec![rule]).expect("an unrecognised mode must not blank the show");
-        assert!(serde_yaml::to_string(&config).is_ok());
-
-        let rebuilt: Result<Vec<forwardpb::Rule>, _> = config.try_into();
-        assert!(rebuilt.is_err());
+        let err = bind_request_name(&mut mismatched, "forward0").expect_err("a mismatch must be refused");
+        assert!(err.contains("other"));
+        assert!(err.contains("forward0"));
     }
 }
