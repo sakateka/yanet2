@@ -8,13 +8,13 @@ import (
 	_ "google.golang.org/grpc/encoding/gzip"
 
 	"github.com/yanet-platform/yanet2/common/go/operator"
-	op "github.com/yanet-platform/yanet2/operators/decap/internal/operator"
+	op "github.com/yanet-platform/yanet2/operators/generic/operator"
 )
 
 func main() {
 	if err := operator.Run(
-		"yanet-decap-operator",
-		"YANET decap operator — owns N decap functions across gateways",
+		"yanet-generic-operator",
+		"YANET generic operator — pushes file-defined module configs and functions to gateways",
 		factory,
 	); err != nil {
 		fmt.Printf("ERROR: %v\n", err)

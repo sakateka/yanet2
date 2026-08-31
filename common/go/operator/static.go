@@ -19,17 +19,20 @@ import (
 )
 
 // StaticTarget is one module config pushed to every gateway on each
-// reconcile pass, with the function that references it.
+// reconcile pass, or one function published after every config, or both.
 type StaticTarget struct {
 	// Name labels the target in logs and errors, the module config's name
 	// for the module operators.
 	Name string
 	// Method is the unary gRPC method that replaces the module config,
 	// spelled as "package.Service/Method".
+	//
+	// Empty when the target only publishes a function.
 	Method string
 	// Request is the message the method receives, sent as is.
 	Request proto.Message
-	// Function is published after the config, nil when the target owns none.
+	// Function is published after the configs, nil when the target owns
+	// none.
 	Function *ynpb.Function
 	// IgnorePdump leaves pdump modules on both sides out of the function
 	// comparison.
@@ -140,7 +143,11 @@ func staticTargets(targets []StaticTarget) ([]StaticTarget, error) {
 	functions := map[string]bool{}
 	out := make([]StaticTarget, 0, len(targets))
 	for idx, target := range targets {
-		if _, err := resolveMethod(target.Method, target.Request); err != nil {
+		if target.Method == "" && target.Request == nil {
+			if target.Function == nil {
+				return nil, fmt.Errorf("target %d: neither a method nor a function", idx)
+			}
+		} else if _, err := resolveMethod(target.Method, target.Request); err != nil {
 			return nil, fmt.Errorf("target %d: %w", idx, err)
 		}
 		if target.Name == "" {
@@ -187,45 +194,73 @@ type resolvedMethod struct {
 	Reply protoreflect.MessageType
 }
 
-// resolveMethod turns the spelled method into a call, refusing one the binary
-// does not know, a streaming one, or a request of another type.
-func resolveMethod(method string, request proto.Message) (resolvedMethod, error) {
+// methodDescriptor finds the spelled method among the descriptors linked
+// into this binary, refusing a streaming one.
+func methodDescriptor(method string) (protoreflect.MethodDescriptor, error) {
 	service, name, ok := strings.Cut(strings.TrimPrefix(method, "/"), "/")
 	if !ok || service == "" || name == "" {
-		return resolvedMethod{}, fmt.Errorf("method %q must be spelled as package.Service/Method", method)
+		return nil, fmt.Errorf("method %q must be spelled as package.Service/Method", method)
 	}
 	descriptor, err := protoregistry.GlobalFiles.FindDescriptorByName(protoreflect.FullName(service))
 	if err != nil {
-		return resolvedMethod{}, fmt.Errorf("service %q is not linked into this binary", service)
+		return nil, fmt.Errorf("service %q is not linked into this binary", service)
 	}
 	serviceDescriptor, ok := descriptor.(protoreflect.ServiceDescriptor)
 	if !ok {
-		return resolvedMethod{}, fmt.Errorf("%q is not a service", service)
+		return nil, fmt.Errorf("%q is not a service", service)
 	}
-	methodDescriptor := serviceDescriptor.Methods().ByName(protoreflect.Name(name))
-	if methodDescriptor == nil {
-		return resolvedMethod{}, fmt.Errorf("service %q has no method %q", service, name)
+	found := serviceDescriptor.Methods().ByName(protoreflect.Name(name))
+	if found == nil {
+		return nil, fmt.Errorf("service %q has no method %q", service, name)
 	}
-	if methodDescriptor.IsStreamingClient() || methodDescriptor.IsStreamingServer() {
-		return resolvedMethod{}, fmt.Errorf(
+	if found.IsStreamingClient() || found.IsStreamingServer() {
+		return nil, fmt.Errorf(
 			"method %q is streaming, a module config needs a unary one", method,
 		)
+	}
+	return found, nil
+}
+
+// NewMethodRequest builds an empty request for the spelled unary method,
+// resolved against the descriptors linked into this binary.
+func NewMethodRequest(method string) (proto.Message, error) {
+	descriptor, err := methodDescriptor(method)
+	if err != nil {
+		return nil, err
+	}
+	request, err := protoregistry.GlobalTypes.FindMessageByName(descriptor.Input().FullName())
+	if err != nil {
+		return nil, fmt.Errorf(
+			"request %s of method %q is not linked into this binary",
+			descriptor.Input().FullName(), method,
+		)
+	}
+	return request.New().Interface(), nil
+}
+
+// resolveMethod turns the spelled method into a call, refusing one the binary
+// does not know, a streaming one, or a request of another type.
+func resolveMethod(method string, request proto.Message) (resolvedMethod, error) {
+	descriptor, err := methodDescriptor(method)
+	if err != nil {
+		return resolvedMethod{}, err
 	}
 	if request == nil || !request.ProtoReflect().IsValid() {
 		return resolvedMethod{}, fmt.Errorf("method %q has no request", method)
 	}
-	want := methodDescriptor.Input().FullName()
+	want := descriptor.Input().FullName()
 	if got := request.ProtoReflect().Descriptor().FullName(); got != want {
 		return resolvedMethod{}, fmt.Errorf("method %q takes %s, not %s", method, want, got)
 	}
-	reply, err := protoregistry.GlobalTypes.FindMessageByName(methodDescriptor.Output().FullName())
+	reply, err := protoregistry.GlobalTypes.FindMessageByName(descriptor.Output().FullName())
 	if err != nil {
 		return resolvedMethod{}, fmt.Errorf(
 			"reply %s of method %q is not linked into this binary",
-			methodDescriptor.Output().FullName(), method,
+			descriptor.Output().FullName(), method,
 		)
 	}
-	return resolvedMethod{Full: "/" + service + "/" + name, Reply: reply}, nil
+	full := "/" + string(descriptor.Parent().FullName()) + "/" + string(descriptor.Name())
+	return resolvedMethod{Full: full, Reply: reply}, nil
 }
 
 // staticSource holds the targets for the lifetime of the operator and never
@@ -275,6 +310,9 @@ func dialGateway(cfg GatewayConfig) (*grpc.ClientConn, error) {
 func (m *staticGatewayActuator) Apply(ctx context.Context, targets []StaticTarget) error {
 	var err error
 	for _, target := range targets {
+		if target.Method == "" && target.Request == nil {
+			continue
+		}
 		method, e := resolveMethod(target.Method, target.Request)
 		if e != nil {
 			err = errors.Join(err, e)

@@ -235,6 +235,11 @@ func Test_NewStaticModuleOperator_RejectsInvalidTargets(t *testing.T) {
 			wantErr: `function "fn:one" has no chains`,
 		},
 		{
+			name:    "neither method nor function",
+			targets: []operator.StaticTarget{{Name: "empty"}},
+			wantErr: "neither a method nor a function",
+		},
+		{
 			name:    "function declared twice",
 			targets: []operator.StaticTarget{pipelineTarget("fn:one"), pipelineTarget("fn:one")},
 			wantErr: `function "fn:one" is declared twice`,
@@ -357,4 +362,48 @@ func Test_StaticModuleOperator_ReadinessUnderInstanceName(t *testing.T) {
 	err = group.Wait()
 	require.True(t, err == nil || errors.Is(err, context.Canceled), "got %v", err)
 	require.NoError(t, op.Close())
+}
+
+// Test_NewStaticModuleOperator_AcceptsFunctionOnlyTarget verifies that a
+// target may publish only a function, with no module config of its own.
+func Test_NewStaticModuleOperator_AcceptsFunctionOnlyTarget(t *testing.T) {
+	target := pipelineTarget("fn:one")
+	target.Method = ""
+	target.Request = nil
+
+	op, err := operator.NewStaticModuleOperator(
+		"forward",
+		operator.StaticConfig{
+			Server:   operator.GRPCServerConfig{Endpoint: xcfg.MustNonEmptyString("[::1]:0")},
+			Gateways: []operator.GatewayConfig{{Name: "gw0", Endpoint: xcfg.MustNonEmptyString("[::1]:0")}},
+			Register: operator.RegisterConfig{Interval: xcfg.MustNonZero(time.Second)},
+			Reconcile: operator.ReconcileConfig{
+				Interval:       xcfg.MustNonZero(time.Second),
+				InitialBackoff: xcfg.MustNonZero(time.Millisecond),
+				MaxBackoff:     xcfg.MustNonZero(time.Second),
+			},
+		},
+		[]operator.StaticTarget{target},
+	)
+	require.NoError(t, err)
+	require.NoError(t, op.Close())
+}
+
+// Test_NewMethodRequest_BuildsTypedRequest verifies that the spelled
+// method yields an empty request of the method's own input type.
+func Test_NewMethodRequest_BuildsTypedRequest(t *testing.T) {
+	request, err := operator.NewMethodRequest(ynpb.PipelineService_Update_FullMethodName)
+	require.NoError(t, err)
+
+	typed, ok := request.(*ynpb.UpdatePipelineRequest)
+	require.True(t, ok, "got %T", request)
+	require.True(t, proto.Equal(typed, &ynpb.UpdatePipelineRequest{}))
+}
+
+// Test_NewMethodRequest_RejectsUnlinkedService verifies that a method of a
+// service this binary does not link is refused.
+func Test_NewMethodRequest_RejectsUnlinkedService(t *testing.T) {
+	_, err := operator.NewMethodRequest("modules.lldp.controlplane.lldppb.v1.LLDPService/UpdateConfig")
+
+	require.ErrorContains(t, err, "not linked into this binary")
 }
