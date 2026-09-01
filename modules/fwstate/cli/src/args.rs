@@ -73,11 +73,11 @@ pub struct UpdateCmd {
     pub dst_ether: Option<MacAddr>,
 
     /// Multicast synchronization endpoint (e.g., "[ff02::1]:9999").
-    #[arg(long, value_name = "[ADDR]:PORT", conflicts_with_all = ["dst_addr_multicast", "port_multicast"])]
+    #[arg(long, value_name = "[ADDR]:PORT", conflicts_with_all = ["dst_addr_multicast", "port_multicast", "no_multicast"])]
     pub multicast: Option<SocketAddrV6>,
 
     /// Unicast synchronization endpoint (e.g., "[2001:db8::2]:9999").
-    #[arg(long, value_name = "[ADDR]:PORT", conflicts_with_all = ["dst_addr_unicast", "port_unicast", "clear_unicast"])]
+    #[arg(long, value_name = "[ADDR]:PORT", conflicts_with_all = ["dst_addr_unicast", "port_unicast", "no_unicast"])]
     pub unicast: Option<SocketAddrV6>,
 
     /// Deprecated: use --multicast instead.
@@ -96,9 +96,16 @@ pub struct UpdateCmd {
     #[arg(long)]
     pub port_unicast: Option<u16>,
 
-    /// Remove unicast while keeping a configured multicast endpoint.
-    #[arg(long, conflicts_with_all = ["unicast", "dst_addr_unicast", "port_unicast"])]
-    pub clear_unicast: bool,
+    /// Remove the multicast synchronization endpoint.
+    #[arg(
+        long,
+        conflicts_with_all = ["multicast", "dst_addr_multicast", "port_multicast", "no_unicast"]
+    )]
+    pub no_multicast: bool,
+
+    /// Remove the unicast synchronization endpoint.
+    #[arg(long, conflicts_with_all = ["unicast", "dst_addr_unicast", "port_unicast", "no_multicast"])]
+    pub no_unicast: bool,
 
     /// TCP SYN-ACK timeout (e.g., "60s", "5m", "1h")
     #[arg(long, value_parser = parse_duration)]

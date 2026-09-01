@@ -463,6 +463,19 @@ func (m *FWStateService) unpublishConfig(name string) {
 // validateSyncConfigUpdate rejects explicit request values that would be lost
 // or truncated while merging through the C representation.
 func validateSyncConfigUpdate(cfg *fwstatepb.SyncConfig) error {
+	addresses := []struct {
+		name string
+		addr []byte
+	}{
+		{"src_addr", cfg.GetSrcAddr().GetAddr()},
+		{"dst_addr_multicast", cfg.GetDstAddrMulticast().GetAddr()},
+		{"dst_addr_unicast", cfg.GetDstAddrUnicast().GetAddr()},
+	}
+	for _, address := range addresses {
+		if len(address.addr) != 0 && len(address.addr) != 16 {
+			return status.Errorf(codes.InvalidArgument, "%s must contain exactly 16 bytes", address.name)
+		}
+	}
 	if portMulticast := cfg.GetPortMulticast(); portMulticast > maxSyncPort {
 		return status.Errorf(codes.InvalidArgument, "port_multicast %d exceeds maximum allowed value %d", portMulticast, maxSyncPort)
 	}

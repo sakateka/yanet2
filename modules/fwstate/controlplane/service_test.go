@@ -20,6 +20,7 @@ func Test_ValidateSyncConfigUpdate(t *testing.T) {
 		portMulticast uint32
 		portUnicast   uint32
 		dstEther      uint64
+		srcAddr       []byte
 		dstMulticast  []byte
 		dstUnicast    []byte
 		wantErr       bool
@@ -50,20 +51,38 @@ func Test_ValidateSyncConfigUpdate(t *testing.T) {
 			wantErr:  true,
 		},
 		{
+			name:    "short source address",
+			srcAddr: make([]byte, 4),
+			wantErr: true,
+		},
+		{
 			name:         "multicast address without port",
-			dstMulticast: []byte{1},
+			dstMulticast: make([]byte, 16),
 			wantErr:      true,
 		},
 		{
+			name:          "short multicast address",
+			portMulticast: 1,
+			dstMulticast:  make([]byte, 4),
+			wantErr:       true,
+		},
+		{
 			name:       "unicast address without port",
-			dstUnicast: []byte{1},
+			dstUnicast: make([]byte, 16),
 			wantErr:    true,
+		},
+		{
+			name:        "long unicast address",
+			portUnicast: 1,
+			dstUnicast:  make([]byte, 17),
+			wantErr:     true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &fwstatepb.SyncConfig{
+				SrcAddr:       &commonpb.IPAddress{Addr: tc.srcAddr},
 				PortMulticast: tc.portMulticast,
 				PortUnicast:   tc.portUnicast,
 				DstEther:      &commonpb.MACAddress{Addr: tc.dstEther},
