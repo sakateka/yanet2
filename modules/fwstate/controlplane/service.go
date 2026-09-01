@@ -463,18 +463,14 @@ func (m *FWStateService) unpublishConfig(name string) {
 // validateSyncConfigUpdate rejects explicit request values that would be lost
 // or truncated while merging through the C representation.
 func validateSyncConfigUpdate(cfg *fwstatepb.SyncConfig) error {
-	addresses := []struct {
-		name string
-		addr []byte
-	}{
-		{"src_addr", cfg.GetSrcAddr().GetAddr()},
-		{"dst_addr_multicast", cfg.GetDstAddrMulticast().GetAddr()},
-		{"dst_addr_unicast", cfg.GetDstAddrUnicast().GetAddr()},
+	if err := validateSyncAddressUpdate("src_addr", cfg.GetSrcAddr().GetAddr()); err != nil {
+		return err
 	}
-	for _, address := range addresses {
-		if len(address.addr) != 0 && len(address.addr) != 16 {
-			return status.Errorf(codes.InvalidArgument, "%s must contain exactly 16 bytes", address.name)
-		}
+	if err := validateSyncAddressUpdate("dst_addr_multicast", cfg.GetDstAddrMulticast().GetAddr()); err != nil {
+		return err
+	}
+	if err := validateSyncAddressUpdate("dst_addr_unicast", cfg.GetDstAddrUnicast().GetAddr()); err != nil {
+		return err
 	}
 	if portMulticast := cfg.GetPortMulticast(); portMulticast > maxSyncPort {
 		return status.Errorf(codes.InvalidArgument, "port_multicast %d exceeds maximum allowed value %d", portMulticast, maxSyncPort)
@@ -490,6 +486,13 @@ func validateSyncConfigUpdate(cfg *fwstatepb.SyncConfig) error {
 	}
 	if len(cfg.GetDstAddrUnicast().GetAddr()) != 0 && cfg.GetPortUnicast() == 0 {
 		return status.Error(codes.InvalidArgument, "port_unicast is required when dst_addr_unicast is set")
+	}
+	return nil
+}
+
+func validateSyncAddressUpdate(name string, addr []byte) error {
+	if len(addr) != 0 && len(addr) != 16 {
+		return status.Errorf(codes.InvalidArgument, "%s must contain exactly 16 bytes", name)
 	}
 	return nil
 }
