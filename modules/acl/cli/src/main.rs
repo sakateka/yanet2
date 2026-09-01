@@ -191,6 +191,7 @@ fn print_rule_metrics_table(metrics: &[commonpb::Metric]) {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ACLConfig {
     rules: Vec<aclpb::Rule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -620,6 +621,13 @@ mod test {
         let content = include_str!("../../../../tests/functional/testdata/acl+fwstate.yaml");
         let config: ACLConfig = serde_yaml::from_str(content).expect("acl+fwstate.yaml fixture must deserialize");
         assert!(!config.rules.is_empty());
+    }
+
+    #[test]
+    fn test_acl_config_rejects_legacy_sync_config() {
+        let err = serde_yaml::from_str::<ACLConfig>("rules: []\nsync_config: {}\n").unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `sync_config`"));
     }
 
     #[test]

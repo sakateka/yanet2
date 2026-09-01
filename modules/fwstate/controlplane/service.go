@@ -217,7 +217,7 @@ func (m *FWStateService) UpdateConfig(
 	if err := fwstatemap.ValidateMapName(req.GetMapNameV6()); err != nil {
 		return nil, err
 	}
-	if err := validateSyncPorts(req.SyncConfig); err != nil {
+	if err := validateSyncConfigUpdate(req.SyncConfig); err != nil {
 		return nil, err
 	}
 
@@ -460,17 +460,23 @@ func (m *FWStateService) unpublishConfig(name string) {
 	delete(m.configs, name)
 }
 
-// validateSyncPorts rejects sync config ports that do not fit into the
-// C-side uint16 port field.
-//
-// A zero port is allowed at this boundary because it can represent an omitted
-// destination; validation of the merged config enforces complete pairs.
-func validateSyncPorts(cfg *fwstatepb.SyncConfig) error {
+// validateSyncConfigUpdate rejects explicit request values that would be lost
+// or truncated while merging through the C representation.
+func validateSyncConfigUpdate(cfg *fwstatepb.SyncConfig) error {
 	if portMulticast := cfg.GetPortMulticast(); portMulticast > maxSyncPort {
 		return status.Errorf(codes.InvalidArgument, "port_multicast %d exceeds maximum allowed value %d", portMulticast, maxSyncPort)
 	}
 	if portUnicast := cfg.GetPortUnicast(); portUnicast > maxSyncPort {
 		return status.Errorf(codes.InvalidArgument, "port_unicast %d exceeds maximum allowed value %d", portUnicast, maxSyncPort)
+	}
+	if dstEther := cfg.GetDstEther(); dstEther != nil && dstEther.GetAddr()>>48 != 0 {
+		return status.Error(codes.InvalidArgument, "dst_ether must be an EUI-48 address")
+	}
+	if len(cfg.GetDstAddrMulticast().GetAddr()) != 0 && cfg.GetPortMulticast() == 0 {
+		return status.Error(codes.InvalidArgument, "port_multicast is required when dst_addr_multicast is set")
+	}
+	if len(cfg.GetDstAddrUnicast().GetAddr()) != 0 && cfg.GetPortUnicast() == 0 {
+		return status.Error(codes.InvalidArgument, "port_unicast is required when dst_addr_unicast is set")
 	}
 	return nil
 }
@@ -486,8 +492,6 @@ func validateSyncConfig(cfg *fwstatepb.SyncConfig) error {
 
 	if dstEther := cfg.GetDstEther(); dstEther == nil {
 		missing = append(missing, "dst_ether")
-	} else if dstEther.GetAddr()>>48 != 0 {
-		return status.Error(codes.InvalidArgument, "dst_ether must be an EUI-48 address")
 	} else {
 		eui := dstEther.EUI48()
 		if isAllZeroBytes(eui[:]) {

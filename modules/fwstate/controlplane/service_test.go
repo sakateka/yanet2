@@ -12,13 +12,16 @@ import (
 	"github.com/yanet-platform/yanet2/modules/fwstate/controlplane/fwstatepb/v1"
 )
 
-// TestValidateSyncPorts verifies that ports above the uint16 range are
-// rejected with InvalidArgument, while zero and boundary values pass.
-func TestValidateSyncPorts(t *testing.T) {
+// Test_ValidateSyncConfigUpdate verifies that explicit values which would be
+// lost or truncated by the C representation are rejected before merging.
+func Test_ValidateSyncConfigUpdate(t *testing.T) {
 	cases := []struct {
 		name          string
 		portMulticast uint32
 		portUnicast   uint32
+		dstEther      uint64
+		dstMulticast  []byte
+		dstUnicast    []byte
 		wantErr       bool
 	}{
 		{
@@ -41,6 +44,21 @@ func TestValidateSyncPorts(t *testing.T) {
 			portUnicast: 65536,
 			wantErr:     true,
 		},
+		{
+			name:     "MAC outside EUI-48",
+			dstEther: 0x100333300000001,
+			wantErr:  true,
+		},
+		{
+			name:         "multicast address without port",
+			dstMulticast: []byte{1},
+			wantErr:      true,
+		},
+		{
+			name:       "unicast address without port",
+			dstUnicast: []byte{1},
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -48,9 +66,16 @@ func TestValidateSyncPorts(t *testing.T) {
 			cfg := &fwstatepb.SyncConfig{
 				PortMulticast: tc.portMulticast,
 				PortUnicast:   tc.portUnicast,
+				DstEther:      &commonpb.MACAddress{Addr: tc.dstEther},
+				DstAddrMulticast: &commonpb.IPAddress{
+					Addr: tc.dstMulticast,
+				},
+				DstAddrUnicast: &commonpb.IPAddress{
+					Addr: tc.dstUnicast,
+				},
 			}
 
-			err := validateSyncPorts(cfg)
+			err := validateSyncConfigUpdate(cfg)
 			if !tc.wantErr {
 				require.NoError(t, err)
 				return
@@ -93,17 +118,6 @@ func TestValidateSyncConfigDestinations(t *testing.T) {
 
 		err := validateSyncConfig(cfg)
 		require.NoError(t, err)
-	})
-
-	t.Run("MAC outside EUI-48", func(t *testing.T) {
-		cfg := newConfig()
-		cfg.DstEther = &commonpb.MACAddress{Addr: 0x100333300000001}
-		cfg.DstAddrMulticast = &commonpb.IPAddress{Addr: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}}
-
-		err := validateSyncConfig(cfg)
-		require.Error(t, err)
-		require.Equal(t, codes.InvalidArgument, status.Code(err))
-		require.Contains(t, err.Error(), "EUI-48")
 	})
 
 	t.Run("unicast only", func(t *testing.T) {

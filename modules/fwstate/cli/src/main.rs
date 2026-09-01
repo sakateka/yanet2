@@ -66,24 +66,12 @@ fn merged_map_names(current: &ShowConfigResponse, cmd: &UpdateCmd) -> Result<(St
     ))
 }
 
-fn update_unicast_endpoint(sync_config: &mut SyncConfig, cmd: &UpdateCmd) -> Result<(), &'static str> {
-    if cmd.clear_unicast {
-        if sync_config.dst_addr_multicast.is_none() || sync_config.port_multicast == 0 {
-            return Err("--clear-unicast requires a configured multicast endpoint");
-        }
-        sync_config.dst_addr_unicast = None;
-        sync_config.port_unicast = 0;
-        return Ok(());
+fn clear_unicast_endpoint(sync_config: &mut SyncConfig) -> Result<(), &'static str> {
+    if sync_config.dst_addr_multicast.is_none() || sync_config.port_multicast == 0 {
+        return Err("--clear-unicast requires a configured multicast endpoint");
     }
-
-    if let Some(dst_addr_unicast) = cmd.dst_addr_unicast {
-        sync_config.dst_addr_unicast = Some(IpAddress::from(IpAddr::V6(dst_addr_unicast)));
-    }
-
-    if let Some(port_unicast) = cmd.port_unicast {
-        sync_config.port_unicast = u32::from(port_unicast);
-    }
-
+    sync_config.dst_addr_unicast = None;
+    sync_config.port_unicast = 0;
     Ok(())
 }
 
@@ -119,7 +107,7 @@ impl FWStateService {
                     output::empty_with_hint(
                         format_args!("No FWState configurations found."),
                         format_args!(
-                            "provision maps with 'yanet-cli-fwstatemap create --name <name> --kind <v4|v6>', then create a config with 'yanet-cli-fwstate update --name <name> --map-name-v4 <map> --map-name-v6 <map> --src-addr <addr> --dst-addr-multicast <addr> --port-multicast <port>'"
+                            "provision maps with 'yanet-cli-fwstatemap create --name <name> --kind <v4|v6>', then create a config with 'yanet-cli-fwstate update --name <name> --map-name-v4 <map> --map-name-v6 <map> --src-addr <addr> --dst-ether <mac> --multicast <[addr]:port>'"
                         ),
                     );
                     return;
@@ -204,15 +192,30 @@ impl FWStateService {
             sync_config.dst_ether = Some(MacAddress::from(dst_ether));
         }
 
+        if let Some(multicast) = cmd.multicast {
+            sync_config.dst_addr_multicast = Some(IpAddress::from(IpAddr::V6(*multicast.ip())));
+            sync_config.port_multicast = u32::from(multicast.port());
+        }
         if let Some(dst_addr_multicast) = cmd.dst_addr_multicast {
             sync_config.dst_addr_multicast = Some(IpAddress::from(IpAddr::V6(dst_addr_multicast)));
         }
-
         if let Some(port_multicast) = cmd.port_multicast {
             sync_config.port_multicast = u32::from(port_multicast);
         }
 
-        update_unicast_endpoint(&mut sync_config, &cmd).map_err(|err| self.service.invalid("update", err))?;
+        if cmd.clear_unicast {
+            clear_unicast_endpoint(&mut sync_config).map_err(|err| self.service.invalid("update", err))?;
+        }
+        if let Some(unicast) = cmd.unicast {
+            sync_config.dst_addr_unicast = Some(IpAddress::from(IpAddr::V6(*unicast.ip())));
+            sync_config.port_unicast = u32::from(unicast.port());
+        }
+        if let Some(dst_addr_unicast) = cmd.dst_addr_unicast {
+            sync_config.dst_addr_unicast = Some(IpAddress::from(IpAddr::V6(dst_addr_unicast)));
+        }
+        if let Some(port_unicast) = cmd.port_unicast {
+            sync_config.port_unicast = u32::from(port_unicast);
+        }
 
         // Convert timeouts from Duration to nanoseconds if provided
         if let Some(tcp_syn_ack) = cmd.tcp_syn_ack {
@@ -311,6 +314,8 @@ mod tests {
             map_name_v6: map_name_v6.map(str::to_string),
             src_addr: None,
             dst_ether: None,
+            multicast: None,
+            unicast: None,
             dst_addr_multicast: None,
             port_multicast: None,
             dst_addr_unicast: None,
@@ -376,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_unicast_endpoint_clears_address_and_port() {
+    fn test_clear_unicast_endpoint_keeps_multicast() {
         let mut sync_config = SyncConfig {
             dst_addr_multicast: Some(IpAddress::from(IpAddr::V6(core::net::Ipv6Addr::LOCALHOST))),
             port_multicast: 9999,
@@ -384,10 +389,8 @@ mod tests {
             port_unicast: 10000,
             ..Default::default()
         };
-        let mut cmd = update_cmd("cfg", None, None);
-        cmd.clear_unicast = true;
 
-        update_unicast_endpoint(&mut sync_config, &cmd).unwrap();
+        clear_unicast_endpoint(&mut sync_config).unwrap();
 
         assert_eq!(None, sync_config.dst_addr_unicast);
         assert_eq!(0, sync_config.port_unicast);
@@ -396,17 +399,15 @@ mod tests {
     }
 
     #[test]
-    fn test_update_unicast_endpoint_rejects_clearing_last_destination() {
+    fn test_clear_unicast_endpoint_rejects_last_destination() {
         let mut sync_config = SyncConfig {
             dst_addr_unicast: Some(IpAddress::from(IpAddr::V6(core::net::Ipv6Addr::LOCALHOST))),
             port_unicast: 10000,
             ..Default::default()
         };
         let current = sync_config.clone();
-        let mut cmd = update_cmd("cfg", None, None);
-        cmd.clear_unicast = true;
 
-        let err = update_unicast_endpoint(&mut sync_config, &cmd).unwrap_err();
+        let err = clear_unicast_endpoint(&mut sync_config).unwrap_err();
 
         assert_eq!("--clear-unicast requires a configured multicast endpoint", err);
         assert_eq!(current, sync_config);
