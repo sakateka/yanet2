@@ -6,41 +6,80 @@ reader's matching atomics. Run it on a real arm64 machine. On x86-64 the
 fence compiles to no instruction and stores are never reordered, so an x86 run
 only checks that the harness works.
 
-## Prerequisites
+## One command
 
-- An idle arm64 Linux box with 4 or more CPUs. Hugepages and a NIC are not
-  needed.
-- gcc, meson, ninja, cmake and pkg-config, plus the libraries the build
-  needs: libyaml (`libyaml-dev`; pkg-config must find `yaml-0.1`), python3
-  with pyelftools, and libnuma headers. Also Go 1.24+, binutils
-  (`objdump`), util-linux (`taskset`, `lscpu`), git and make. The script
-  lists anything missing before it starts building.
+On an idle arm64 Linux box with 4 or more CPUs (hugepages and a NIC are
+not needed), with git, curl and sudo:
+
+```bash
+git clone -b test/ring-arm64-check https://github.com/sakateka/yanet2.git yanet2-arm64-check && cd yanet2-arm64-check && objects/ring/tests/arm64-check-nix.sh
+```
+
+`arm64-check-nix.sh` does three things:
+
+1. If `nix` is not installed, it explains what the official multi-user
+   installer does and asks before running
+   `sh <(curl --proto '=https' --tlsv1.2 -L https://nixos.org/nix/install) --daemon`.
+   The installer needs sudo, creates `/nix`, the `nixbld` users and the
+   `nix-daemon` service, and asks its own questions. The script then
+   loads `/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh` and
+   continues in the same run. An existing Nix install is used as is.
+2. It enters the devShell pinned in `devshell/flake.nix` and
+   `devshell/flake.lock` (gcc 13 as in CI, meson 1.9.1, Go 1.25, cargo,
+   protoc and its Go plugins, python3 with pyelftools, libyaml, numactl,
+   rdma-core, binutils, util-linux). Flakes are enabled with
+   `--extra-experimental-features 'nix-command flakes'` for this command
+   only; `nix.conf` is not edited. The shell starts from an empty
+   environment, so nothing from the host toolchain or library paths leaks
+   into the build.
+3. It runs `arm64-check.sh` in that shell with the remaining arguments.
+
+Options:
+
+- `--quick` (passed to `arm64-check.sh`): a short smoke run, about 2-3
+  minutes after the build. The default run takes about 10-15 minutes after
+  the build.
+- `--yes`: install Nix without asking (for unattended runs; without a
+  terminal the script refuses to install unless `--yes` is given).
+- `--dry-run`: print the installer and `nix develop` commands instead of
+  running them.
+
+First-run time on top of the check: the Nix install takes 1-3 minutes;
+the first devShell entry downloads the pinned nixpkgs source and about
+600 MiB of binaries from cache.nixos.org (a few minutes, nothing is
+compiled); the first build fetches the git submodules and Go modules and
+compiles DPDK and the tree (several minutes, depending on the core
+count). Later runs reuse all of it.
+
+The report lands in `arm64-check-<hostname>-<date>.txt` in the repository
+root.
+
+If you already have a checkout, fetch the branch from the fork instead:
+`git fetch https://github.com/sakateka/yanet2.git test/ring-arm64-check && git checkout -B test/ring-arm64-check FETCH_HEAD`.
+
+## Without Nix
+
+`arm64-check.sh` also runs directly on a host that has the tools:
+
+- gcc, meson, ninja, cmake, pkg-config, flex and bison, plus the libraries
+  the build needs: libyaml (`libyaml-dev`; pkg-config must find
+  `yaml-0.1`), python3 with pyelftools, libnuma headers and rdma-core
+  (`libibverbs-dev`, for the DPDK mlx5 drivers). cargo and rustc build the
+  regex archive `lib/counters` links. Also Go
+  1.24.13+, binutils (`objdump`), util-linux (`taskset`, `lscpu`), git and
+  make. The script lists anything missing before it starts building.
 - protoc, protoc-gen-go and protoc-gen-go-grpc, but only when the
   `*.pb.go` files have not been generated yet (always true on a fresh
   clone).
 - Network access on the first run: git submodules and Go modules are
   downloaded.
 
-On a clean machine with Nix, the portable yanet2 devShell provides all of
-these (its flake supports `aarch64-linux`). Copy the
-`yanet2-devshell` flake directory to the box and run the commands below
-inside `nix develop path:<dir>/yanet2-devshell`.
-
-## Commands
-
 ```bash
-git clone -b test/ring-arm64-check https://github.com/sakateka/yanet2.git yanet2-arm64-check
-cd yanet2-arm64-check && objects/ring/tests/arm64-check.sh
+objects/ring/tests/arm64-check.sh [--quick]
 ```
 
-If you already have a checkout, fetch the branch from the fork instead:
-`git fetch https://github.com/sakateka/yanet2.git test/ring-arm64-check && git checkout -B test/ring-arm64-check FETCH_HEAD`.
-
-Use `--quick` for a short smoke run (about 2-3 minutes after the build).
-The default run takes about 10-15 minutes after the build. The first
-build (DPDK and the whole tree) adds several minutes, depending on the
-core count. The script reuses an existing configured `build/` and never
-reconfigures it.
+The script reuses an existing configured `build/` and never reconfigures
+it.
 
 ## What it checks
 

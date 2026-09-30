@@ -165,7 +165,7 @@ fi
 echo "git:      $(git rev-parse --abbrev-ref HEAD 2>/dev/null) $(git rev-parse --short HEAD 2>/dev/null)"
 git status --short 2>/dev/null | sed 's/^/          /' | head -20 || true
 
-required=(git gcc cc meson ninja go objdump taskset python3 awk nproc)
+required=(git gcc cc meson ninja go cargo objdump taskset python3 awk nproc)
 proto_missing=()
 while IFS= read -r proto; do
 	if [[ ! -f "${proto%.proto}.pb.go" ]]; then
@@ -177,7 +177,8 @@ if ((${#proto_missing[@]})); then
 	required+=(make protoc protoc-gen-go protoc-gen-go-grpc)
 fi
 if [[ ! -e "$BUILD_DIR" ]]; then
-	required+=(cmake pkg-config)
+	# cmake, flex and bison build the libpcap subproject.
+	required+=(cmake pkg-config flex bison)
 fi
 missing=()
 for tool in "${required[@]}"; do
@@ -205,7 +206,7 @@ for tool in gcc meson ninja go protoc objdump; do
 done
 
 if ((${#missing[@]})); then
-	die preflight "missing prerequisites: ${missing[*]}"
+	die preflight "missing prerequisites: ${missing[*]} (objects/ring/tests/arm64-check-nix.sh runs the check in a Nix shell that has them all)"
 fi
 if [[ $ARCH != aarch64 && $ARCH != arm64 ]]; then
 	log "WARNING: not aarch64; the barrier checks only report, and the stress cannot reproduce a store reordering on this CPU"
