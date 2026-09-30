@@ -75,88 +75,50 @@ own.
 
 ## Ordering contract
 
-The writer is the sole producer for its worker and never takes a lock or
-issues a read-modify-write on either index:
+The writer is the sole mutator of both indices and uses no lock and no
+read-modify-write:
 
-1. Read its own `write_idx` and `readable_idx` with relaxed loads: nothing
-   else writes them, so coherence alone returns its latest stores.
-2. If the new record does not fit, walk whole oldest records locally to
-   the first boundary that leaves room (or to `write_idx` on a corrupt
-   length, see Overwrite semantics), then publish that final position
-   with one release **store** of `readable_idx`.
-3. Issue a release fence, still before touching any evicted byte. Steps 2
-   and 3 run only when something was evicted.
-4. Copy the frame and payload with an ordinary bulk `memcpy`.
-5. Publish the record with a release store of the locally computed
-   `write_idx`.
+1. Read its own `write_idx` and `readable_idx` with relaxed loads.
+2. If the record does not fit, walk whole oldest records locally (to
+   `write_idx` on a corrupt length) and publish the final boundary with
+   one release store of `readable_idx`.
+3. Issue a release fence before touching any evicted byte. Steps 2 and 3
+   run only when something was evicted.
+4. `memcpy` the frame and payload.
+5. Publish the record with a release store of `write_idx`.
 
-`readable_idx` advances once per eviction, not once per evicted record,
-so it is not an eviction counter: a reader only needs the final boundary
-visible before any byte it covers is overwritten, and intermediate
-boundaries add nothing. Loss statistics need a dedicated counter.
+`readable_idx` moves once per eviction, not once per evicted record: it
+is not an eviction counter.
 
-The reader, in `objects/ring/bindings/go/cring`, keeps its own contract:
-acquire-load both indices, copy the bytes into a private buffer, advance
-its read cursor with `atomic.Add`, reload `readable_idx` with an acquire
-load, drop whatever prefix that recheck shows was invalidated during the
-copy, and only then parse what remains. Both the atomic add and the
-atomic reload are load-bearing on arm64; neither may become a plain
-access, and the recheck may not move above the add.
+The reader (`objects/ring/bindings/go/cring`) acquire-loads both
+indices, copies into a private buffer, advances its cursor with
+`atomic.Add`, acquire-reloads `readable_idx` and drops the prefix that
+the recheck shows was invalidated before parsing. The add and the reload
+must stay atomic and in this order.
 
-**Happens-before on arm64.** Writer: `stlr readable` → `dmb` → data
-stores. The fence orders the `readable_idx` store before every later
-store, so any reader that observes an overwritten byte is guaranteed to
-observe the new `readable_idx` afterwards. Reader: data loads → the
-release half of `atomic.Add` (`ldaddal`, or `ldaxr`/`stlxr` without LSE)
-→ `ldar readable`. Go atomics are sequentially consistent (RCsc), so an
-acquire load after a release operation is never reordered above it: the
-copy's loads complete before the recheck. If a copied byte was
-overwritten, the recheck sees the eviction that covers it and drops that
-prefix.
+**Why it is correct.** If the reader copied any overwritten byte, its
+recheck must see the eviction that covers it. arm64: the writer's fence
+orders the `readable_idx` store before the data stores; on the reader
+side the release half of the add followed by the acquire reload keeps
+the copy's loads before the recheck (release→acquire is never
+reordered). x86-64: TSO keeps stores after earlier stores and loads
+after earlier loads, so no fence instruction is needed.
 
-**Happens-before on x86-64.** TSO never reorders a store with an earlier
-store or a load with an earlier load, so the writer's `readable_idx`
-store precedes its data stores and the reader's copy precedes its
-recheck without any fence instruction; the `lock xadd` of the cursor
-add is a full barrier anyway.
-
-| Writer operation | Reader operation | x86-64 | arm64 |
+| Writer | Reader | x86-64 | arm64 |
 |---|---|---|---|
-| Relaxed load of own indices | — | `mov` | `ldr` |
-| Release store of final `readable_idx` | Acquire recheck of `readable_idx` | `mov` / `mov` | `stlr` / `ldar` |
-| Release fence before overwriting | Release half of cursor `atomic.Add` | none (compiler barrier) / `lock xadd` | `dmb ish` (GCC 16: `dmb ishld` + `dmb ishst`) / `ldaddal` or `ldaxr`+`stlxr` |
-| Bulk `memcpy` of frame and payload | Bulk `copy` into a private buffer | plain stores / loads | plain stores / loads |
-| Release store of `write_idx` | Acquire snapshot of `write_idx` | `mov` / `mov` | `stlr` / `ldar` |
+| Release store of `readable_idx` | Acquire recheck | `mov` / `mov` | `stlr` / `ldar` |
+| Release fence | Release half of cursor add | none / `lock xadd` | `dmb ish` (or `dmb ishld` + `dmb ishst`) / `ldaddal` or `ldaxr`+`stlxr` |
+| `memcpy` | `copy` | plain | plain |
+| Release store of `write_idx` | Acquire snapshot | `mov` / `mov` | `stlr` / `ldar` |
 
-**Why the fence:** a release store orders the accesses before it, not the
-ones after it. Without step 3 a weakly ordered CPU (arm64) may make the
-overwriting payload stores visible before the advanced readable position,
-and a reader's recheck would accept bytes the writer has already started
-overwriting. The fence costs one barrier per evicting prepare on arm64,
-none on x86-64. pdump's own writer still lacks this fence; it is replaced
-by this ring when pdump migrates.
+**Compiler dependency.** GCC and clang treat `atomic_thread_fence` as a
+full compiler barrier, so the `memcpy` stores are not hoisted above it
+even where it emits no instruction.
 
-**Compiler dependency:** GCC and clang treat `atomic_thread_fence` as a
-full compiler barrier, so the plain `memcpy` stores are never hoisted
-above it even on x86-64 where it emits no instruction. The arm64 check
-harness (`objects/ring/tests/arm64-check.sh`) disassembles the writer and
-the Go reader to guard this and the instruction selection above.
-
-Verified instruction selection (GCC 13 x86-64 `-O2`; cross GCC 16
-aarch64 `-mcpu=neoverse-n1` and `-march=armv8-a+crc`, `-O2`): x86-64
-has no `mfence`/`sfence` and no `lock`-prefixed instruction in the
-writer; aarch64 has one `stlr` of `readable_idx` followed by one release
-fence, shared by the normal and corrupt-length eviction paths, no
-`ldadd`, and the `stlr` publication of `write_idx`. This shows code
-generation, not cross-core behaviour; runtime validation on arm64
-hardware is the harness's stress section.
-
-**What this does not claim:** the bulk `memcpy` and the reader's plain
-byte reads are ordinary, non-atomic accesses racing the writer's
-concurrent copy by design — this is not portable ISO C data-race-free
-code. Correctness rests on whole-record invalidation before the copy and
-the reader's copy-then-recheck discarding any prefix that invalidation
-touched, not on the copy itself being race-free.
+**Not claimed:** the bulk copies are ordinary accesses that race by
+design; this is not ISO C data-race-free code. Correctness rests on
+invalidating whole records before overwriting them and on the reader's
+copy-then-recheck.
 
 ## Pdump capture status
 
