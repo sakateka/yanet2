@@ -9,6 +9,7 @@ cp_dependencies = [
 includes = include_directories('../../..')
 
 sources = files(
+  'ring_layout.c',
   'ring_object.c',
 )
 

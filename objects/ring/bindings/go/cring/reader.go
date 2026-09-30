@@ -6,6 +6,8 @@ import "C"
 import (
 	"encoding/binary"
 	"sync/atomic"
+
+	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring/internal/ringabi"
 )
 
 // RecordFrameSize is the wire size of the frame preceding every record's
@@ -140,11 +142,15 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	}
 	m.src.CopyRange(m.buf[before:after], readable, size)
 
-	// This add is both the cursor advance HasMore reads from another
-	// goroutine and a memory fence: it orders the copy above against the
-	// readable-index reload below, so the recheck can never observe a
-	// value the CPU reordered ahead of the copy it must invalidate. Do
-	// not replace it with a plain increment.
+	// Both this atomic add and the atomic reload below are load-bearing on
+	// arm64: never make either a plain access or move the recheck above it.
+	//
+	// Besides advancing the cursor another goroutine polls, the add's
+	// release half pairs with the acquire reload (RCsc release then
+	// acquire) so the copy above completes before the recheck reads the
+	// readable position; otherwise the recheck could miss an eviction
+	// whose overwrite the copy already saw. On x86-64 the ordering comes
+	// from TSO, but the same code must stay correct on both.
 	m.readIdx.Add(size)
 
 	_, latest := m.src.Indices()
@@ -176,7 +182,7 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 			return records
 		}
 
-		skip := align4(totalLen)
+		skip := ringabi.Align4(totalLen)
 		if int(skip) > len(m.buf) {
 			return records
 		}
@@ -191,10 +197,4 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	}
 
 	return records
-}
-
-// align4 rounds a record length up to the 4-byte boundary every record
-// starts at, matching the C ring_align4.
-func align4(totalLen uint32) uint32 {
-	return (totalLen + 3) &^ 3
 }

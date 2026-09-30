@@ -4,9 +4,10 @@
  *
  * Physical wrap round-trips the opaque payload untouched, a full ring
  * evicts whole records at a record boundary rather than tearing one in
- * half, an invalid record size never touches the ring or its sequence
- * counter, the sequence counter wraps from UINT32_MAX to 0 without a gap,
- * and one worker's writes never perturb another worker's metadata.
+ * half, a corrupt length drops the backlog instead of walking it, an
+ * invalid record size never touches the ring or its sequence counter, the
+ * sequence counter wraps from UINT32_MAX to 0 without a gap, and one
+ * worker's writes never perturb another worker's metadata.
  */
 
 #include "common/test_assert.h"
@@ -150,6 +151,84 @@ run_ring_overwrite_evicts_whole_records_test() {
 			data[i],
 			expected,
 			"record 4 must occupy the evicted slot"
+		);
+	}
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// One prepare that must free several records evicts all of them and lands
+// readable_idx on the boundary after the last one evicted.
+static int
+run_ring_eviction_spans_multiple_records_test() {
+	const uint32_t ring_size = 64;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	// Four 16-byte records fill the ring; a 40-byte record needs three of
+	// them gone, leaving only the fourth (at [48,64)) readable.
+	write_fixed_record(&ring, data, 0xB0, 16);
+	write_fixed_record(&ring, data, 0xB1, 16);
+	write_fixed_record(&ring, data, 0xB2, 16);
+	write_fixed_record(&ring, data, 0xB3, 16);
+
+	TEST_ASSERT_EQUAL(
+		ring_worker_prepare(&ring, data, 40),
+		0,
+		"prepare must succeed by evicting"
+	);
+	TEST_ASSERT_EQUAL(
+		(long)ring.readable_idx,
+		48L,
+		"eviction must stop on the first boundary that fits the record"
+	);
+	TEST_ASSERT_EQUAL(
+		(long)ring.write_idx, 64L, "prepare must not move write_idx"
+	);
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// A corrupt length at the oldest record makes the eviction drop the whole
+// backlog by catching readable_idx up to write_idx.
+static int
+run_ring_eviction_corrupt_length_catches_up_test() {
+	const uint32_t ring_size = 64;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	write_fixed_record(&ring, data, 0xC0, 16);
+	write_fixed_record(&ring, data, 0xC1, 16);
+	write_fixed_record(&ring, data, 0xC2, 16);
+	write_fixed_record(&ring, data, 0xC3, 16);
+
+	struct {
+		const char *name;
+		uint32_t total_len;
+	} cases[] = {
+		{"zero length", 0},
+		{"length past the write position", 32 + 64},
+	};
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		// Rewind to the full ring and corrupt the oldest frame.
+		ring.readable_idx = 0;
+		memcpy(data, &cases[i].total_len, sizeof(cases[i].total_len));
+
+		TEST_ASSERT_EQUAL(
+			ring_worker_prepare(&ring, data, 16),
+			0,
+			"%s: prepare must still succeed",
+			cases[i].name
+		);
+		TEST_ASSERT_EQUAL(
+			(long)ring.readable_idx,
+			(long)ring.write_idx,
+			"%s: readable_idx must catch up to write_idx",
+			cases[i].name
 		);
 	}
 
@@ -358,6 +437,10 @@ main(void) {
 		{"wrap_roundtrip", run_ring_wrap_roundtrip_test},
 		{"overwrite_evicts_whole_records",
 		 run_ring_overwrite_evicts_whole_records_test},
+		{"eviction_spans_multiple_records",
+		 run_ring_eviction_spans_multiple_records_test},
+		{"eviction_corrupt_length_catches_up",
+		 run_ring_eviction_corrupt_length_catches_up_test},
 		{"prepare_rejects_invalid_size",
 		 run_ring_prepare_rejects_invalid_size_test},
 		{"prepare_rejects_oversize_alignment_wraparound",

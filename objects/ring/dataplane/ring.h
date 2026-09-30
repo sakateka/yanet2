@@ -22,6 +22,12 @@
 #include "common/cache.h"
 #include "common/memory_address.h"
 
+// Readers in other languages decode the record frame as little-endian.
+_Static_assert(
+	__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+	"the ring wire format is little-endian"
+);
+
 #ifndef unlikely
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
@@ -81,12 +87,13 @@ _Static_assert(
 // Make an eviction visible to readers before any byte of the evicted
 // records is overwritten.
 //
-// Release ordering on the eviction itself only covers earlier accesses, so
-// a weakly ordered CPU (arm64) may expose the new bytes first; a reader
-// copying them would then pass its post-copy recheck and accept a torn
-// record. Cost: one `dmb ish` on arm64 per record that evicted something,
-// roughly tens of cycles with no memory traffic; no instruction on x86-64,
-// where it only stops the compiler from caching ring fields across it.
+// A release store only orders the accesses before it, so a weakly ordered
+// CPU (arm64) may expose the new bytes ahead of the new readable position;
+// a reader copying them would then pass its post-copy recheck and accept a
+// torn record. Cost: one barrier on arm64 per evicting prepare (`dmb ish`,
+// or `dmb ishld` plus `dmb ishst` from newer GCC), roughly tens of cycles
+// with no memory traffic; no instruction on x86-64, where it only keeps
+// the compiler from moving the data stores above it.
 static inline void
 ring_evict_fence(void) {
 	// arm64 check branch only: build with -DRING_TEST_NO_EVICT_FENCE to
@@ -97,13 +104,14 @@ ring_evict_fence(void) {
 }
 
 // Validate a record fits the ring and evict whole oldest records until it
-// does, without writing anything.
+// does, without writing any record bytes.
 //
 // Returns 0 on success. Returns -1 with errno EINVAL when total_len is
 // below the frame size or E2BIG when its aligned span exceeds the ring's
 // capacity; either failure leaves every index untouched. data is the
 // worker's data area, already resolved by the caller via ADDR_OF so
-// repeated calls for the same record do not each re-resolve it.
+// repeated calls for the same record do not each re-resolve it. An
+// eviction publishes only its final readable position, once.
 static inline int
 ring_worker_prepare(
 	struct ring_worker *ring, uint8_t *data, uint32_t total_len
@@ -123,20 +131,27 @@ ring_worker_prepare(
 	// aligned length and slipping past this guard.
 	uint32_t aligned_total_len = ring_align4(total_len);
 
-	// Evict whole oldest records until the occupied space leaves room
-	// for this record.
-	//
-	// This worker is the sole writer of both positions, so each is read
-	// once and advanced locally instead of being re-read right after its
-	// own atomic update; readers still observe one release advance per
-	// evicted record.
-	uint64_t write_idx = ring->write_idx;
-	uint64_t readable_idx = ring->readable_idx;
+	// This worker is the sole writer of both positions, so relaxed loads
+	// return its own latest stores; readers never write them.
+	uint64_t write_idx =
+		atomic_load_explicit(&ring->write_idx, memory_order_relaxed);
+	uint64_t readable_idx =
+		atomic_load_explicit(&ring->readable_idx, memory_order_relaxed);
 	uint64_t free_limit = ring->size - aligned_total_len;
 	if (write_idx - readable_idx <= free_limit) {
 		return 0;
 	}
 
+	// Walk whole oldest records until the occupied space leaves room for
+	// this one, then publish the final position once.
+	//
+	// A reader only needs the new boundary to be visible before any byte
+	// it covers is overwritten; intermediate record boundaries tell it
+	// nothing more, so one release store followed by the fence below is
+	// sufficient. The readable position is therefore not an eviction
+	// counter. Invalid length data at the walk position (zero, or running
+	// past the write position) would stall or overshoot the walk, so the
+	// eviction then drops everything and catches up to the write position.
 	do {
 		uint8_t *pos = data + (readable_idx & ring->mask);
 		uint32_t evicted_len;
@@ -147,24 +162,15 @@ ring_worker_prepare(
 			    !evicted_len ||
 			    readable_idx + evicted_len > write_idx
 		    )) {
-			// Invalid data at the current position: advancing
-			// further would either exceed write_idx or loop
-			// forever. Drop everything by catching up to
-			// write_idx instead.
-			atomic_store_explicit(
-				&ring->readable_idx,
-				write_idx,
-				memory_order_release
-			);
+			readable_idx = write_idx;
 			break;
 		}
-
-		atomic_fetch_add_explicit(
-			&ring->readable_idx, evicted_len, memory_order_release
-		);
 		readable_idx += evicted_len;
 	} while (write_idx - readable_idx > free_limit);
 
+	atomic_store_explicit(
+		&ring->readable_idx, readable_idx, memory_order_release
+	);
 	ring_evict_fence();
 	return 0;
 }
@@ -186,10 +192,12 @@ ring_worker_write(
 ) {
 	assert(ring->size >= offset + size);
 
+	// Sole writer: a relaxed load returns this worker's own last store.
+	uint64_t write_idx =
+		atomic_load_explicit(&ring->write_idx, memory_order_relaxed);
 	uint64_t written = 0;
 	while (written < size) {
-		uint64_t pos =
-			(ring->write_idx + offset + written) & ring->mask;
+		uint64_t pos = (write_idx + offset + written) & ring->mask;
 		uint64_t tail = ring->size - pos;
 		uint64_t remaining = size - written;
 		uint64_t chunk = remaining > tail ? tail : remaining;
@@ -222,7 +230,9 @@ ring_worker_commit(
 		ring, data, 0, (const uint8_t *)&frame, sizeof(frame)
 	);
 
-	uint64_t next_write_idx = ring->write_idx + ring_align4(total_len);
+	uint64_t next_write_idx =
+		atomic_load_explicit(&ring->write_idx, memory_order_relaxed) +
+		ring_align4(total_len);
 	atomic_store_explicit(
 		&ring->write_idx, next_write_idx, memory_order_release
 	);

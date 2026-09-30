@@ -1,8 +1,9 @@
 # arm64 check of the ring writer eviction fence
 
-`arm64-check.sh` checks the release fence the ring writer issues after it
-evicts old records. Run it on a real arm64 machine. On x86-64 the fence
-compiles to no instruction and stores are never reordered, so an x86 run
+`arm64-check.sh` checks how the ring writer publishes an eviction (one
+release store of the readable position, then a release fence) and the Go
+reader's matching atomics. Run it on a real arm64 machine. On x86-64 the
+fence compiles to no instruction and stores are never reordered, so an x86 run
 only checks that the harness works.
 
 ## Prerequisites
@@ -33,7 +34,7 @@ cd yanet2-arm64-check && objects/ring/tests/arm64-check.sh
 ```
 
 If you already have a checkout, fetch the branch from the fork instead:
-`git fetch origin test/ring-arm64-check && git checkout test/ring-arm64-check`.
+`git fetch https://github.com/sakateka/yanet2.git test/ring-arm64-check && git checkout -B test/ring-arm64-check FETCH_HEAD`.
 
 Use `--quick` for a short smoke run (about 2-3 minutes after the build).
 The default run takes about 10-15 minutes after the build. The first
@@ -48,20 +49,29 @@ reconfigures it.
 | preflight | Architecture, CPU model, tools. Fails if a tool is missing. |
 | build | Builds with meson, generates protobufs and prints DPDK's cache line size. Fails if the C build and DPDK disagree on it. Every Go build gets that size through `CGO_CPPFLAGS`, like the Makefile. |
 | correctness | `meson test ring ring_object pdump_ring` and `go test ./objects/ring/...`. |
-| codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and counts barriers in the writer. On aarch64 the fence build must contain `dmb ish` and the no-fence build must have fewer barriers. |
+| codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and disassembles the writer and the Go reader. On aarch64 the writer must publish each eviction with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).Read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
 | stress | A C writer thread overwrites a small ring at full speed while the production Go reader checks every record it returns. Runs cover both builds, several ring capacities and repetitions. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
 | performance | Runs `ring_bench` for both builds, pinned with `taskset`, and prints median ns/record. |
 
 The script exits non-zero only when there is a real failure (build, tests,
-codegen, or a torn record in the fence build).
+codegen on aarch64, or a torn record in the fence build).
 
 ## Reading the results
 
 The summary at the end shows PASS, FAIL or INFO for each section, followed
 by the tables:
 
-- Barrier counts: on aarch64 the fence column is at least 1 and the
-  no-fence column is lower.
+- Writer profile, one line per binary and build:
+  `fences=F after_stlr=S dmb=D ldadd=L lock=K`. On aarch64 the `fence`
+  rows need `F >= 1`, `S == F` (every fence right after the single
+  release store of the readable position) and `L == 0` (no
+  read-modify-write on it); the `nofence` rows need `D == 0`. `lock`
+  counts x86-64 lock-prefixed instructions and is 0 there too.
+- Go reader: `(*shmSource).Indices` shows `ldar=2` on aarch64 (the
+  acquire loads the snapshot and the recheck use). `(*Reader).Read`
+  shows `ldaddal >= 1`, or `ldaxr` and `stlxr` without LSE; Go builds
+  for plain ARMv8.0 contain both and pick one at run time. On x86-64
+  expect `lock_xadd=1` and zeros elsewhere.
 - Stress: `torn` is 0 for every `fence` row. `runs_torn` for the `nofence`
   rows counts the runs that reproduced the bug.
 - Benchmark: `fence%` is the cost of the fence, new(f) against new(nf).

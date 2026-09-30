@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # One-shot hardware check of the ring writer's eviction fence.
 #
-# Builds the tree, runs the ring unit tests, proves the fence is (and the
-# test-only knob removes) a barrier in the generated code, stress-tests the
-# Go reader against a full-speed C writer with and without the fence, and
-# benchmarks both writers. Everything is logged to
+# Builds the tree, runs the ring unit tests, checks in the generated code
+# that an eviction is one release store plus a fence (which the test-only
+# knob removes) and that the Go reader uses acquire/release atomics,
+# stress-tests the Go reader against a full-speed C writer with and without
+# the fence, and benchmarks both writers. Everything is logged to
 # arm64-check-<host>-<date>.txt in the repository root. See ARM64_CHECK.md.
 
 set -euo pipefail
@@ -111,7 +112,7 @@ summary() {
 	done
 	if [[ -s "$WORK/codegen.txt" ]]; then
 		echo
-		echo "Barrier instructions in the ring writer (fence vs no-fence build):"
+		echo "Codegen profiles (ring writer per build, Go reader):"
 		cat "$WORK/codegen.txt"
 	fi
 	if [[ -s "$WORK/stress-summary.txt" ]]; then
@@ -259,6 +260,11 @@ if [[ $MESON_CACHE_LINE != "$CACHE_LINE" ]]; then
 	die build "cache line mismatch between DPDK ($CACHE_LINE) and the meson C flags ($MESON_CACHE_LINE)"
 fi
 export CGO_CPPFLAGS="${CGO_CPPFLAGS:+$CGO_CPPFLAGS }-DYANET_CACHE_LINE_SIZE=$CACHE_LINE"
+# cgo does not track headers outside a package directory, so the Go build
+# cache can serve a writer compiled from an older ring header. Keying the
+# flags on the headers' content recompiles the cgo packages when they change.
+RING_HEADERS_SUM=$(cat objects/ring/dataplane/ring.h objects/ring/api/*.h | sha256sum | cut -c1-16)
+export CGO_CPPFLAGS="$CGO_CPPFLAGS -DRING_CHECK_HEADERS=$RING_HEADERS_SUM"
 echo "CGO_CPPFLAGS=$CGO_CPPFLAGS"
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -330,11 +336,8 @@ for variant in fence nofence; do
 		-o "$ROOT/$WORK/ring_bench-$variant") || die codegen "ring_bench ($variant) build failed"
 done
 
-if [[ $ARCH == aarch64 || $ARCH == arm64 ]]; then
-	BARRIER_RE='[[:space:]](dmb|dsb)[[:space:]]'
-else
-	BARRIER_RE='[[:space:]](mfence|sfence|lfence|lock)[[:space:]]|[[:space:]]lock '
-fi
+IS_ARM64=0
+[[ $ARCH == aarch64 || $ARCH == arm64 ]] && IS_ARM64=1
 
 # Disassemble the functions of a binary whose names match a regex.
 disasm_funcs() {
@@ -350,48 +353,158 @@ disasm_funcs() {
 	'
 }
 
-codegen_fail=()
-printf '%-10s %-56s %8s %8s\n' binary functions fence nofence >"$WORK/codegen.txt"
-check_barriers() {
-	local label=$1 funcs=$2 fence_bin=$3 nofence_bin=$4
-	local fence_asm="$WORK/$label-fence.asm" nofence_asm="$WORK/$label-nofence.asm"
-	disasm_funcs "$fence_bin" "$funcs" >"$fence_asm"
-	disasm_funcs "$nofence_bin" "$funcs" >"$nofence_asm"
-	if [[ ! -s $fence_asm || ! -s $nofence_asm ]]; then
-		codegen_fail+=("$label: functions /$funcs/ not found")
-		return
-	fi
-	local fence_n nofence_n
-	fence_n=$(grep -cE "$BARRIER_RE" "$fence_asm" || true)
-	nofence_n=$(grep -cE "$BARRIER_RE" "$nofence_asm" || true)
-	printf '%-10s %-56s %8s %8s\n' "$label" "$funcs" "$fence_n" "$nofence_n" >>"$WORK/codegen.txt"
-	echo "--- $label: functions in the fence build:"
-	grep -E '^[0-9a-f]+ <' "$fence_asm" | sed 's/^/    /'
-	echo "--- $label: barrier instructions with context (fence build):"
-	grep -E -B4 -A1 "$BARRIER_RE" "$fence_asm" | head -60 || true
-	echo "--- $label: barrier instructions (no-fence build):"
-	grep -E "$BARRIER_RE" "$nofence_asm" | head -20 || true
-	if [[ $ARCH == aarch64 || $ARCH == arm64 ]]; then
-		if ! grep -qE '[[:space:]]dmb[[:space:]]+ish$' "$fence_asm"; then
-			codegen_fail+=("$label: no 'dmb ish' in the fence build")
-		fi
-		if ((fence_n <= nofence_n)); then
-			codegen_fail+=("$label: the no-fence knob removed no barrier")
-		fi
-	fi
+# Summarise how a disassembled writer publishes an eviction, as
+# "fences=F after_stlr=S dmb=D ldadd=L lock=K".
+#
+# A release fence is one "dmb ish", or "dmb ishld" directly followed by
+# "dmb ishst" (newer GCC). after_stlr counts fences whose nearest preceding
+# memory or branch instruction is an stlr, i.e. the single release store of
+# the readable position. ldadd counts LSE adds and outline-atomic calls,
+# the read-modify-write the writer no longer issues; lock counts x86-64
+# lock-prefixed instructions, and dmb every data memory barrier.
+writer_profile() {
+	awk '
+		/^[0-9a-f]+ </ { next }
+		{
+			line = $0
+			sub(/^[ \t]*[0-9a-f]+:[ \t]*/, "", line)
+			n = split(line, f, /[ \t]+/)
+			if (n == 0 || f[1] == "") next
+			op = f[1]; arg = f[2]
+			if (op == "dmb") dmb++
+			if (op ~ /^ldadd/ || line ~ /__aarch64_ldadd/) ldadd++
+			if (op == "lock" || op ~ /^lock/) lock++
+			fence = 0
+			if (op == "dmb" && arg == "ish") {
+				fence = 1; back = nhist
+			} else if (op == "dmb" && arg == "ishst" && nhist > 0 && hist[nhist] == "dmb ishld") {
+				fence = 1; back = nhist - 1
+			}
+			if (fence) {
+				fences++
+				for (k = back; k > 0 && k > back - 8; k--) {
+					split(hist[k], h, " ")
+					if (h[1] ~ /^(ld|st|b|bl|br|blr|ret|cb|tb|dmb|dsb|cas|swp)/) break
+				}
+				if (k > 0 && k > back - 8 && h[1] == "stlr") after_stlr++
+			}
+			hist[++nhist] = op " " arg
+		}
+		END {
+			printf "fences=%d after_stlr=%d dmb=%d ldadd=%d lock=%d\n",
+				fences, after_stlr, dmb, ldadd, lock
+		}
+	' "$1"
 }
-check_barriers cring '^(ring_stress_run|ring_worker_prepare)' \
+
+# Read one "key=value" field out of a profile line.
+field() {
+	sed -n "s/.*\b$2=\([0-9]*\).*/\1/p" <<<"$1"
+}
+
+codegen_fail=()
+{
+	printf 'Writer (functions that inline the eviction):\n'
+	printf '%-10s %-8s %s\n' binary build profile
+} >"$WORK/codegen.txt"
+check_writer() {
+	local label=$1 funcs=$2 fence_bin=$3 nofence_bin=$4
+	local variant bin asm profile
+	for variant in fence nofence; do
+		bin=$fence_bin
+		[[ $variant == nofence ]] && bin=$nofence_bin
+		asm="$WORK/$label-$variant.asm"
+		disasm_funcs "$bin" "$funcs" >"$asm"
+		if [[ ! -s $asm ]]; then
+			codegen_fail+=("$label ($variant): functions /$funcs/ not found")
+			continue
+		fi
+		profile=$(writer_profile "$asm")
+		printf '%-10s %-8s %s\n' "$label" "$variant" "$profile" >>"$WORK/codegen.txt"
+		echo "--- $label ($variant): functions:"
+		grep -E '^[0-9a-f]+ <' "$asm" | sed 's/^/    /'
+		echo "--- $label ($variant): $profile; barriers and atomics with context:"
+		grep -E -B3 -A1 '[[:space:]](dmb|dsb|stlr|ldadd[a-z]*|mfence|sfence|lock)[[:space:]]|__aarch64_ldadd' \
+			"$asm" | head -60 || true
+		((IS_ARM64)) || continue
+		local fences after_stlr dmb ldadd
+		fences=$(field "$profile" fences)
+		after_stlr=$(field "$profile" after_stlr)
+		dmb=$(field "$profile" dmb)
+		ldadd=$(field "$profile" ldadd)
+		if ((ldadd != 0)); then
+			codegen_fail+=("$label ($variant): $ldadd ldadd on the readable position, expected one release store")
+		fi
+		if [[ $variant == fence ]]; then
+			if ((fences == 0)); then
+				codegen_fail+=("$label (fence): no release fence (dmb ish)")
+			elif ((after_stlr != fences)); then
+				codegen_fail+=("$label (fence): $((fences - after_stlr)) of $fences fences not right after an stlr")
+			fi
+		elif ((dmb != 0)); then
+			codegen_fail+=("$label (nofence): $dmb dmb left, the knob must remove the fence")
+		fi
+	done
+}
+check_writer cring '^(ring_stress_run|ring_worker_prepare)' \
 	"$WORK/cring-fence.test" "$WORK/cring-nofence.test"
-check_barriers ring_bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
+check_writer ring_bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
 	"$WORK/ring_bench-fence" "$WORK/ring_bench-nofence"
+
+# The Go reader: the index snapshot and recheck load through the shared
+# memory source, and the cursor add between the copy and the recheck.
+# Bracket expressions, not backslashes: awk -v would eat the escapes.
+READER_PKG='github[.]com/yanet-platform/yanet2/objects/ring/bindings/go/cring'
+READ_FUNC="^${READER_PKG}[.][(][*]Reader[)][.]Read\$"
+INDICES_FUNC="^${READER_PKG}[.][(][*]shmSource[)][.]Indices\$"
+disasm_funcs "$WORK/cring-fence.test" "$READ_FUNC" >"$WORK/reader-read.asm"
+disasm_funcs "$WORK/cring-fence.test" "$INDICES_FUNC" >"$WORK/reader-indices.asm"
+count_ops() {
+	awk -v re="$2" '
+		/^[0-9a-f]+ </ { next }
+		{
+			line = $0
+			sub(/^[ \t]*[0-9a-f]+:[ \t]*/, "", line)
+			split(line, f, /[ \t]+/)
+			if (f[1] ~ re) n++
+		}
+		END { print n + 0 }
+	' "$1"
+}
+if [[ ! -s $WORK/reader-read.asm || ! -s $WORK/reader-indices.asm ]]; then
+	codegen_fail+=("reader: (*Reader).Read or (*shmSource).Indices not found in the cring test binary")
+else
+	ldar=$(count_ops "$WORK/reader-indices.asm" '^ldar$')
+	ldaddal=$(count_ops "$WORK/reader-read.asm" '^ldaddal$')
+	ldaxr=$(count_ops "$WORK/reader-read.asm" '^ldaxr$')
+	stlxr=$(count_ops "$WORK/reader-read.asm" '^stlxr$')
+	xadd=$(grep -cE '[[:space:]]lock[[:space:]]+xadd' "$WORK/reader-read.asm" || true)
+	{
+		printf '\nGo reader (cring fence build):\n'
+		printf '(*shmSource).Indices  ldar=%s\n' "$ldar"
+		printf '(*Reader).Read        ldaddal=%s ldaxr=%s stlxr=%s lock_xadd=%s\n' \
+			"$ldaddal" "$ldaxr" "$stlxr" "$xadd"
+	} >>"$WORK/codegen.txt"
+	echo "--- reader: atomics in (*Reader).Read and (*shmSource).Indices:"
+	grep -hE '[[:space:]](ldar|ldaddal|ldaxr|stlxr|stlr|xadd|lock)[[:space:]]' \
+		"$WORK/reader-indices.asm" "$WORK/reader-read.asm" | head -20 || true
+	if ((IS_ARM64)); then
+		if ((ldar < 2)); then
+			codegen_fail+=("reader: (*shmSource).Indices has $ldar ldar, expected acquire loads of both indices")
+		fi
+		if ((ldaddal == 0)) && ((ldaxr == 0 || stlxr == 0)); then
+			codegen_fail+=("reader: (*Reader).Read has no ldaddal or ldaxr/stlxr pair for the cursor add")
+		fi
+	fi
+fi
 cat "$WORK/codegen.txt"
 
 if ((${#codegen_fail[@]})); then
 	set_status codegen FAIL "$(printf '%s; ' "${codegen_fail[@]}")"
-elif [[ $ARCH == aarch64 || $ARCH == arm64 ]]; then
-	set_status codegen PASS "fence build has 'dmb ish', no-fence build drops it"
+elif ((IS_ARM64)); then
+	set_status codegen PASS "writer: stlr then one fence per eviction, no ldadd, knob drops the fence; reader: ldar + ldaddal/ldaxr-stlxr"
 else
-	set_status codegen INFO "not aarch64: counts reported only (x86-64 emits no fence)"
+	set_status codegen INFO "not aarch64: profiles reported only (x86-64 emits no fence)"
 fi
 
 # ---------------------------------------------------------------------------
