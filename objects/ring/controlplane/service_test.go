@@ -1,6 +1,7 @@
 package ring_test
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -235,26 +236,31 @@ func Test_RingService_ListRings_SortedByName(t *testing.T) {
 	_, client := newRingService(t, 1)
 	ctx := t.Context()
 
-	created := []*ringpb.RingInfo{
-		{Name: "gamma", Capacity: 4096},
-		{Name: "alpha", Capacity: 64},
-		{Name: "beta", Capacity: 128},
+	// Enough rings that an unsorted map walk cannot match sorted order by
+	// chance; created in reverse so insertion order is not sorted either.
+	const ringCount = 16
+	want := make([]string, ringCount)
+	capacities := map[string]uint64{}
+	for idx := range ringCount {
+		want[idx] = fmt.Sprintf("ring-%02d", idx)
+		capacities[want[idx]] = uint64(64) << (idx % 4)
 	}
-	for _, info := range created {
-		_, err := client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: info.GetName(), Capacity: info.GetCapacity()})
+	for idx := ringCount - 1; idx >= 0; idx-- {
+		name := want[idx]
+		_, err := client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: name, Capacity: capacities[name]})
 		require.NoError(t, err)
 	}
 
 	list, err := client.ListRings(ctx, &ringpb.ListRingsRequest{})
 	require.NoError(t, err)
 	var names []string
-	capacities := map[string]uint64{}
+	got := map[string]uint64{}
 	for _, info := range list.GetRings() {
 		names = append(names, info.GetName())
-		capacities[info.GetName()] = info.GetCapacity()
+		got[info.GetName()] = info.GetCapacity()
 	}
-	require.Equal(t, []string{"alpha", "beta", "gamma"}, names)
-	require.Equal(t, map[string]uint64{"alpha": 64, "beta": 128, "gamma": 4096}, capacities)
+	require.Equal(t, want, names)
+	require.Equal(t, capacities, got)
 }
 
 // Test_RingService_CreateRing_InProcessValidation verifies that an in-process
