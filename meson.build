@@ -337,9 +337,6 @@ install_data(
 
 if not dataplane_only
   subdir('lib/controlplane/tests')
-  # The ring object test links the forward module and the plain device,
-  # which are declared after objects/.
-  subdir('objects/ring/tests')
   # Operator proto targets must exist before their consumers are declared.
   #
   # Meson resolves variables in subdir traversal order, so the control-plane

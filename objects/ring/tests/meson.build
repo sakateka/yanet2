@@ -16,22 +16,16 @@ ring_object_test = executable(
   ['object_test.c'],
   c_args: yanet_c_args,
   link_args: yanet_link_args + [
+    # Exports the test's stub module constructor to the harness's dlsym.
     '-Wl,-E',
-    '-Wl,--undefined=new_device_plain',
-    '-Wl,--export-dynamic-symbol=new_device_plain',
-    '-Wl,--undefined=new_module_forward',
-    '-Wl,--export-dynamic-symbol=new_module_forward',
   ],
   dependencies: [
     lib_dataplane_ut_dep,
     lib_logging_dep,
     lib_errors_dep,
-    lib_dev_plain_api,
-    lib_forward_cp_dep,
     lib_ring_objects_dep,
     libdpdk_dep,
   ],
-  link_with: [lib_dev_plain_dp, lib_forward_dp],
   include_directories: yanet_rootdir,
 )
 

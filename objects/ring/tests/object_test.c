@@ -16,11 +16,11 @@
 #include "common/test_assert.h"
 
 #include "lib/controlplane/agent/agent.h"
+#include "lib/controlplane/config/cp_module.h"
 #include "lib/controlplane/config/cp_object.h"
 #include "lib/controlplane/config/zone.h"
 #include "lib/dataplane/config/zone.h"
-
-#include "modules/forward/api/controlplane.h"
+#include "lib/dataplane/module/module.h"
 
 #include "objects/ring/api/ring_object.h"
 
@@ -33,9 +33,66 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define RING_OBJECT_TEST_MEMORY_LIMIT (2u * 1024u * 1024u)
+
+// Module type of the test-local stub that links a ring.
+#define RING_TEST_LINKER_MODULE "ring_test_linker"
+
+struct module *
+new_module_ring_test_linker(void);
+
+// Dataplane constructor of the stub linker module, resolved by the harness
+// through dlsym from this binary.
+//
+// The stub only gives cp_module_init a registered module type: the harness
+// never runs packets, so the module needs no packet or commit handler.
+struct module *
+new_module_ring_test_linker(void) {
+	struct module *module = (struct module *)calloc(1, sizeof(*module));
+	if (module == NULL) {
+		return NULL;
+	}
+	snprintf(
+		module->name,
+		sizeof(module->name),
+		"%s",
+		RING_TEST_LINKER_MODULE
+	);
+	return module;
+}
+
+// Creates a bare stub module config, owned by the caller until freed with
+// ring_test_linker_free.
+static struct cp_module *
+ring_test_linker_new(struct agent *agent, const char *name, yanet_error **err) {
+	struct cp_module *module = (struct cp_module *)memory_balloc(
+		&agent->memory_context, sizeof(*module)
+	);
+	if (module == NULL) {
+		yanet_error_add(err, "failed to allocate the linker module");
+		return NULL;
+	}
+	if (cp_module_init(module, agent, RING_TEST_LINKER_MODULE, name, err)) {
+		memory_bfree(&agent->memory_context, module, sizeof(*module));
+		return NULL;
+	}
+	return module;
+}
+
+// Destroys a stub module config once no generation references it.
+static int
+ring_test_linker_free(struct cp_module *module, yanet_error **err) {
+	if (cp_module_try_destroy(module, err)) {
+		return -1;
+	}
+	struct agent *agent = ADDR_OF(&module->agent);
+	cp_module_fini(module);
+	memory_bfree(&agent->memory_context, module, sizeof(*module));
+	return 0;
+}
 
 // The metadata struct is cache-line aligned and its size is a whole number
 // of cache lines, so an array of them never lets two workers share a line.
@@ -360,8 +417,12 @@ run_ring_object_delete_refused_while_linked_test(struct yanet_shm *shm) {
 	);
 
 	struct cp_module *module =
-		forward_module_config_init(agent, "ring-linker", &err);
-	TEST_ASSERT_NOT_NULL(module, "forward_module_config_init failed");
+		ring_test_linker_new(agent, "ring-linker", &err);
+	TEST_ASSERT_NOT_NULL(
+		module,
+		"ring_test_linker_new failed: %s",
+		err ? yanet_error_message(err) : "?"
+	);
 	uint64_t link_idx;
 	TEST_ASSERT_SUCCESS(
 		cp_module_link_object(
@@ -400,8 +461,15 @@ run_ring_object_delete_refused_while_linked_test(struct yanet_shm *shm) {
 
 	// Once the linking module is gone, the same delete goes through.
 	TEST_ASSERT_SUCCESS(
-		agent_delete_module(agent, "forward", "ring-linker", &err),
+		agent_delete_module(
+			agent, RING_TEST_LINKER_MODULE, "ring-linker", &err
+		),
 		"agent_delete_module failed: %s",
+		err ? yanet_error_message(err) : "?"
+	);
+	TEST_ASSERT_SUCCESS(
+		ring_test_linker_free(module, &err),
+		"freeing the unpublished linker module failed: %s",
 		err ? yanet_error_message(err) : "?"
 	);
 	TEST_ASSERT_SUCCESS(
@@ -596,21 +664,15 @@ int
 main(void) {
 	log_enable_name("debug");
 
-	const char *port_names[] = {"01:00.0"};
-	const char *mods_to_load[] = {"forward"};
-	const char *devs_to_load[] = {"plain"};
+	const char *mods_to_load[] = {RING_TEST_LINKER_MODULE};
 	const char *objs_to_load[] = {RING_OBJECT_TYPE};
 
 	struct dataplane_ut_config cfg = {
 		.cp_memory = 1u << 26,
 		.dp_memory = 1u << 20,
 		.worker_count = 2,
-		.devices = port_names,
-		.device_count = 1,
 		.modules = mods_to_load,
 		.module_count = 1,
-		.devices_to_load = devs_to_load,
-		.devices_to_load_count = 1,
 		.objects_to_load = objs_to_load,
 		.objects_to_load_count = 1,
 	};
