@@ -95,7 +95,14 @@ func (m *Writer) Capacity() uint32 {
 // Source returns the production record source for this writer's worker, so
 // a test reads back through the same path a real reader uses.
 func (m *Writer) Source() (cring.RecordSource, error) {
-	return cring.SourceFromRaw(m.object, m.workerIdx)
+	sources, err := cring.SourcesFromRaw(m.object)
+	if err != nil {
+		return nil, err
+	}
+	if m.workerIdx >= uint64(len(sources)) {
+		return nil, fmt.Errorf("worker index %d has no ring source", m.workerIdx)
+	}
+	return sources[m.workerIdx], nil
 }
 
 // NextSeqno peeks the sequence number the next commit would stamp, without

@@ -109,16 +109,6 @@ func DeleteObject(agent *ffi.Agent, name string) error {
 	return agent.DeleteObject(ObjectType, name)
 }
 
-// WorkerCount reports the number of per-worker rings behind this object,
-// fixed at creation from the dataplane's configured worker count.
-func (m *Object) WorkerCount() uint64 {
-	ptr := m.asRawPtr()
-	if ptr == nil {
-		return 0
-	}
-	return uint64(C.ring_object_worker_count(ptr))
-}
-
 // Capacity reports the per-worker data area size in bytes, fixed at
 // creation.
 func (m *Object) Capacity() uint32 {
@@ -129,55 +119,71 @@ func (m *Object) Capacity() uint32 {
 	return uint32(C.ring_object_capacity(ptr))
 }
 
-// Source resolves the RecordSource for one worker's ring through the C
-// accessors, so no caller does stride arithmetic across shared memory.
+// Sources resolves the RecordSource of every worker's ring through the C
+// accessors, so no caller does stride arithmetic across shared memory. The
+// slice is indexed by worker.
 //
-// OpenReader is the usual entry point; Source lets a caller wrap the real
+// OpenReaders is the usual entry point; Sources lets a caller wrap a real
 // source, for instance to drive the read protocol against externally paced
 // writer state.
-func (m *Object) Source(workerIdx uint64) (RecordSource, error) {
-	return SourceFromRaw(m.AsRawPtr(), workerIdx)
+func (m *Object) Sources() ([]RecordSource, error) {
+	return SourcesFromRaw(m.AsRawPtr())
 }
 
-// SourceFromRaw is Source for a raw ring object pointer, such as one a
+// SourcesFromRaw is Sources for a raw ring object pointer, such as one a
 // sibling cgo package resolved from a published generation.
-func SourceFromRaw(objPtr unsafe.Pointer, workerIdx uint64) (RecordSource, error) {
+func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 	if objPtr == nil {
 		return nil, errFreed
 	}
 	ptr := (*C.struct_cp_object)(objPtr)
 
-	count := uint64(C.ring_object_worker_count(ptr))
-	if workerIdx >= count {
-		return nil, fmt.Errorf("worker index %d exceeds worker count %d", workerIdx, count)
-	}
+	// The C accessor resolves no ring past the last worker, which ends the
+	// walk without exposing the worker count.
+	var sources []RecordSource
+	for idx := uint64(0); ; idx++ {
+		worker := C.ring_object_worker(ptr, C.uint64_t(idx))
+		if worker == nil {
+			break
+		}
+		data := C.ring_object_worker_data(ptr, C.uint64_t(idx))
+		if data == nil {
+			return nil, fmt.Errorf("worker %d has no data area", idx)
+		}
 
-	worker := C.ring_object_worker(ptr, C.uint64_t(workerIdx))
-	if worker == nil {
-		return nil, fmt.Errorf("worker index %d has no ring", workerIdx)
+		sources = append(sources, &shmSource{
+			writeIdx:    (*uint64)(unsafe.Pointer(&worker.write_idx)),
+			readableIdx: (*uint64)(unsafe.Pointer(&worker.readable_idx)),
+			data:        unsafe.Slice((*byte)(unsafe.Pointer(data)), uint32(worker.size)),
+			mask:        uint64(worker.mask),
+		})
 	}
-	data := C.ring_object_worker_data(ptr, C.uint64_t(workerIdx))
-	if data == nil {
-		return nil, fmt.Errorf("worker index %d has no data area", workerIdx)
+	if len(sources) == 0 {
+		return nil, errors.New("ring object has no worker rings")
 	}
-
-	return &shmSource{
-		writeIdx:    (*uint64)(unsafe.Pointer(&worker.write_idx)),
-		readableIdx: (*uint64)(unsafe.Pointer(&worker.readable_idx)),
-		data:        unsafe.Slice((*byte)(unsafe.Pointer(data)), uint32(worker.size)),
-		mask:        uint64(worker.mask),
-	}, nil
+	return sources, nil
 }
 
-// OpenReader opens an independent reader over one worker's ring, starting
-// at the ring's current oldest readable record.
+// OpenReaders opens one independent reader per worker's ring, each starting
+// at that ring's current oldest readable record. The slice is indexed by
+// worker, and every record a reader returns carries its worker index.
 //
-// Multiple readers may be opened over the same worker; each keeps its own
-// read cursor and does not affect the others.
-func (m *Object) OpenReader(workerIdx uint64) (*Reader, error) {
-	src, err := m.Source(workerIdx)
+// Calling it again opens another set of readers; each keeps its own read
+// cursor and does not affect the others.
+func (m *Object) OpenReaders() ([]*Reader, error) {
+	sources, err := m.Sources()
 	if err != nil {
 		return nil, err
 	}
-	return NewReader(workerIdx, m.Capacity(), src)
+
+	capacity := m.Capacity()
+	readers := make([]*Reader, 0, len(sources))
+	for idx, src := range sources {
+		reader, err := NewReader(uint64(idx), capacity, src)
+		if err != nil {
+			return nil, err
+		}
+		readers = append(readers, reader)
+	}
+	return readers, nil
 }

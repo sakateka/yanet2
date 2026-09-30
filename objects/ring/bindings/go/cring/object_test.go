@@ -59,16 +59,18 @@ func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 	}
 }
 
-// Test_Object_WorkerCountAndCapacity verifies that a created object reports
-// the dataplane's worker count and the capacity it was created with.
-func Test_Object_WorkerCountAndCapacity(t *testing.T) {
+// Test_Object_SourcesAndCapacity verifies that a created object resolves one
+// ring per dataplane worker and reports the capacity it was created with.
+func Test_Object_SourcesAndCapacity(t *testing.T) {
 	agent := newTestAgent(t, 3)
 
 	object, err := cring.NewObject(agent, "sized", 64)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = object.Free() })
 
-	require.Equal(t, uint64(3), object.WorkerCount())
+	sources, err := object.Sources()
+	require.NoError(t, err)
+	require.Len(t, sources, 3)
 	require.Equal(t, uint32(64), object.Capacity())
 }
 
@@ -118,11 +120,10 @@ func Test_Object_Free_LeavesHandleInert(t *testing.T) {
 	require.NoError(t, object.Free())
 	require.NoError(t, object.Free(), "a second Free must be a no-op")
 
-	require.Zero(t, object.WorkerCount())
 	require.Zero(t, object.Capacity())
-	_, err = object.Source(0)
+	_, err = object.Sources()
 	require.Error(t, err)
-	_, err = object.OpenReader(0)
+	_, err = object.OpenReaders()
 	require.Error(t, err)
 	require.Error(t, object.Publish())
 }

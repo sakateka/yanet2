@@ -297,14 +297,6 @@ ring_object_create(
 	return 0;
 }
 
-uint64_t
-ring_object_worker_count(const struct cp_object *cp_object) {
-	const struct ring_object *self =
-		container_of(cp_object, struct ring_object, cp_object);
-
-	return self->worker_count;
-}
-
 uint32_t
 ring_object_capacity(const struct cp_object *cp_object) {
 	const struct ring_object *self =

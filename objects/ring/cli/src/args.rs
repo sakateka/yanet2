@@ -7,7 +7,7 @@ pub enum ModeCmd {
     Create(CreateCmd),
     /// List registered ring objects.
     List,
-    /// Show the capacity and worker count of a named ring.
+    /// Show the capacity of a named ring.
     Show(ShowCmd),
     /// Delete a named ring.
     Delete(DeleteCmd),

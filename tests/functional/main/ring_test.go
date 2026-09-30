@@ -11,16 +11,14 @@ import (
 
 	"github.com/gopacket/gopacket/pcapgo"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/yanet-platform/yanet2/tests/functional/framework"
 )
 
 // ringInfo is one ring as the ring CLI renders it in JSON.
 type ringInfo struct {
-	Name        string `json:"name"`
-	Capacity    uint64 `json:"capacity"`
-	WorkerCount uint64 `json:"worker_count"`
+	Name     string `json:"name"`
+	Capacity uint64 `json:"capacity"`
 }
 
 // ringCLI runs the ring CLI with the given arguments in the guest.
@@ -62,29 +60,6 @@ func findRing(rings []ringInfo, name string) (ringInfo, bool) {
 		}
 	}
 	return ringInfo{}, false
-}
-
-// dataplaneWorkerCount returns the number of dataplane workers the package
-// harness declares, which is the per-worker ring count every ring has.
-func dataplaneWorkerCount(t *testing.T) uint64 {
-	t.Helper()
-	var config struct {
-		Dataplane struct {
-			Devices []struct {
-				Workers []struct{} `yaml:"workers"`
-			} `yaml:"devices"`
-		} `yaml:"dataplane"`
-	}
-	raw := framework.DataplaneConfig(framework.DataplaneOptions{
-		PacketRecircLimit: testPacketRecircLimit,
-	})
-	require.NoError(t, yaml.Unmarshal([]byte(raw), &config))
-	count := 0
-	for _, device := range config.Dataplane.Devices {
-		count += len(device.Workers)
-	}
-	require.Positive(t, count, "harness must declare dataplane workers")
-	return uint64(count)
 }
 
 // pdumpCaptureDport is the UDP destination port of the packets the pdump
@@ -183,7 +158,6 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		capacity     = uint64(64 << 10)
 		recreatedCap = uint64(128 << 10)
 	)
-	workers := dataplaneWorkerCount(t)
 
 	// A failed step may leave rings behind in the shared VM; remove them
 	// so later tests start from an empty registry.
@@ -205,7 +179,7 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		_, err := ringCLI(fw, fmt.Sprintf("create --name %s --capacity %d", ringName, capacity))
 		require.NoError(t, err, "ring create failed")
 
-		want := ringInfo{Name: ringName, Capacity: capacity, WorkerCount: workers}
+		want := ringInfo{Name: ringName, Capacity: capacity}
 		ring, listed := findRing(listRings(t, fw), ringName)
 		require.True(t, listed, "created ring must be listed")
 		require.Equal(t, want, ring)
@@ -270,7 +244,7 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		_, err := ringCLI(fw, fmt.Sprintf("create --name %s --capacity %d", ringName, recreatedCap))
 		require.NoError(t, err, "recreate after delete failed")
 		require.Equal(t,
-			ringInfo{Name: ringName, Capacity: recreatedCap, WorkerCount: workers},
+			ringInfo{Name: ringName, Capacity: recreatedCap},
 			showRing(t, fw, ringName),
 		)
 

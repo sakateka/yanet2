@@ -227,9 +227,8 @@ func (m *RingService) ListRings(
 // ringInfo builds the proto facts for one registered ring.
 func ringInfo(entry *ringEntry) *ringpb.RingInfo {
 	return &ringpb.RingInfo{
-		Name:        entry.Name,
-		Capacity:    uint64(entry.Object.Capacity()),
-		WorkerCount: entry.Object.WorkerCount(),
+		Name:     entry.Name,
+		Capacity: uint64(entry.Object.Capacity()),
 	}
 }
 

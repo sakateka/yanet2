@@ -28,17 +28,14 @@ service RingService {
   rpc DeleteRing(DeleteRingRequest) returns (DeleteRingResponse);
 }
 
-// RingInfo describes one registered ring: its name, capacity and worker
-// count, all fixed at creation.
+// RingInfo describes one registered ring: its name and capacity, both fixed
+// at creation.
 message RingInfo {
   // name identifies the ring.
   string name = 1;
   // capacity is the per-worker buffer size in bytes, fixed at creation as a
   // power of two and never resized afterward.
   uint64 capacity = 2;
-  // worker_count is the number of per-worker ring instances behind this
-  // name.
-  uint64 worker_count = 3;
 }
 
 // CreateRingRequest names the ring to create and its fixed per-worker

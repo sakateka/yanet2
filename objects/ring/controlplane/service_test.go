@@ -110,7 +110,7 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 }
 
 // Test_RingService_CreateShowList verifies that a created ring is reported by
-// both show and list with the same name, capacity and worker count.
+// both show and list with the same name and capacity.
 func Test_RingService_CreateShowList(t *testing.T) {
 	_, client := newRingService(t, 2)
 	ctx := t.Context()
@@ -122,7 +122,6 @@ func Test_RingService_CreateShowList(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "ring0", show.GetRing().GetName())
 	require.Equal(t, uint64(64), show.GetRing().GetCapacity())
-	require.Equal(t, uint64(2), show.GetRing().GetWorkerCount())
 
 	list, err := client.ListRings(ctx, &ringpb.ListRingsRequest{})
 	require.NoError(t, err)

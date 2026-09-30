@@ -43,8 +43,8 @@ its own.
   owning agent's arena is still free.
 - Capacity is fixed at `create` and never resized. A different capacity
   needs a new ring.
-- The worker count is not a create-time argument: it always follows the
-  dataplane's configured worker count.
+- The number of per-worker buffers is not a create-time argument and is
+  not reported: it always follows the dataplane's configured worker count.
 - Ring storage — each worker's buffer (capacity times worker count) plus
   the metadata array — is charged against the pdump module's agent
   memory: `memory_requirements` in the controlplane config, 16 MiB by
@@ -147,14 +147,13 @@ Create a ring with a 1 MiB per-worker capacity:
 yanet-cli-ring create --name captures --capacity 1MiB
 ```
 
-List every registered ring, sorted by name, as a `NAME`/`CAPACITY`/`WORKERS`
-table:
+List every registered ring, sorted by name, as a `NAME`/`CAPACITY` table:
 
 ```bash
 yanet-cli-ring list
 ```
 
-Show one ring's capacity and worker count:
+Show one ring's capacity:
 
 ```bash
 yanet-cli-ring show --name captures

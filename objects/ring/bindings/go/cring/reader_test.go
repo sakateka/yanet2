@@ -43,6 +43,26 @@ func newRingObject(t *testing.T, agent *ffi.Agent, name string, capacity uint32)
 	return object
 }
 
+// source returns the real record source of one worker's ring.
+func source(t *testing.T, object *cring.Object, workerIdx uint64) cring.RecordSource {
+	t.Helper()
+
+	sources, err := object.Sources()
+	require.NoError(t, err)
+	require.Less(t, workerIdx, uint64(len(sources)))
+	return sources[workerIdx]
+}
+
+// openReader opens a fresh reader over one worker's ring.
+func openReader(t *testing.T, object *cring.Object, workerIdx uint64) *cring.Reader {
+	t.Helper()
+
+	readers, err := object.OpenReaders()
+	require.NoError(t, err)
+	require.Less(t, workerIdx, uint64(len(readers)))
+	return readers[workerIdx]
+}
+
 // newWriter resolves the raw C writer primitives for one worker, to drive
 // records directly as the dataplane would.
 func newWriter(t *testing.T, object *cring.Object, workerIdx uint64) *ringwriter.Writer {
@@ -69,8 +89,7 @@ func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), seqno)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	records := reader.Read(1024)
 	require.Len(t, records, 1)
@@ -79,8 +98,8 @@ func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_Reader_Read_RoundTripAcrossWorkers verifies that a reader opened on
-// one worker never sees another worker's records.
+// Test_Reader_Read_RoundTripAcrossWorkers verifies that OpenReaders returns
+// one reader per worker and that each sees only its own worker's records.
 func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	const workerCount = 3
 
@@ -93,10 +112,11 @@ func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	for workerIdx := range workerCount {
-		reader, err := object.OpenReader(uint64(workerIdx))
-		require.NoError(t, err)
+	readers, err := object.OpenReaders()
+	require.NoError(t, err)
+	require.Len(t, readers, workerCount)
 
+	for workerIdx, reader := range readers {
 		records := reader.Read(1024)
 		require.Len(t, records, 1)
 		require.Equal(t, uint64(workerIdx), records[0].Worker)
@@ -120,8 +140,7 @@ func Test_Reader_Read_RoundTripSequentialWrites(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, seqnoFirst+1, seqnoSecond)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	records := reader.Read(1024)
 	require.Len(t, records, 2)
@@ -147,8 +166,7 @@ func Test_Reader_Read_SeqnoWrapsContiguously(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint32(0), seqnoAfterWrap)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	records := reader.Read(1024)
 	require.Len(t, records, 2)
@@ -169,8 +187,7 @@ func Test_Reader_WriteRecord_OversizedRejected(t *testing.T) {
 	require.Error(t, err)
 	require.Equal(t, before, writer.NextSeqno())
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 	require.Empty(t, reader.Read(1024))
 }
 
@@ -193,8 +210,7 @@ func Test_Reader_Read_CorruptFrameResyncsToWriteBoundary(t *testing.T) {
 	_, err = writer.WriteRecord([]byte("BBBBBBBB"))
 	require.NoError(t, err)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	// A small budget stops the copy inside the first payload, well short
 	// of the write position, so the cursor could land mid-record.
@@ -224,8 +240,7 @@ func Test_Reader_Read_CorruptFrameReturnsEarlierRecords(t *testing.T) {
 	_, err = writer.WriteRecord([]byte("dropped"))
 	require.NoError(t, err)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	records := reader.Read(1024)
 	require.Len(t, records, 1)
@@ -250,10 +265,8 @@ func Test_Reader_Read_TwoIndependentReadersSeeSameStream(t *testing.T) {
 	_, err := writer.WriteRecord([]byte("record-a"))
 	require.NoError(t, err)
 
-	readerOne, err := object.OpenReader(0)
-	require.NoError(t, err)
-	readerTwo, err := object.OpenReader(0)
-	require.NoError(t, err)
+	readerOne := openReader(t, object, 0)
+	readerTwo := openReader(t, object, 0)
 
 	recordsOne := readerOne.Read(1024)
 	require.Len(t, recordsOne, 1)
@@ -338,8 +351,7 @@ func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 			_, err := writer.WriteRecord([]byte("stale"))
 			require.NoError(t, err)
 
-			real, err := object.Source(0)
-			require.NoError(t, err)
+			real := source(t, object, 0)
 
 			fired := false
 			evict := func() {
@@ -387,8 +399,7 @@ func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 	_, err = writer.WriteRecord([]byte("survive-me!!")) // occupies [16,36)
 	require.NoError(t, err)
 
-	real, err := object.Source(0)
-	require.NoError(t, err)
+	real := source(t, object, 0)
 
 	fired := false
 	hooked := &hookedSource{real: real}
@@ -422,8 +433,7 @@ func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 	_, err := writer.WriteRecord(repeatedFrameSizePayload(16))
 	require.NoError(t, err)
 
-	real, err := object.Source(0)
-	require.NoError(t, err)
+	real := source(t, object, 0)
 
 	fired := false
 	hooked := &hookedSource{real: real}
@@ -473,8 +483,7 @@ func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 	_, err = writer.WriteRecord([]byte("BBBBBBBB")) // occupies [16,32)
 	require.NoError(t, err)
 
-	real, err := object.Source(0)
-	require.NoError(t, err)
+	real := source(t, object, 0)
 
 	fired := false
 	hooked := &hookedSource{real: real}
@@ -507,8 +516,7 @@ func Test_Reader_Read_RecordBytesAppendDoesNotCorruptLaterRecords(t *testing.T) 
 	_, err = writer.WriteRecord([]byte("second"))
 	require.NoError(t, err)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	records := reader.Read(1024)
 	require.Len(t, records, 2)
@@ -538,8 +546,7 @@ func Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial(t *testing.T) {
 	_, err := writer.WriteRecord(repeatedFrameSizePayload(16))
 	require.NoError(t, err)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 	require.Empty(t, reader.Read(12), "a partial record must stay buffered")
 
 	// 48 bytes exceed the 40 free, so this write evicts the whole
@@ -561,8 +568,7 @@ func Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords(t *testing.T) {
 	object := newRingObject(t, agent, "allocs", 4096)
 	writer := newWriter(t, object, 0)
 
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	// 56 payload bytes make a 64-byte record, read in four 16-byte calls
 	// of which only the last completes it.
@@ -585,7 +591,7 @@ func Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords(t *testing.T) {
 	// One record slice and one payload block for the completing call.
 	require.LessOrEqual(t, allocs, 2.0)
 
-	_, err = writer.WriteRecord(payload)
+	_, err := writer.WriteRecord(payload)
 	require.NoError(t, err)
 	partial := testing.AllocsPerRun(1, func() {
 		require.Empty(t, reader.Read(8))
@@ -618,8 +624,7 @@ func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "stress", capacity)
 	writer := newWriter(t, object, 0)
-	reader, err := object.OpenReader(0)
-	require.NoError(t, err)
+	reader := openReader(t, object, 0)
 
 	stress, err := writer.StartStress(records)
 	require.NoError(t, err)

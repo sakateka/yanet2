@@ -99,10 +99,6 @@ ring_object_create(
 	struct ring_object *self, uint32_t capacity, yanet_error **err
 );
 
-// Number of per-worker rings behind this object, fixed at creation.
-uint64_t
-ring_object_worker_count(const struct cp_object *cp_object);
-
 // Per-worker data area size in bytes, fixed at creation.
 uint32_t
 ring_object_capacity(const struct cp_object *cp_object);
@@ -110,7 +106,8 @@ ring_object_capacity(const struct cp_object *cp_object);
 // Metadata of one worker, located in the object's aligned array so a caller
 // never does stride arithmetic across the shared-memory boundary.
 //
-// Returns NULL for a worker index outside the object's workers.
+// Returns NULL for a worker index outside the object's workers, so a
+// caller enumerates every ring by walking indices up to the first NULL.
 struct ring_worker *
 ring_object_worker(const struct cp_object *cp_object, uint64_t worker_idx);
 

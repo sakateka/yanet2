@@ -276,35 +276,67 @@ run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// The created object's worker count follows the dataplane's configured
-// worker count, not a value the caller passes in.
+// The created object holds one ring per dataplane worker, each with its own
+// metadata and data area, and resolves no ring past the last worker.
 static int
-run_ring_object_worker_count_test(struct yanet_shm *shm) {
+run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
 
 	struct agent *agent = agent_attach(
-		shm, 0, "ring-worker-count", RING_OBJECT_TEST_MEMORY_LIMIT, &err
+		shm, 0, "ring-worker-rings", RING_OBJECT_TEST_MEMORY_LIMIT, &err
 	);
 	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
 
-	struct dp_config *dp_config = agent_dp_config(agent);
+	uint64_t worker_count = agent_dp_config(agent)->worker_count;
+	TEST_ASSERT_EQUAL(
+		(long)worker_count, 2L, "the harness must run two workers"
+	);
 
 	struct cp_object *object =
-		ring_object_config_new(agent, "worker-count", 64, &err);
+		ring_object_config_new(agent, "worker-rings", 64, &err);
 	TEST_ASSERT_NOT_NULL(
 		object,
 		"ring_object_config_new failed: %s",
 		err ? yanet_error_message(err) : "?"
 	);
 	TEST_ASSERT_EQUAL(
-		ring_object_worker_count(object),
-		dp_config->worker_count,
-		"the object's worker count must match dp_config"
-	);
-	TEST_ASSERT_EQUAL(
 		ring_object_capacity(object),
 		64,
 		"the object's capacity must stick"
+	);
+
+	for (uint64_t idx = 0; idx < worker_count; ++idx) {
+		struct ring_worker *worker = ring_object_worker(object, idx);
+		uint8_t *data = ring_object_worker_data(object, idx);
+		TEST_ASSERT_NOT_NULL(
+			worker, "worker %lu has no ring", (unsigned long)idx
+		);
+		TEST_ASSERT_NOT_NULL(
+			data, "worker %lu has no data", (unsigned long)idx
+		);
+
+		for (uint64_t prev = 0; prev < idx; ++prev) {
+			TEST_ASSERT(
+				ring_object_worker(object, prev) != worker,
+				"workers %lu and %lu share metadata",
+				(unsigned long)prev,
+				(unsigned long)idx
+			);
+			TEST_ASSERT(
+				ring_object_worker_data(object, prev) != data,
+				"workers %lu and %lu share a data area",
+				(unsigned long)prev,
+				(unsigned long)idx
+			);
+		}
+	}
+	TEST_ASSERT_NULL(
+		ring_object_worker(object, worker_count),
+		"no ring may resolve past the last worker"
+	);
+	TEST_ASSERT_NULL(
+		ring_object_worker_data(object, worker_count),
+		"no data area may resolve past the last worker"
 	);
 
 	yanet_error *free_err = NULL;
@@ -699,7 +731,7 @@ main(void) {
 		{"worker_layout", run_ring_worker_layout_test},
 		{"align_alloc", run_ring_object_align_alloc_test},
 		{"bad_capacity", run_ring_object_bad_capacity_test},
-		{"worker_count", run_ring_object_worker_count_test},
+		{"worker_rings", run_ring_object_worker_rings_test},
 		{"free_refused_while_referenced",
 		 run_ring_object_free_refused_while_referenced_test},
 		{"delete_refused_while_linked",
