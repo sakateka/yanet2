@@ -98,11 +98,10 @@ type RingService struct {
 	// already raised.
 	leases     map[Handle]int
 	nextHandle Handle
-	// deferred holds ring entries whose free was refused because a live
-	// configuration generation still referenced them: deleted rings, and
-	// created ones whose publish failed. This service is their owner: it
-	// retries them at the start of every RPC and through ReclaimDeferred,
-	// and nothing else remembers them.
+	// deferred holds deleted ring entries whose free was refused because a
+	// live configuration generation still referenced them. This service is
+	// their owner: it retries them at the start of every RPC and through
+	// ReclaimDeferred, and nothing else remembers them.
 	deferred []*ringEntry
 	log      *zap.Logger
 }
@@ -158,8 +157,10 @@ func (m *RingService) CreateRing(
 	}
 
 	if err := object.Publish(); err != nil {
+		if err := object.Free(); err != nil {
+			m.log.Error("failed to free unpublished ring", zap.String("ring", name), zap.Error(err))
+		}
 		m.log.Error("failed to publish ring", zap.String("ring", name), zap.Error(err))
-		m.freeOrDefer(&ringEntry{Name: name, Object: object})
 		return nil, status.Errorf(codes.Internal, "failed to publish ring %q: %v", name, err)
 	}
 

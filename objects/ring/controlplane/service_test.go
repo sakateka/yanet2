@@ -1,7 +1,6 @@
 package ring_test
 
 import (
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -305,40 +304,15 @@ func Test_RingService_CreateRing_ExternallyPublishedNameRejected(t *testing.T) {
 	require.Equal(t, object.AsRawPtr(), writer.Object(), "the published ring must still be the original object")
 }
 
-// exhaustControlplaneMemory drains the harness's controlplane memory pool
-// until not even a minimal block remains for a new configuration
-// generation, so the next publish through any agent fails while every
-// already attached agent keeps its own arena.
-//
-// The pool is drained by growing a set of filler agents with halving
-// sizes, spreading the growth across them so each filler's arena
-// bookkeeping stays at a few entries and can never be the last block left.
-func exhaustControlplaneMemory(t *testing.T, shm *ffi.SharedMemory) {
-	t.Helper()
-
-	const fillerCount = 32
-	fillers := make([]*ffi.Agent, 0, fillerCount)
-	for idx := range fillerCount {
-		filler, err := shm.AgentAttach(fmt.Sprintf("ring-cp-filler-%d", idx), 0, datasize.B)
-		require.NoError(t, err)
-		fillers = append(fillers, filler)
-	}
-
-	next := 0
-	for size := 64 * datasize.MB; size > 0; size /= 2 {
-		for fillers[next].Extend(size) == nil {
-			next = (next + 1) % len(fillers)
-		}
-	}
-}
-
 // Test_RingService_CreateRing_PublishFailureReleasesObject verifies that a
 // create whose publish the dataplane rejects for lack of controlplane
 // memory reports Internal, registers and publishes nothing, and returns the
 // object's memory to the agent arena.
 func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
+	const cpMemory = 8 * datasize.MB
+
 	h, err := dataplaneut.NewHarness(dataplaneut.Config{
-		CPMemory:      uint64(64 * datasize.MB),
+		CPMemory:      uint64(cpMemory),
 		DPMemory:      uint64(4 * datasize.MB),
 		WorkerCount:   1,
 		ObjectsToLoad: []string{"ring"},
@@ -346,13 +320,24 @@ func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(h.Free)
 
-	agent, err := h.SharedMemory().AgentAttach("ring-service-test", 0, 16*datasize.MB)
+	agent, err := h.SharedMemory().AgentAttach("ring-service-test", 0, datasize.MB)
 	require.NoError(t, err)
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
 	client := startRingService(t, service)
 	ctx := t.Context()
 
-	exhaustControlplaneMemory(t, h.SharedMemory())
+	// Drain the rest of the controlplane pool into one filler agent,
+	// largest blocks first, so no block is left for the new configuration
+	// generation a publish allocates, while the service's own arena stays
+	// intact.
+	filler, err := h.SharedMemory().AgentAttach("ring-cp-filler", 0, datasize.B)
+	require.NoError(t, err)
+	for size := cpMemory; size > 0; {
+		if filler.Extend(size) != nil {
+			size /= 2
+		}
+	}
+
 	baseline := agent.BlockAllocatorFreeSize()
 
 	_, err = client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: "unpublished", Capacity: 64})
