@@ -29,6 +29,6 @@ struct ring_worker_layout {
 struct ring_worker_layout
 ring_layout_worker(void);
 
-// Round val with the archive's record alignment.
+// Round a length up to the archive's record alignment.
 uint32_t
 ring_layout_align4(uint32_t val);

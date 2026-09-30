@@ -1,12 +1,9 @@
-// Package ringref places an artificial extra reference on a published ring
-// object, letting a service test reproduce the free the C layer refuses
-// while a live generation still holds the object, without depending on
-// real generation-retirement timing.
+// Package ringref places an artificial extra reference on a published ring,
+// so service tests can reproduce a refused free without generation timing.
 //
 // Production code never does this: a ring's only real reference comes from
-// being part of a published configuration generation. Rooted directly
-// under objects/ring so both the cring bindings tests and the controlplane
-// service tests can reach it.
+// a published configuration generation. The package sits directly under
+// objects/ring so both the bindings and the service tests can reach it.
 package ringref
 
 //#cgo CFLAGS: -I../../../../
@@ -88,22 +85,18 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
 
-// Reference is an artificial extra reference to a published ring object,
-// simulating a second live generation that has not yet retired. Release
-// drops it.
+// Reference is an artificial extra reference to a published ring, standing
+// in for a live generation that has not yet retired.
 //
-// The registry backing it is C-allocated, not embedded in this Go value:
-// cp_object_registry_upsert and cp_object_registry_fini may retain
-// pointers into it beyond the call that passed it in, which only a stable
-// C address supports.
+// Its backing registry lives in C memory: the C registry calls may keep
+// pointers into it beyond the call, which needs a stable C address.
 type Reference struct {
 	agent    *C.struct_agent
 	registry *C.struct_cp_object_registry
 }
 
-// Hold looks up the named ring in agent's currently published generation
-// and registers an extra reference to it in a freestanding registry, so
-// the object's own typed free refuses until Release.
+// Hold registers an extra reference to the named ring from the agent's
+// published generation, so the ring's free is refused until Release.
 func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 	cAgent := (*C.struct_agent)(agent.AsRawPtr())
 
@@ -122,11 +115,11 @@ func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 		return nil, fmt.Errorf("failed to allocate reference registry")
 	}
 
-	// The registry's recorded owner must be the real config: upsert and
-	// fini assert the lock they run under against this owner, and an
-	// owner of NULL would only ever match a thread holding no lock at
-	// all, tripping that assertion the moment this reference actually
-	// takes agent's lock around them.
+	// The registry's owner must be the real config: the registry calls
+	// assert the lock they run under against it.
+	//
+	// A NULL owner would match only a thread holding no lock, tripping
+	// that assertion once this reference takes the agent's lock.
 	cpConfig := C.ringref_config(cAgent)
 
 	var cErr *C.yanet_error
@@ -143,8 +136,8 @@ func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 	return &Reference{agent: cAgent, registry: registry}, nil
 }
 
-// Release drops the artificial reference and frees the registry. Safe to
-// call more than once: later calls do nothing.
+// Release drops the artificial reference and frees the registry; later
+// calls do nothing.
 func (m *Reference) Release() {
 	if m.registry == nil {
 		return

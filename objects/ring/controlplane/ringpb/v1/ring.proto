@@ -8,18 +8,15 @@ option go_package = "github.com/yanet-platform/yanet2/objects/ring/controlplane/
 //
 // A ring is a per-worker, cache-line-isolated buffer of opaque records with
 // a single writer per worker; a full buffer overwrites the oldest record
-// rather than blocking the writer or failing the write. It has no
-// dataplane module of its own: other modules reference a ring by name and
-// the controlplane resolves the name to the concrete per-worker buffers at
-// publish time.
+// instead of blocking or failing the write. It has no dataplane module of
+// its own: a module config can link a ring by name.
 service RingService {
   // CreateRing creates a new named ring with a fixed per-worker capacity.
   //
   // Creation fails if a ring with the requested name already exists.
   rpc CreateRing(CreateRingRequest) returns (CreateRingResponse);
-  // ListRings returns every registered ring with the same facts as
-  // ShowRing, so a caller can render a full table without a per-ring
-  // lookup.
+  // ListRings returns every registered ring, sorted by name, with the same
+  // facts as ShowRing.
   rpc ListRings(ListRingsRequest) returns (ListRingsResponse);
   // ShowRing returns the name, per-worker capacity and worker count of one
   // named ring.
@@ -31,8 +28,8 @@ service RingService {
   rpc DeleteRing(DeleteRingRequest) returns (DeleteRingResponse);
 }
 
-// RingInfo describes one registered ring: the facts fixed at creation plus
-// the current worker count.
+// RingInfo describes one registered ring: its name, capacity and worker
+// count, all fixed at creation.
 message RingInfo {
   // name identifies the ring.
   string name = 1;
@@ -50,9 +47,8 @@ message CreateRingRequest {
   // name identifies the new ring; creation fails if a ring with this name
   // already exists.
   string name = 1;
-  // capacity is the per-worker buffer size in bytes; it must be a power of
-  // two and hold at least one record frame, and it does not change for the
-  // life of the ring.
+  // capacity is the per-worker buffer size in bytes: a power of two holding
+  // at least one record frame, fixed for the life of the ring.
   uint64 capacity = 2;
 }
 
@@ -63,8 +59,8 @@ message CreateRingResponse {}
 // registered ring.
 message ListRingsRequest {}
 
-// ListRingsResponse lists every registered ring with the facts ShowRing
-// would return for each, so the caller can render a table in one call.
+// ListRingsResponse lists every registered ring, sorted by name, with the
+// facts ShowRing returns for each.
 message ListRingsResponse {
   repeated RingInfo rings = 1;
 }
@@ -83,8 +79,7 @@ message ShowRingResponse {
 // DeleteRingRequest names the ring to remove.
 message DeleteRingRequest {
   // name identifies the ring to remove; deletion fails while the ring is
-  // leased by a consumer or still linked into a published configuration
-  // generation.
+  // leased or still linked into a published configuration generation.
   string name = 1;
 }
 

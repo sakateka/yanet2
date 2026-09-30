@@ -43,8 +43,8 @@ func newRingObject(t *testing.T, agent *ffi.Agent, name string, capacity uint32)
 	return object
 }
 
-// newWriter resolves the raw C writer primitives for one worker of object,
-// for driving records directly the way the dataplane would.
+// newWriter resolves the raw C writer primitives for one worker, to drive
+// records directly as the dataplane would.
 func newWriter(t *testing.T, object *cring.Object, workerIdx uint64) *ringwriter.Writer {
 	t.Helper()
 
@@ -53,17 +53,15 @@ func newWriter(t *testing.T, object *cring.Object, workerIdx uint64) *ringwriter
 	return writer
 }
 
-// Test_Reader_Read_RoundTripAcrossPhysicalWrap verifies that a record whose
-// frame and payload straddle the ring's physical boundary round-trips its
-// opaque bytes unchanged.
+// Test_Reader_Read_RoundTripAcrossPhysicalWrap verifies that a record
+// straddling the ring's physical end round-trips its bytes unchanged.
 func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "wrap", 32)
 	writer := newWriter(t, object, 0)
 
 	// The frame lands just inside the boundary and the payload straddles
-	// it: physical bytes [28,32) then [0,4), matching the C ring_test.c
-	// wrap fixture at the same ring size.
+	// it: bytes [28,32) then [0,4), as in the C wrap fixture of this size.
 	writer.SetIndices(20, 20)
 
 	payload := []byte{1, 2, 3, 4, 5, 6, 7, 8}
@@ -81,9 +79,8 @@ func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_Reader_Read_RoundTripAcrossWorkers verifies that each worker's ring
-// is read in isolation: a reader opened on one worker never sees another
-// worker's records.
+// Test_Reader_Read_RoundTripAcrossWorkers verifies that a reader opened on
+// one worker never sees another worker's records.
 func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	const workerCount = 3
 
@@ -107,9 +104,8 @@ func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	}
 }
 
-// Test_Reader_Read_RoundTripSequentialWrites verifies that two records
-// committed one after another on the same worker, before any read, both
-// come back in commit order with contiguous seqnos and unchanged bytes.
+// Test_Reader_Read_RoundTripSequentialWrites verifies that records committed
+// back to back return in order, unchanged, with contiguous sequence numbers.
 func Test_Reader_Read_RoundTripSequentialWrites(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "sequential", 128)
@@ -160,9 +156,8 @@ func Test_Reader_Read_SeqnoWrapsContiguously(t *testing.T) {
 	require.Equal(t, uint32(0), records[1].Seqno)
 }
 
-// Test_Reader_WriteRecord_OversizedRejected verifies that a record too
-// large for the ring is refused before anything is written: the sequence
-// counter does not advance and a reader finds nothing.
+// Test_Reader_WriteRecord_OversizedRejected verifies that an oversized record
+// is refused before anything is written or a sequence number is consumed.
 func Test_Reader_WriteRecord_OversizedRejected(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "oversized", 32)
@@ -179,21 +174,17 @@ func Test_Reader_WriteRecord_OversizedRejected(t *testing.T) {
 	require.Empty(t, reader.Read(1024))
 }
 
-// Test_Reader_Read_CorruptFrameResyncsToWriteBoundary verifies that once a
-// corrupted frame forces a read to discard its buffer, the reader resumes
-// at the write index snapshotted for that call rather than wherever the
-// copy happened to stop, so a later read never reinterprets a record's
-// payload bytes as a new frame.
+// Test_Reader_Read_CorruptFrameResyncsToWriteBoundary verifies that after a
+// corrupt frame the reader resumes at that call's snapshot write position.
+//
+// A later read therefore never parses a record's payload bytes as a frame.
 func Test_Reader_Read_CorruptFrameResyncsToWriteBoundary(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "corrupt-frame", 64)
 	writer := newWriter(t, object, 0)
 
-	// recordA's payload is two repeated little-endian encodings of the
-	// frame size: if a reader ever landed misaligned inside it, every
-	// 4-byte word would misparse as a deceptively "valid" empty record
-	// instead of a bounds violation, so any resulting garbage is
-	// unambiguous rather than an accidental out-of-range reject.
+	// The first payload is two frame-size words, so a misaligned reader
+	// would parse it as valid empty records instead of hitting the guard.
 	corruptOffset := writer.WriteIdx()
 	_, err := writer.WriteRecord([]byte{0x08, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00})
 	require.NoError(t, err)
@@ -205,8 +196,8 @@ func Test_Reader_Read_CorruptFrameResyncsToWriteBoundary(t *testing.T) {
 	reader, err := object.OpenReader(0)
 	require.NoError(t, err)
 
-	// A small maxBytes stops the copy inside recordA's own payload, well
-	// short of the write index, so a naive cursor would resume mid-record.
+	// A small budget stops the copy inside the first payload, well short
+	// of the write position, so the cursor could land mid-record.
 	require.Empty(t, reader.Read(12))
 
 	_, err = writer.WriteRecord([]byte("CCCCCCCC"))
@@ -217,9 +208,40 @@ func Test_Reader_Read_CorruptFrameResyncsToWriteBoundary(t *testing.T) {
 	require.Equal(t, []byte("CCCCCCCC"), records[0].Bytes)
 }
 
+// Test_Reader_Read_CorruptFrameReturnsEarlierRecords verifies that records
+// parsed before a corrupt frame are returned and the rest is dropped.
+func Test_Reader_Read_CorruptFrameReturnsEarlierRecords(t *testing.T) {
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "corrupt-after-good", 128)
+	writer := newWriter(t, object, 0)
+
+	_, err := writer.WriteRecord([]byte("good-one"))
+	require.NoError(t, err)
+	corruptOffset := writer.WriteIdx()
+	_, err = writer.WriteRecord([]byte("bad-frame"))
+	require.NoError(t, err)
+	writer.CorruptTotalLen(corruptOffset, 0xffffffff)
+	_, err = writer.WriteRecord([]byte("dropped"))
+	require.NoError(t, err)
+
+	reader, err := object.OpenReader(0)
+	require.NoError(t, err)
+
+	records := reader.Read(1024)
+	require.Len(t, records, 1)
+	require.Equal(t, []byte("good-one"), records[0].Bytes)
+	require.False(t, reader.HasMore(), "the cursor must resume at the snapshot write position")
+
+	_, err = writer.WriteRecord([]byte("after"))
+	require.NoError(t, err)
+
+	records = reader.Read(1024)
+	require.Len(t, records, 1)
+	require.Equal(t, []byte("after"), records[0].Bytes)
+}
+
 // Test_Reader_Read_TwoIndependentReadersSeeSameStream verifies that two
-// readers opened on the same worker each see every record through their
-// own cursor, unaffected by the other reader's progress.
+// readers on one worker each see every record through their own cursor.
 func Test_Reader_Read_TwoIndependentReadersSeeSameStream(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "two-readers", 128)
@@ -255,12 +277,12 @@ func Test_Reader_Read_TwoIndependentReadersSeeSameStream(t *testing.T) {
 	require.Equal(t, []byte("record-b"), recordsTwo[0].Bytes)
 }
 
-// hookedSource wraps a real RecordSource, running an injected action at a
-// controlled point of the read protocol: onCopy right before the delegated
-// copy, onSecondIndices right before the delegated recheck of the first
-// Read call (its second Indices call). onIndicesCall generalizes this to
-// any call, 1-based, across every Read the source lives through, for a
-// test that must place the hook on a later call's recheck instead.
+// hookedSource wraps a real RecordSource and runs injected actions at chosen
+// points of the read protocol.
+//
+// One hook fires right before the delegated copy, one before the first
+// read's recheck (its second index snapshot), and a general one on any
+// 1-based index snapshot across every read, for a later call's recheck.
 type hookedSource struct {
 	real            cring.RecordSource
 	indicesCalls    int
@@ -287,11 +309,11 @@ func (m *hookedSource) CopyRange(dst []byte, start, size uint64) {
 	m.real.CopyRange(dst, start, size)
 }
 
-// Test_Reader_Read_DeterministicOverwrite verifies that a record the
-// writer invalidates during a Read call is never returned, whether the
-// invalidation lands between the snapshot and the copy or between the copy
-// and the recheck, and that the reader recovers cleanly for the next
-// genuinely new record.
+// Test_Reader_Read_DeterministicOverwrite verifies that a record invalidated
+// during a read is never returned and the reader recovers afterwards.
+//
+// The invalidation lands either between the snapshot and the copy or
+// between the copy and the recheck.
 func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 	cases := []struct {
 		name string
@@ -325,13 +347,12 @@ func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 					return
 				}
 				fired = true
-				// Big enough that ring_worker_prepare must evict the
-				// "stale" record entirely to make room, advancing
-				// readable_idx past everything this Read call snapshotted.
-				// The payload is frame-size-shaped words throughout, so a
-				// torn or stale reinterpretation of it never trips the
-				// out-of-range guard on its own: only the recheck can
-				// reject it, which is the property this test pins.
+				// Big enough to evict the "stale" record entirely, moving
+				// the readable position past everything this read saw.
+				//
+				// The payload is frame-size words throughout, so a torn or
+				// stale reinterpretation never trips the range guard: only
+				// the recheck can reject it, the property under test.
 				_, evictErr := writer.WriteRecord(repeatedFrameSizePayload(48))
 				require.NoError(t, evictErr)
 			}
@@ -354,10 +375,8 @@ func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 	}
 }
 
-// Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord verifies that when
-// an eviction invalidates only the older of two buffered records, the
-// recheck drops just that prefix and still returns the younger record
-// intact, rather than discarding the whole call's buffer.
+// Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord verifies that
+// evicting the older of two buffered records keeps the younger one intact.
 func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "partial-drop", 128)
@@ -378,9 +397,8 @@ func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 			return
 		}
 		fired = true
-		// 96 bytes exceeds the 92 free at this point, so prepare evicts
-		// exactly the 16-byte stale record and stops: the survivor is
-		// never touched, physically or by the recheck's drop range.
+		// 96 bytes exceed the 92 free, so the write evicts exactly the
+		// stale record; the survivor is untouched, physically and by the drop.
 		_, evictErr := writer.WriteRecord(repeatedFrameSizePayload(88))
 		require.NoError(t, evictErr)
 	}
@@ -392,18 +410,15 @@ func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 	require.Equal(t, []byte("survive-me!!"), records[0].Bytes)
 }
 
-// Test_Reader_Read_InvalidatesCarriedPartialRecord verifies that an
-// eviction invalidates a record correctly even when part of it was
-// buffered by an earlier Read call: the recheck accounts for the carried
-// bytes, not just what the current call copied.
+// Test_Reader_Read_InvalidatesCarriedPartialRecord verifies that the recheck
+// also drops the bytes of a record partly buffered by an earlier read.
 func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "carried-partial", 64)
 	writer := newWriter(t, object, 0)
 
-	// A 24-byte record (frame plus four frame-size words of payload) so
-	// a misaligned reinterpretation of any 4-byte-aligned remainder still
-	// looks like a plausible record rather than an out-of-range reject.
+	// A 24-byte record of frame-size words, so a misaligned remainder still
+	// parses as a plausible record instead of hitting the range guard.
 	_, err := writer.WriteRecord(repeatedFrameSizePayload(16))
 	require.NoError(t, err)
 
@@ -419,8 +434,8 @@ func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 			return
 		}
 		fired = true
-		// 48 bytes exceeds the 40 free while the 24-byte record still
-		// fully occupies the ring, so prepare evicts it entirely.
+		// 48 bytes exceed the 40 free while the 24-byte record is still
+		// held, so the write evicts it entirely.
 		_, evictErr := writer.WriteRecord(repeatedFrameSizePayload(40))
 		require.NoError(t, evictErr)
 	}
@@ -438,19 +453,16 @@ func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 	_, err = writer.WriteRecord([]byte("fresh"))
 	require.NoError(t, err)
 
-	// The evicting write itself committed a genuine record right after
-	// the dropped one, so it is legitimately readable now too, ahead of
-	// "fresh"; only the originally buffered 24-byte record must be gone.
+	// The evicting write committed a genuine record after the dropped one,
+	// readable ahead of "fresh"; only the buffered record must be gone.
 	records = reader.Read(1024)
 	require.Len(t, records, 2)
 	require.Equal(t, repeatedFrameSizePayload(40), records[0].Bytes)
 	require.Equal(t, []byte("fresh"), records[1].Bytes)
 }
 
-// Test_Reader_Read_DropExceedsBufferDiscardsEverything verifies that when
-// an eviction invalidates more than this call copied — not just up to the
-// end of the copied range — the reader discards the whole buffer rather
-// than slicing past it.
+// Test_Reader_Read_DropExceedsBufferDiscardsEverything verifies that an
+// eviction reaching past the copied range clears the whole buffer.
 func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "exceeds-buffer", 64)
@@ -471,9 +483,8 @@ func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 			return
 		}
 		fired = true
-		// 40 bytes exceeds the 32 free, so prepare evicts exactly the
-		// first 16-byte record, advancing readable_idx to 16 — past the
-		// 10 bytes this call's small maxBytes will have copied.
+		// 40 bytes exceed the 32 free, so the write evicts exactly the
+		// first record, moving the readable position past the 10 copied.
 		_, evictErr := writer.WriteRecord(repeatedFrameSizePayload(32))
 		require.NoError(t, evictErr)
 	}
@@ -485,10 +496,7 @@ func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 }
 
 // Test_Reader_Read_RecordBytesAppendDoesNotCorruptLaterRecords verifies
-// that appending to one record's Bytes never reaches into a later
-// record's bytes in the same Read call: Bytes is capped to its own
-// length, so append always allocates instead of writing into the reader's
-// buffer.
+// that appending to one payload never overwrites a later record's payload.
 func Test_Reader_Read_RecordBytesAppendDoesNotCorruptLaterRecords(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "bytes-append", 128)
@@ -505,25 +513,21 @@ func Test_Reader_Read_RecordBytesAppendDoesNotCorruptLaterRecords(t *testing.T) 
 	records := reader.Read(1024)
 	require.Len(t, records, 2)
 
-	// Long enough to reach past "first"'s own backing space and into
-	// where "second" lives in the reader's buffer, were Bytes not capped
-	// to its own length.
+	// Long enough to reach into the second payload, were payloads not
+	// capped to their own length.
 	_ = append(records[0].Bytes, []byte("XXXXXXXXXXXXXXX")...)
 
 	require.Equal(t, []byte("second"), records[1].Bytes)
 }
 
-// Test_Parity_RecordFrameSize verifies that cring's record frame size,
-// mirrored from the C RING_RECORD_FRAME_SIZE, agrees with the minimum
-// capacity the ring proto package enforces independently.
+// Test_Parity_RecordFrameSize verifies that the C record frame size agrees
+// with the minimum capacity the proto package enforces independently.
 func Test_Parity_RecordFrameSize(t *testing.T) {
 	require.Equal(t, uint32(ringpb.MinRingCapacity), cring.RecordFrameSize)
 }
 
 // Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial verifies that
-// when the writer evicts a record between two Read calls while the first
-// call left part of it buffered, the second call discards the buffered
-// bytes instead of completing a record from them.
+// an eviction between two reads discards the partial record carried over.
 func Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "evict-between", 64)
@@ -550,9 +554,8 @@ func Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial(t *testing.T) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords verifies that
-// once the reader's buffer has grown, a Read allocates only for the
-// records it returns, and a call completing no record allocates nothing.
+// Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords verifies that a
+// warmed-up read allocates only for returned records, otherwise nothing.
 func Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "allocs", 4096)
@@ -579,7 +582,7 @@ func Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords(t *testing.T) {
 		returned += cycle()
 	})
 	require.Equal(t, 101, returned, "every cycle must return exactly one record")
-	// One Records slice and one payload block for the completing call.
+	// One record slice and one payload block for the completing call.
 	require.LessOrEqual(t, allocs, 2.0)
 
 	_, err = writer.WriteRecord(payload)
@@ -600,9 +603,8 @@ func Test_Reader_NewReader_RejectsCapacityBelowFrame(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Test_Reader_Stress_ConcurrentWriterNeverTears verifies that the Go reader
-// never returns a torn record while the C writer overwrites the ring at
-// full speed from another OS thread.
+// Test_Reader_Stress_ConcurrentWriterNeverTears verifies that the reader
+// never returns a torn record while the C writer overwrites at full speed.
 //
 // Opt-in: set RING_STRESS_RECORDS (records per run); RING_STRESS_CAPACITY
 // sets the ring size (default 4096, so almost every write evicts).
@@ -647,8 +649,8 @@ func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
 	require.Zero(t, torn, "no torn record may ever be returned")
 }
 
-// envUint reads an unsigned integer from the named environment variable,
-// returning def when it is unset.
+// envUint reads an unsigned integer from the named environment variable, or
+// returns the default when it is unset.
 func envUint(t *testing.T, name string, def uint64) uint64 {
 	t.Helper()
 	raw := os.Getenv(name)

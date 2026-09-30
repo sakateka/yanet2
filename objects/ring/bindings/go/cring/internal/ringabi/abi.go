@@ -1,6 +1,5 @@
 // Package ringabi holds the record rounding the Go reader shares with the C
-// ring writer, and probes comparing the C archive's view of the per-worker
-// metadata with the view cgo compiles against.
+// writer and probes comparing the archive's worker layout with cgo's view.
 //
 // Every Go package that includes the ring header compiles it with the same
 // global cgo flags, so this package's cgo view stands for the reader's.
@@ -72,13 +71,14 @@ func CgoWorkerLayout() WorkerLayout {
 }
 
 // CgoWorkerGoSize returns the size of the Go type cgo generates for the
-// worker metadata; a pointer cast from shared memory relies on it matching
-// the C size.
+// worker metadata.
+//
+// A pointer cast from shared memory relies on it matching the C size.
 func CgoWorkerGoSize() uint64 {
 	return uint64(unsafe.Sizeof(C.struct_ring_worker{}))
 }
 
-// ArchiveAlign4 rounds val with the linked C archive's record alignment.
+// ArchiveAlign4 rounds a length up with the linked C archive's alignment.
 func ArchiveAlign4(val uint32) uint32 {
 	return uint32(C.ring_layout_align4(C.uint32_t(val)))
 }

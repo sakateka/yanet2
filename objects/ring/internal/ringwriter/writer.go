@@ -1,12 +1,9 @@
-// Package ringwriter drives the C ring writer primitives directly against
-// one worker's ring, for tests that need to control eviction and commit
-// timing precisely against a concurrent Go reader, or to prove a ring still
-// accepts writes.
+// Package ringwriter drives the C ring writer directly against one worker's
+// ring, for tests that control eviction and commit timing precisely.
 //
 // Production code never writes ring records from Go: the dataplane is the
-// sole writer of a ring's data area. Rooted directly under objects/ring so
-// both the cring bindings tests and the controlplane service tests can
-// reach it.
+// sole writer of a ring's data area. The package sits directly under
+// objects/ring so both the bindings and the service tests can reach it.
 package ringwriter
 
 //#cgo CFLAGS: -I../../../../
@@ -46,7 +43,7 @@ import (
 )
 
 // Writer drives the writer primitives for one worker of a ring object
-// resolved from a raw cp_object pointer, such as cring.Object.AsRawPtr.
+// resolved from a raw object pointer.
 type Writer struct {
 	object    unsafe.Pointer
 	workerIdx uint64
@@ -54,8 +51,8 @@ type Writer struct {
 	data      *C.uint8_t
 }
 
-// NewWriter resolves the writer primitives for one worker of the ring
-// object at objPtr.
+// NewWriter resolves the writer primitives for one worker of a raw ring
+// object pointer.
 func NewWriter(objPtr unsafe.Pointer, workerIdx uint64) (*Writer, error) {
 	cpObject := (*C.struct_cp_object)(objPtr)
 
@@ -72,8 +69,7 @@ func NewWriter(objPtr unsafe.Pointer, workerIdx uint64) (*Writer, error) {
 }
 
 // NewPublishedWriter resolves the writer primitives for one worker of the
-// ring published under name in agent's current generation, for a test
-// that reaches the ring only by name, as its owner service exposes it.
+// ring published under a name, as its owner service exposes it.
 func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint64) (*Writer, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
@@ -85,8 +81,8 @@ func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint64) (*Write
 	return NewWriter(unsafe.Pointer(object), workerIdx)
 }
 
-// Object returns the raw cp_object pointer this writer resolved its worker
-// from.
+// Object returns the raw ring object pointer this writer resolved its
+// worker from.
 func (m *Writer) Object() unsafe.Pointer {
 	return m.object
 }
@@ -96,9 +92,8 @@ func (m *Writer) Capacity() uint32 {
 	return uint32(m.worker.size)
 }
 
-// Source returns the production cring record source for this writer's
-// worker, so a test reads back what this writer committed through the
-// same C accessors and copy path a real reader uses.
+// Source returns the production record source for this writer's worker, so
+// a test reads back through the same path a real reader uses.
 func (m *Writer) Source() (cring.RecordSource, error) {
 	return cring.SourceFromRaw(m.object, m.workerIdx)
 }
@@ -115,9 +110,8 @@ func (m *Writer) SetNextSeqno(seqno uint32) {
 	m.worker.next_seqno = C.uint32_t(seqno)
 }
 
-// SetIndices forces the shared write and readable positions, letting a
-// test engineer a physical wrap or a preset backlog without writing enough
-// records to reach it naturally.
+// SetIndices forces the shared write and readable positions, letting a test
+// set up a physical wrap or backlog without writing records to reach it.
 func (m *Writer) SetIndices(write, readable uint64) {
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&m.worker.write_idx)), write)
 	atomic.StoreUint64((*uint64)(unsafe.Pointer(&m.worker.readable_idx)), readable)
@@ -129,9 +123,8 @@ func (m *Writer) WriteIdx() uint64 {
 	return atomic.LoadUint64((*uint64)(unsafe.Pointer(&m.worker.write_idx)))
 }
 
-// CorruptTotalLen overwrites the total_len field of the frame at the given
-// logical offset, simulating a corrupted or torn record header without a
-// real writer race.
+// CorruptTotalLen overwrites the length of the frame at a logical offset,
+// simulating a corrupt record header without a real writer race.
 func (m *Writer) CorruptTotalLen(logicalOffset uint64, totalLen uint32) {
 	var frame [4]byte
 	binary.LittleEndian.PutUint32(frame[:], totalLen)
@@ -147,7 +140,7 @@ func (m *Writer) CorruptTotalLen(logicalOffset uint64, totalLen uint32) {
 // call, returning the seqno it was stamped with.
 //
 // Reports an error without writing anything when the record does not fit
-// the ring, matching ring_worker_prepare's contract.
+// the ring, matching the C writer's contract.
 func (m *Writer) WriteRecord(payload []byte) (uint32, error) {
 	totalLen := uint32(C.RING_RECORD_FRAME_SIZE) + uint32(len(payload))
 

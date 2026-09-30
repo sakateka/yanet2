@@ -94,9 +94,8 @@ import (
 	"errors"
 )
 
-// Stress runs the C writer on its own OS thread at full speed, writing
-// records whose length and bytes derive from their seqno, so a concurrent
-// reader can tell any torn record from a genuine one.
+// Stress runs the C writer on its own OS thread at full speed; each record's
+// length and bytes derive from its seqno, so a reader can spot a torn one.
 type Stress struct {
 	s *C.struct_ring_stress
 }
@@ -127,8 +126,8 @@ func (m *Stress) Wait() {
 	m.s = nil
 }
 
-// StressRecordValid reports whether payload is exactly the record the
-// stress writer stamped with seqno.
+// StressRecordValid reports whether a payload is exactly the record the
+// stress writer stamped with the given sequence number.
 func StressRecordValid(seqno uint32, payload []byte) bool {
 	if uint32(len(payload)) != uint32(C.ring_stress_len(C.uint32_t(seqno))) {
 		return false

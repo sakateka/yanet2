@@ -16,15 +16,13 @@ import (
 // payload: the smallest declared record length a ring accepts.
 const RecordFrameSize = uint32(C.RING_RECORD_FRAME_SIZE)
 
-// Record is one payload a Reader parsed out of a worker's ring, tagged with
-// the worker it came from and the seqno the writer stamped it with at
-// commit.
+// Record is one payload parsed out of a worker's ring, tagged with its
+// worker and the sequence number the writer stamped at commit.
 //
-// Bytes is copied out of the Reader's internal buffer into memory owned by
-// the returned records alone (the records of one Read call share one
-// allocation), so it stays valid and unchanged across later Read calls on
-// the same Reader. Its capacity is capped to its length, so appending to
-// it always allocates instead of reaching into a neighbouring record.
+// The payload is owned by the returned records alone (the records of one
+// read share one allocation), so it stays unchanged across later reads. Its
+// capacity is capped to its length, so appending always allocates instead
+// of reaching into a neighbouring record.
 type Record struct {
 	Worker uint64
 	Seqno  uint32
@@ -32,17 +30,16 @@ type Record struct {
 }
 
 // RecordSource supplies the raw primitives a Reader parses records from:
-// the shared write/readable index pair and a bounded copy of the ring's
-// data area. Object.Source resolves the real source through the C
-// accessors; a substitute lets a caller drive the read protocol against
-// externally paced writer state.
+// the shared index pair and a bounded copy of the ring's data area.
+//
+// A ring object provides the real shared-memory source; a substitute lets a
+// caller drive the read protocol against externally paced writer state.
 type RecordSource interface {
 	// Indices returns the current write and readable logical positions, in
 	// that order.
 	Indices() (write, readable uint64)
-	// CopyRange copies size bytes of the ring's data area starting at the
-	// logical offset start into dst, wrapping at the ring's physical
-	// boundary. dst must have length size.
+	// CopyRange fills a destination of exactly the requested byte count
+	// from a logical offset of the data area, wrapping at its physical end.
 	CopyRange(dst []byte, start, size uint64)
 }
 
@@ -75,31 +72,29 @@ func (m *shmSource) CopyRange(dst []byte, start, size uint64) {
 	copy(dst[n:], m.data[:endPos])
 }
 
-// Reader parses committed records out of one worker's ring through a
-// RecordSource, keeping a read cursor independent of any other reader over
-// the same worker.
+// Reader parses committed records out of one worker's ring, keeping a read
+// cursor independent of any other reader over the same worker.
 //
-// Read must not be called concurrently with itself; HasMore may be polled
-// from another goroutine while Read runs, mirroring a capture loop's
-// waker.
+// Read must not run concurrently with itself; HasMore may be polled from
+// another goroutine while Read runs.
 type Reader struct {
 	worker   uint64
 	capacity uint32
 	src      RecordSource
 
 	readIdx atomic.Uint64
-	// buf is scratch reused across calls and never handed to a caller:
-	// between calls it holds only the carried prefix of a record not yet
-	// fully copied, always compacted to its front.
+	// buf is scratch reused across calls and never handed to a caller.
+	//
+	// Between calls it holds only the carried prefix of a record not yet
+	// fully copied, compacted to its front.
 	buf []byte
 }
 
-// NewReader builds a Reader over the given RecordSource, tagging every
-// parsed record with worker and bounding a record's declared length
-// against capacity.
+// NewReader builds a Reader that tags every parsed record with its worker
+// and bounds each declared record length by the ring's capacity.
 //
-// Fails when capacity is below RecordFrameSize: no record fits such a
-// ring, and every declared length would be rejected as corruption.
+// Fails for a capacity below the frame size: no record fits such a ring,
+// and every declared length would be rejected as corruption.
 func NewReader(worker uint64, capacity uint32, src RecordSource) (*Reader, error) {
 	if capacity < RecordFrameSize {
 		return nil, fmt.Errorf("ring capacity %d is below the record frame size %d", capacity, RecordFrameSize)
@@ -114,20 +109,16 @@ func (m *Reader) HasMore() bool {
 	return write > m.readIdx.Load()
 }
 
-// Read copies up to maxBytes of newly readable bytes from the source and
-// parses whatever whole records that yields.
+// Read copies up to the given byte budget of newly readable data and parses
+// the whole records it completes.
 //
-// The protocol is snapshot the shared indices, copy the readable range
-// into a private buffer, advance this reader's cursor, then recheck the
-// shared readable index: if the writer invalidated part of what was just
-// copied, the corresponding prefix is dropped before parsing, so no caller
-// ever sees a record the writer trampled mid-copy. A declared record
-// length outside [frame size, capacity] is treated as corruption and the
-// whole buffer is discarded rather than trusted as a bound.
-//
-// The internal buffer is reused across calls, so a steady-state call
-// allocates only for the records it returns: one slice of Records and one
-// block holding their payloads, none when no whole record completed.
+// After copying, the cursor advances and a recheck of the readable position
+// drops any prefix the writer invalidated mid-copy, so no caller sees a
+// trampled record. A declared length outside [frame size, capacity] is
+// corruption: the records parsed before it are returned, the rest of the
+// buffer is dropped, and the cursor resumes at the write position of this
+// call's snapshot. A steady-state call allocates only for the records it
+// returns: one slice and one payload block, none when none completed.
 func (m *Reader) Read(maxBytes uint32) []Record {
 	write, readable := m.src.Indices()
 
@@ -173,9 +164,8 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 		m.dropPrefix(int(diff))
 	}
 
-	// First pass: find how many whole records the buffer holds and how
-	// many payload bytes they carry, so the second pass allocates exactly
-	// once for each.
+	// First pass: count whole records and their payload bytes, so the
+	// second pass allocates exactly once for each.
 	parsed := 0
 	count := 0
 	payloadBytes := 0
@@ -215,13 +205,12 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	}
 
 	if corrupt {
-		// The rest of this call's buffer cannot be trusted, but the write
-		// index captured at the top of this call is a genuine record
-		// boundary: the writer only ever advances it by whole committed
-		// records. Resuming there next time, rather than at wherever this
-		// call's copy happened to stop, keeps the next read aligned to a
-		// real frame instead of parsing a record's payload bytes as if
-		// they were a header.
+		// Drop the untrusted remainder and resume at the snapshot's write
+		// position.
+		//
+		// The writer advances that position only by whole committed
+		// records, so the next read starts at a real frame instead of
+		// parsing payload bytes as a header.
 		m.buf = m.buf[:0]
 		m.readIdx.Store(write)
 		return records
@@ -231,9 +220,10 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	return records
 }
 
-// dropPrefix discards the first n buffered bytes, moving the remainder to
-// the buffer's front so its capacity keeps being reused. Safe because no
-// returned record aliases the buffer.
+// dropPrefix discards a buffered prefix, compacting the rest to the front so
+// the capacity keeps being reused.
+//
+// Safe because no returned record aliases the buffer.
 func (m *Reader) dropPrefix(n int) {
 	m.buf = m.buf[:copy(m.buf, m.buf[n:])]
 }

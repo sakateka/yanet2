@@ -1,13 +1,10 @@
 /*
- * Pins the ring writer's on-wire behavior across wrap, eviction, invalid
- * sizes, sequence-counter wraparound, and multi-worker isolation.
+ * Tests for the ring writer's on-wire behavior: wrap, eviction, invalid
+ * sizes, sequence-counter wraparound and multi-worker isolation.
  *
- * Physical wrap round-trips the opaque payload untouched, a full ring
- * evicts whole records at a record boundary rather than tearing one in
- * half, a corrupt length drops the backlog instead of walking it, an
- * invalid record size never touches the ring or its sequence counter, the
- * sequence counter wraps from UINT32_MAX to 0 without a gap, and one
- * worker's writes never perturb another worker's metadata.
+ * A full ring evicts whole records at a record boundary, a corrupt length
+ * drops the backlog instead of walking it, and an invalid record size never
+ * touches the ring or its sequence counter.
  */
 
 #include "common/test_assert.h"
@@ -21,8 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Build a zeroed ring of size bytes, writing the freshly calloc'd data
-// area to *data (NULL on allocation failure); the caller frees it.
+// Build a zeroed ring of the given size and its data area, which the caller
+// frees; the data area is NULL when its allocation fails.
 static struct ring_worker
 init_test_ring(uint32_t size, uint8_t **data) {
 	struct ring_worker ring = {0};
@@ -41,9 +38,8 @@ run_ring_wrap_roundtrip_test() {
 	struct ring_worker ring = init_test_ring(ring_size, &data);
 	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
 
-	// Placing write_idx at size-12 puts the 8-byte frame just inside the
-	// boundary and the 8-byte payload straddling it: physical bytes
-	// [28,32) then [0,4).
+	// A write position 12 bytes before the end keeps the 8-byte frame
+	// inside the boundary and wraps the payload: [28,32) then [0,4).
 	ring.write_idx = ring_size - 12;
 	ring.readable_idx = ring.write_idx;
 
@@ -76,10 +72,10 @@ run_ring_wrap_roundtrip_test() {
 	return TEST_SUCCESS;
 }
 
-// Write one fixed-size record through the full prepare/write/commit
-// sequence, filling its payload with one repeated byte so a later read
-// can identify which record occupies a given slot. Aborts if prepare
-// refuses the record, since every caller passes a valid size.
+// Write one fixed-size record whose payload repeats one byte, so a later
+// read can tell which record occupies a slot.
+//
+// Aborts if the record is refused, since every caller passes a valid size.
 static void
 write_fixed_record(
 	struct ring_worker *ring,
@@ -101,7 +97,7 @@ write_fixed_record(
 	ring_worker_commit(ring, data, total_len);
 }
 
-// A full ring evicts whole oldest records, landing readable_idx exactly on
+// A full ring evicts whole oldest records, landing the readable position on
 // a record boundary, and leaves every surviving record's bytes intact.
 static int
 run_ring_overwrite_evicts_whole_records_test() {
@@ -162,8 +158,8 @@ run_ring_overwrite_evicts_whole_records_test() {
 	return TEST_SUCCESS;
 }
 
-// One prepare that must free several records evicts all of them and lands
-// readable_idx on the boundary after the last one evicted.
+// One reservation that must free several records evicts all of them and
+// lands the readable position on the boundary after the last one.
 static int
 run_ring_eviction_spans_multiple_records_test() {
 	const uint32_t ring_size = 64;
@@ -196,11 +192,11 @@ run_ring_eviction_spans_multiple_records_test() {
 	return TEST_SUCCESS;
 }
 
-// A corrupt length at the oldest record makes the eviction drop the whole
-// backlog by catching readable_idx up to write_idx, never leaving it in
-// the middle of a record: zero, shorter than a frame, larger than the
-// ring (including values whose alignment wraps u32), or running past the
-// write position.
+// A corrupt length at the oldest record drops the whole backlog, catching
+// the readable position up to the write position, never mid-record.
+//
+// Corrupt means zero, shorter than a frame, larger than the ring (including
+// values whose alignment wraps u32), or running past the write position.
 static int
 run_ring_eviction_corrupt_length_catches_up_test() {
 	const uint32_t ring_size = 64;
@@ -230,10 +226,11 @@ run_ring_eviction_corrupt_length_catches_up_test() {
 		{"length near UINT32_MAX", UINT32_MAX - 3},
 		{"length whose alignment wraps", UINT32_MAX},
 	};
-	// The word after the oldest frame's length (its seqno) is planted as
-	// a plausible 4-byte length, and the probe record needs only one
-	// frame of room: a walk that trusted a short length would step 4 or
-	// 8 bytes into the record and stop there, mid-record.
+	// The oldest frame's sequence word holds a plausible length and the
+	// probe record needs only one frame of room.
+	//
+	// A walk that trusted a short length would step 4 or 8 bytes into the
+	// record and stop there, mid-record.
 	const uint32_t planted_len = 4;
 	memcpy(data + sizeof(uint32_t), &planted_len, sizeof(planted_len));
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
@@ -304,9 +301,8 @@ run_ring_prepare_rejects_invalid_size_test() {
 	return TEST_SUCCESS;
 }
 
-// A total_len whose 4-byte alignment wraps u32 back down to a small value
-// is still rejected as oversize: aligning must never be trusted before the
-// raw value has been checked against capacity.
+// A length whose 4-byte alignment wraps u32 to a small value is still
+// rejected as oversize: the raw value is checked before alignment.
 static int
 run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 	const uint32_t ring_size = 32;
@@ -383,8 +379,7 @@ run_ring_seqno_wrap_test() {
 }
 
 // Writes to one worker's ring never perturb an adjacent worker's metadata
-// or data, byte-for-byte, when the two sit in one contiguous, cache-line
-// strided array exactly as ring_object lays out its per-worker array.
+// or data when both sit in one cache-line-strided array, as in the object.
 static int
 run_ring_multi_worker_isolation_test() {
 	struct ring_worker workers[2] = {0};
@@ -427,7 +422,7 @@ run_ring_multi_worker_isolation_test() {
 	return TEST_SUCCESS;
 }
 
-// Two sequential commits on the same worker produce contiguous seqnos.
+// Two sequential commits on the same worker get contiguous sequence numbers.
 static int
 run_ring_sequential_producers_contiguous_seqno_test() {
 	const uint32_t ring_size = 64;

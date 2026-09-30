@@ -1,9 +1,9 @@
 # Ring objects reference
 
 A ring is a standalone shared-memory object holding one cache-line-isolated,
-overwrite-oldest buffer of opaque records per dataplane worker. Other
-configs reference a ring by name; it carries no dataplane module of its
-own.
+overwrite-oldest buffer of opaque records per dataplane worker. A module
+config can link a ring by name; the ring carries no dataplane module of
+its own.
 
 ## Ownership
 
@@ -12,8 +12,8 @@ own.
 - There is no implicit or auto-created ring: every ring exists because a
   `create` call named it.
 - `create` rejects an existing name outright. Deleting a name and creating
-  it again yields a fresh object with a fresh handle — a lease or link
-  taken against the old handle never matches the new one.
+  it again yields a fresh object with a fresh handle — a lease taken
+  against the old handle never matches the new one.
 - Delete is refused while a consumer holds a lease on the ring (the Go
   owner's admission gate) or while a published module config still links
   it by name (the generic `cp_object` guard every shared object gets). In
@@ -35,13 +35,12 @@ own.
 - Capacity is per worker: each worker gets its own buffer of the
   configured size, not a shared pool.
 - It must be a power of two, from the 8-byte record frame up to the
-  block allocator's maximum block size, 64 MiB. Under ASan, every
-  allocation request is padded by a red zone that pushes it into the
-  next power-of-two size class, so a capacity can pass this check and
-  still fail the actual allocation with an out-of-memory error; 16 MiB
-  is the practical ceiling observed in ASan builds, not a fixed limit —
-  the actual cutoff also depends on how much of the owning agent's arena
-  is still free.
+  block allocator's maximum block size, 64 MiB. Under ASan that maximum
+  is 64 MiB minus two red zones, so the largest accepted capacity is
+  32 MiB. Red-zone padding also pushes each allocation into the next
+  size class, so in practice ASan builds already fail with an
+  out-of-memory error above about 16 MiB, depending on how much of the
+  owning agent's arena is still free.
 - Capacity is fixed at `create` and never resized. A different capacity
   needs a new ring.
 - The worker count is not a create-time argument: it always follows the
@@ -148,7 +147,8 @@ Create a ring with a 1 MiB per-worker capacity:
 yanet-cli-ring create --name captures --capacity 1MiB
 ```
 
-List every registered ring, printed as a `NAME`/`CAPACITY`/`WORKERS` table:
+List every registered ring, sorted by name, as a `NAME`/`CAPACITY`/`WORKERS`
+table:
 
 ```bash
 yanet-cli-ring list

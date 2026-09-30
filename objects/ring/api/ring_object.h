@@ -16,10 +16,11 @@ struct agent;
 struct cp_object;
 struct memory_context;
 
-// Owns the per-worker ring metadata and data areas of one named ring, as an
-// independent shared-memory cp_object registered under ("ring", name).
-// Module configs reference it by name and resolve it to per-worker ring
-// pointers at ectx build time.
+// A named ring: the per-worker metadata and data areas published as a
+// standalone shared-memory object of type "ring".
+//
+// A module config can link a ring by name and resolve it to per-worker ring
+// pointers when its execution context is built.
 struct ring_object {
 	struct cp_object cp_object;
 
@@ -28,23 +29,23 @@ struct ring_object {
 	// creation, from the frame size up to the allocator's maximum block.
 	uint32_t capacity;
 
-	// The metadata array's raw allocation and its byte count, kept for
-	// freeing: the checked over-allocation that rounds the array up to
-	// a cache-line boundary means the aligned array start below is not
-	// itself the allocated pointer.
+	// Raw allocation of the metadata array and its byte count, kept for
+	// freeing.
+	//
+	// Rounding the array up to a cache-line boundary means the aligned
+	// start below is not itself the allocated pointer.
 	void *workers_raw;
 	uint64_t workers_raw_size;
 	struct ring_worker *workers;
 };
 
-// RAII lifecycle for struct ring_object.
+// Lifecycle of a ring object: new, init, fini, free.
 //
-// new allocates ONLY the struct in the agent shared memory. init zeroes
-// the enclosing struct and calls cp_object_init; on error callers must
-// call free. fini releases field memory (per-worker data blocks, the
-// metadata array, cp_object_fini) and clears the fields it freed, so a
-// second call is a no-op. free deallocates ONLY the struct and is
-// NULL-safe.
+// New allocates only the struct in the agent's shared memory. Init zeroes
+// the struct and initializes its shared-object header; on error the caller
+// must free it. Fini releases the per-worker data blocks, the metadata array
+// and the header, clearing what it freed so a second call is a no-op. Free
+// deallocates only the struct and accepts NULL.
 struct ring_object *
 ring_object_new(struct agent *agent);
 
@@ -62,12 +63,13 @@ ring_object_fini(struct ring_object *self);
 void
 ring_object_free(struct ring_object *self, struct agent *agent);
 
-// Registration convenience: allocate + init + create and return the
-// cp_object pointer for agent_update_objects. On failure the object is
-// fully cleaned up and NULL is returned with errno preserved from the
-// failing step across that cleanup: ENOMEM when the struct itself cannot
-// be allocated, otherwise the ring_object_create errno. cp_object_init
-// sets no errno of its own, so errno is unspecified when init fails.
+// Allocate, initialize and create a ring, returning the shared-object handle
+// to register with the agent.
+//
+// On failure the object is fully cleaned up and NULL is returned with errno
+// kept from the failing step: ENOMEM when the struct cannot be allocated,
+// otherwise the errno of creation. Initialization sets no errno of its own,
+// so errno is unspecified when it fails.
 struct cp_object *
 ring_object_config_new(
 	struct agent *agent,
@@ -76,7 +78,7 @@ ring_object_config_new(
 	yanet_error **err
 );
 
-// Destroy the object when it is dangling, per cp_object_try_destroy.
+// Destroy the object once no live configuration generation references it.
 //
 // Returns -1 with errno EAGAIN while a live generation still references
 // the object; the caller must keep its handle and retry later.
@@ -85,13 +87,13 @@ ring_object_config_free(struct cp_object *cp_object, yanet_error **err);
 
 // Allocate the per-worker metadata array and data blocks.
 //
-// The worker count comes from the agent's dp_config. Called once, before
-// the object is published. Returns 0 on success or -1 with errno set:
-// EINVAL for a capacity below the frame size or not a power of two, or
-// for a dataplane reporting zero workers; E2BIG above the allocator's
-// maximum block; EEXIST when the object was already created; ENOMEM when
-// an allocation fails. A failure leaves the object
-// without storage and the agent's arena unchanged.
+// The worker count follows the dataplane's configured worker count. Called
+// once, before the object is published. Returns 0 on success or -1 with errno
+// set: EINVAL for a capacity below the frame size or not a power of two, or for
+// a dataplane reporting zero workers; E2BIG above the allocator's maximum
+// block; EEXIST when the object was already created; ENOMEM when an allocation
+// fails. A failure leaves the object without storage and the agent's arena
+// unchanged.
 int
 ring_object_create(
 	struct ring_object *self, uint32_t capacity, yanet_error **err
@@ -105,14 +107,15 @@ ring_object_worker_count(const struct cp_object *cp_object);
 uint32_t
 ring_object_capacity(const struct cp_object *cp_object);
 
-// Return worker_idx's metadata, computed from the object's aligned array so
-// a caller never does its own stride arithmetic across the shared-memory
-// boundary. Returns NULL when worker_idx is outside the object's workers.
+// Metadata of one worker, located in the object's aligned array so a caller
+// never does stride arithmetic across the shared-memory boundary.
+//
+// Returns NULL for a worker index outside the object's workers.
 struct ring_worker *
 ring_object_worker(const struct cp_object *cp_object, uint64_t worker_idx);
 
-// Return worker_idx's data area as a process-local absolute pointer, or
-// NULL when worker_idx is outside the object's workers.
+// Data area of one worker as a process-local pointer, or NULL for a worker
+// index outside the object's workers.
 uint8_t *
 ring_object_worker_data(const struct cp_object *cp_object, uint64_t worker_idx);
 
@@ -125,18 +128,16 @@ ring_object_worker_data(const struct cp_object *cp_object, uint64_t worker_idx);
 bool
 ring_object_exists(struct agent *agent, const char *name);
 
-// Allocate count entries of stride bytes each from ctx as one checked
-// over-allocation, rounding both the array's base address and each entry's
-// stride up to alignment.
+// Allocate an array of fixed-stride entries as one checked over-allocation,
+// aligning both the array's base address and each entry's stride.
 //
-// The block allocator's own alignment guarantee tops out at 64 bytes, and
-// an ASan red zone can displace even that, so the raw allocation asks for
-// one extra alignment unit of slack and this rounds the returned base up
-// itself rather than trust the allocator. On success the whole raw
-// allocation is zeroed and *raw/*raw_size receive the values a matching
-// memory_bfree needs; a caller with no matching free leaks. Returns NULL
-// with errno EOVERFLOW on an arithmetic overflow or ENOMEM on an
-// allocation failure, in which case *raw/*raw_size are left untouched.
+// An ASan red zone can displace any alignment above 64 bytes, so the raw
+// allocation carries one extra alignment unit of slack and the base is
+// rounded up here. On success the
+// whole raw allocation is zeroed and the raw pointer and size outputs hold
+// what the matching free needs. Returns NULL with errno EOVERFLOW on an
+// arithmetic overflow or ENOMEM on an allocation failure, leaving the raw
+// outputs untouched.
 void *
 ring_object_align_alloc(
 	struct memory_context *ctx,

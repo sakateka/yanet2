@@ -62,9 +62,8 @@ func Test_ValidateRingName(t *testing.T) {
 	}
 }
 
-// Test_CreateRingRequest_Validate verifies that the ring name and the
-// per-worker capacity are validated, and that no upper bound is enforced on
-// capacity since the C maximum has no stable Go-side literal.
+// Test_CreateRingRequest_Validate verifies the ring name and capacity rules,
+// with no upper capacity bound since the C maximum has no stable Go literal.
 func Test_CreateRingRequest_Validate(t *testing.T) {
 	cases := []struct {
 		name    string

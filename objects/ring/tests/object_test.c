@@ -1,15 +1,11 @@
 /*
- * Pins the ring cp_object's lifecycle: layout, checked allocation,
- * validation, reference-based free/delete refusal, and existence.
+ * Lifecycle tests for the ring shared object: layout, checked allocation,
+ * validation, reference-based refusal of free and delete, and existence.
  *
- * The per-worker metadata layout is cache-line aligned and sized, the
- * checked over-allocation helper rounds both the array base and its
- * stride to the requested alignment even when the allocator did not, bad
- * capacities are rejected before anything is allocated, the worker count
- * tracks the dataplane's configured workers, a generation reference or a
- * linking module refuses the free/delete path exactly like every other
- * cp_object, and the existence query reflects only the currently
- * published generation.
+ * Bad capacities are rejected with the arena left unchanged, the worker
+ * count tracks the dataplane's workers, and a generation reference or a
+ * linking module refuses destruction exactly as for every other shared
+ * object.
  */
 
 #include "api/agent.h"
@@ -61,16 +57,13 @@ run_ring_worker_layout_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// The checked over-allocation helper rounds the array base and each
-// entry's stride up to the requested alignment, at both 64 and 128 without
-// recompiling, and a matching free restores the arena.
+// The checked over-allocation rounds the array base and each entry's stride
+// up to the requested alignment, and a matching free restores the arena.
 //
-// The block allocator's own buddy invariant guarantees a returned block is
-// always aligned to at least its own size, so a fresh (non-ASan) build can
-// never observe a misaligned raw block from this call; only ASan's fixed
-// red-zone offset can shift it below the requested alignment. The
-// postconditions below hold either way, and the extra check under ASan
-// confirms the rounding is genuinely correcting something, not a no-op.
+// A buddy block is always aligned to at least its own size, so only ASan's
+// red-zone offset can misalign the raw block. The postconditions hold
+// either way; the extra check under ASan confirms the rounding corrects a
+// real offset.
 static int
 run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -151,10 +144,10 @@ run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// Smallest power of two strictly greater than val. Used to build an
-// oversize capacity that is always a power of two but always exceeds the
-// allocator's maximum, whether or not ASan's red zones lowered that
-// maximum for this build.
+// Smallest power of two strictly greater than the given value.
+//
+// Builds an oversize capacity that is a power of two yet exceeds the
+// allocator's maximum whether or not ASan red zones lowered it.
 static uint32_t
 pow2_above(uint32_t val) {
 	uint32_t pow2 = 1;
@@ -164,9 +157,10 @@ pow2_above(uint32_t val) {
 	return pow2;
 }
 
-// A capacity of zero, below the frame size, not a power of two, or above
-// the allocator's maximum block is refused before any allocation, with
-// the errno naming which check failed, leaving the arena unchanged.
+// A capacity of zero, below the frame, not a power of two or above the
+// allocator's maximum block is refused with the arena left unchanged.
+//
+// The errno names the failed check.
 static int
 run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -333,7 +327,7 @@ run_ring_object_free_refused_while_referenced_test(struct yanet_shm *shm) {
 }
 
 // A published module that links the ring by name refuses its deletion,
-// mirroring cp_config_delete_object's generic guard for every cp_object.
+// through the same guard every shared object gets.
 static int
 run_ring_object_delete_refused_while_linked_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -468,9 +462,8 @@ run_ring_object_fini_idempotent_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// Running out of memory after some workers' data areas were allocated
-// rolls every one of them back: the create reports ENOMEM and the arena
-// returns to its baseline.
+// Running out of memory midway through the per-worker data areas rolls all
+// of them back: creation reports ENOMEM and the arena returns to baseline.
 //
 // The capacity at which worker 0 still fits but worker 1 does not depends
 // on the arena's layout, so the test probes powers of two downward and

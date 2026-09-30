@@ -6,9 +6,8 @@ import (
 	"strings"
 )
 
-// MaxRingNameLen is the C object-name buffer size, including the
-// terminating NUL. The longest accepted name is one byte shorter than this
-// bound.
+// MaxRingNameLen is the C object-name buffer size, including the terminating
+// NUL; the longest accepted name is one byte shorter.
 const MaxRingNameLen = 80
 
 // MinRingCapacity is the smallest per-worker capacity a ring accepts, in
@@ -32,11 +31,9 @@ func ValidateRingName(field, name string) error {
 
 // Validate checks the ring name and the per-worker capacity.
 //
-// It does not enforce a business upper bound: the C maximum shrinks under
-// ASan builds, so no Go literal can stay in parity with it. The create
-// path on the service maps the C rejection of an oversized capacity to
-// InvalidArgument. It does reject a capacity that cannot survive the
-// truncation to the uint32 the C API takes, since accepting one here would
+// The upper bound is the C layer's, which varies by build; the service maps
+// its rejection of an oversized capacity to InvalidArgument. A capacity
+// beyond 32 bits is rejected here, since truncating it for the C API would
 // silently create a ring far smaller than requested.
 func (m *CreateRingRequest) Validate() error {
 	if err := ValidateRingName("name", m.GetName()); err != nil {

@@ -9,24 +9,20 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring/internal/ringabi"
 )
 
-// Test_Parity_RingWorkerLayout verifies that the per-worker metadata
-// layout cgo uses to read shared memory matches the one the C archive was
-// compiled with: size, alignment, cache line size and the offsets of every
-// field Go reads.
+// Test_Parity_RingWorkerLayout verifies that cgo's view of the per-worker
+// metadata layout matches the one the C archive was compiled with.
 func Test_Parity_RingWorkerLayout(t *testing.T) {
 	require.Equal(t, ringabi.ArchiveWorkerLayout(), ringabi.CgoWorkerLayout())
 }
 
-// Test_Parity_RingWorkerGoSize verifies that the Go type cgo generates for
-// the per-worker metadata spans exactly the C struct, cache-line padding
-// included.
+// Test_Parity_RingWorkerGoSize verifies that the Go type cgo generates spans
+// exactly the C struct, cache-line padding included.
 func Test_Parity_RingWorkerGoSize(t *testing.T) {
 	require.Equal(t, ringabi.ArchiveWorkerLayout().Size, ringabi.CgoWorkerGoSize())
 }
 
 // Test_Parity_Align4 verifies that the reader's record rounding agrees with
-// the C writer's at the edges of the 32-bit length range, wraparound
-// included.
+// the C writer's at the edges of the 32-bit range, wraparound included.
 func Test_Parity_Align4(t *testing.T) {
 	cases := []struct {
 		name string

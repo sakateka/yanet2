@@ -1,15 +1,14 @@
 #pragma once
 
 /*
- * Generic per-worker ring buffer of opaque records, shared by any module
- * that needs a lock-free single-producer log readable from another
- * process. No producer uses it yet; pdump capture still keeps its own,
- * separate rings.
+ * Per-worker ring buffer of opaque records: a lock-free single-producer log
+ * that another process can read.
  *
  * A worker's metadata and its data area are two independent allocations;
- * cache-line isolating the metadata keeps concurrent writers on adjacent
- * workers from ever touching the same line. The writer never blocks: a
- * full ring evicts whole oldest records rather than stalling.
+ * cache-line isolating the metadata keeps writers on adjacent workers from
+ * sharing a line. The writer never blocks: a full ring evicts whole oldest
+ * records instead of stalling. No producer writes to it yet; pdump capture
+ * keeps its own rings.
  */
 
 #include <assert.h>
@@ -40,10 +39,10 @@ ring_align4(uint32_t val) {
 
 // Frame preceding every record's opaque payload.
 //
-// total_len covers the frame and the payload combined; seqno is the
-// worker-scoped sequence number the frame is stamped with at commit.
-// Records are only 4-byte aligned, so a reader must copy this frame out
-// before reading total_len, never dereference it in place.
+// The length covers the frame and the payload combined; the worker-scoped
+// sequence number is stamped at commit. Records are only 4-byte aligned, so
+// a reader copies the frame out before reading the length instead of
+// dereferencing it in place.
 struct ring_record_frame {
 	uint32_t total_len;
 	uint32_t seqno;
@@ -54,7 +53,7 @@ _Static_assert(
 	"ring record frame must be the 8-byte wire size"
 );
 
-// Smallest total_len a record may declare: the frame with an empty payload.
+// Smallest length a record may declare: the frame with an empty payload.
 #define RING_RECORD_FRAME_SIZE (sizeof(struct ring_record_frame))
 
 // Per-worker ring metadata, one per dataplane worker.
@@ -103,14 +102,13 @@ ring_evict_fence(void) {
 #endif
 }
 
-// Validate a record fits the ring and evict whole oldest records until it
-// does, without writing any record bytes.
+// Check that a record of the given length fits the ring, evicting whole
+// oldest records until it does, without writing any record bytes.
 //
-// Returns 0 on success. Returns -1 with errno EINVAL when total_len is
-// below the frame size or E2BIG when its aligned span exceeds the ring's
-// capacity; either failure leaves every index untouched. data is the
-// worker's data area, already resolved by the caller via ADDR_OF so
-// repeated calls for the same record do not each re-resolve it. An
+// Returns 0 on success, or -1 with errno EINVAL for a length below the frame
+// size or E2BIG for one above the ring's capacity; a failure leaves every
+// index untouched. The data area arrives already resolved to a local
+// address, so repeated calls for one record do not each resolve it. An
 // eviction publishes only its final readable position, once.
 static inline int
 ring_worker_prepare(
@@ -124,11 +122,8 @@ ring_worker_prepare(
 		errno = E2BIG;
 		return -1;
 	}
-	// ring->size is a power of two (checked at object creation), so
-	// aligning any total_len that passed the check above can never
-	// exceed it; checking the raw value first, before alignment, is
-	// what keeps a total_len near UINT32_MAX from wrapping to a small
-	// aligned length and slipping past this guard.
+	// The raw length is checked before alignment so it cannot wrap; a
+	// power-of-two capacity then bounds the aligned length too.
 	uint32_t aligned_total_len = ring_align4(total_len);
 
 	// This worker is the sole writer of both positions, so relaxed loads
@@ -142,19 +137,16 @@ ring_worker_prepare(
 		return 0;
 	}
 
-	// Walk whole oldest records until the occupied space leaves room for
-	// this one, then publish the final position once.
+	// Walk whole oldest records until this one fits, then publish the
+	// final position once.
 	//
-	// A reader only needs the new boundary to be visible before any byte
-	// it covers is overwritten; intermediate record boundaries tell it
-	// nothing more, so one release store followed by the fence below is
-	// sufficient. The readable position is therefore not an eviction
-	// counter. Invalid length data at the walk position (shorter than a
-	// frame, larger than the ring, or running past the write position)
-	// would stall, misalign or overshoot the walk, so the eviction then
-	// drops everything and catches up to the write position. The raw
-	// length is range-checked before alignment so a value near UINT32_MAX
-	// cannot wrap to a small aligned length.
+	// A reader only needs the new boundary visible before any byte it
+	// covers is overwritten, so one release store plus the fence below
+	// suffices; the readable position is not an eviction counter. A
+	// corrupt length at the walk position (below a frame, above the ring,
+	// or past the write position) drops everything up to the write
+	// position. The raw length is range-checked before alignment so it
+	// cannot wrap.
 	do {
 		uint8_t *pos = data + (readable_idx & ring->mask);
 		uint32_t evicted_len;
@@ -178,13 +170,13 @@ ring_worker_prepare(
 	return 0;
 }
 
-// Copy one chunk of a record's bytes at offset bytes from the record's
-// (not yet published) start, wrapping at the ring's physical boundary.
+// Copy one chunk of a not yet published record at the given offset from its
+// start, wrapping at the ring's physical end.
 //
-// A record may be assembled from several chunks written at increasing
-// offsets — for instance a fixed private header followed by payload bytes
-// with no intermediate copy — as long as every chunk lands within the
-// total_len reserved by ring_worker_prepare.
+// A record may be assembled from several chunks at increasing offsets, for
+// instance a fixed private header followed by payload bytes with no
+// intermediate copy, as long as every chunk lands within the length the
+// preceding prepare reserved.
 static inline void
 ring_worker_write(
 	struct ring_worker *ring,
@@ -211,14 +203,13 @@ ring_worker_write(
 	}
 }
 
-// Write the record frame, stamp and advance the worker's sequence counter,
-// and publish the record by making it visible to readers.
+// Write the record frame, stamp it with the worker's next sequence number
+// and publish the record to readers.
 //
-// Publication is a plain release store of the position this call computes
-// locally, not a read-modify-write: this worker is the sole writer of its
-// ring, so nothing else can race the update, and write_idx never
-// needs a fetch_add's atomicity here. Returns the seqno this record was
-// stamped with, wrapping from UINT32_MAX to 0.
+// Publication is a release store of a locally computed position: this
+// worker is the ring's sole writer, so the update needs no
+// read-modify-write. Returns the stamped sequence number, which wraps from
+// UINT32_MAX to 0.
 static inline uint32_t
 ring_worker_commit(
 	struct ring_worker *ring, uint8_t *data, uint32_t total_len

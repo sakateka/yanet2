@@ -1,16 +1,18 @@
 package ring
 
-// This service holds one internal lock across every request that reads or
-// changes its registry — including admitting or dropping a lease — for
-// that request's whole duration. Without it, recreating a ring under a
-// name whose deletion is in progress, or admitting a lease against a
-// handle whose deletion is in progress, could let a consumer bind by
-// handle to a ring the dataplane no longer has.
+// One internal lock covers every request that reads or changes the
+// registry, including admitting or dropping a lease, for its whole duration.
+//
+// A ring recreated under a name whose deletion is in progress, or a lease
+// admitted against a handle being deleted, could otherwise let a consumer
+// bind by handle to a ring the dataplane no longer has.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -50,9 +52,11 @@ func (m *Lease) Release() {
 	m.once.Do(m.release)
 }
 
-// ringEntry is one registered ring: read-only owner data set once at
-// create and never mutated. RingService alone decides, under its own
-// lock, when an entry is replaced or removed from its registry.
+// ringEntry is one registered ring: owner data set once at create and never
+// mutated.
+//
+// Only the service decides, under its lock, when an entry is replaced or
+// removed from the registry.
 type ringEntry struct {
 	Handle Handle
 	Name   string
@@ -79,10 +83,11 @@ func WithLog(log *zap.Logger) Option {
 	}
 }
 
-// RingService implements the gRPC service for standalone named ring
-// management, and is the owner of every ring it creates: it is the only
-// caller of the typed Free, and it hands out the leases a consumer uses to
-// bind to a ring by handle.
+// RingService implements the gRPC service for standalone named rings and
+// owns every ring it creates.
+//
+// It is the only caller of a ring's free, and it hands out the leases a
+// consumer uses to bind to a ring by handle.
 type RingService struct {
 	ringpb.UnimplementedRingServiceServer
 
@@ -90,18 +95,19 @@ type RingService struct {
 	agent    *ffi.Agent
 	rings    map[string]*ringEntry
 	byHandle map[Handle]*ringEntry
-	// leases counts active leases per handle, independent of ringEntry,
-	// and only ever holds a positive count: a missing key means zero.
-	// Each lease's own release guard runs its decrement at most once, and
-	// a delete never removes a handle whose count is still positive, so
-	// every decrement always lands on a count a matching increment
-	// already raised.
+	// leases counts active leases per handle and holds only positive
+	// counts: a missing key means zero.
+	//
+	// Each lease decrements at most once, and a delete never removes a
+	// handle whose count is positive, so every decrement lands on a count
+	// a matching increment raised.
 	leases     map[Handle]int
 	nextHandle Handle
-	// deferred holds deleted ring entries whose free was refused because a
-	// live configuration generation still referenced them. This service is
-	// their owner: it retries them at the start of every RPC and through
-	// ReclaimDeferred, and nothing else remembers them.
+	// deferred holds deleted entries whose free was refused because a live
+	// configuration generation still referenced them.
+	//
+	// Nothing else remembers them; the service retries them at the start
+	// of every request and on explicit reclamation.
 	deferred []*ringEntry
 	log      *zap.Logger
 }
@@ -127,8 +133,8 @@ func (m *RingService) CreateRing(
 	ctx context.Context,
 	req *ringpb.CreateRingRequest,
 ) (*ringpb.CreateRingResponse, error) {
-	// Validated here too, not only by the gateway, so an in-process caller
-	// cannot slip a capacity past the uint32 truncation below.
+	// Validated here as well as by the gateway, so an in-process caller
+	// cannot slip a capacity past the 32-bit truncation below.
 	if err := req.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -195,8 +201,8 @@ func (m *RingService) ShowRing(
 	return &ringpb.ShowRingResponse{Ring: ringInfo(entry)}, nil
 }
 
-// ListRings returns every registered ring with the same facts ShowRing
-// would return for each.
+// ListRings returns every registered ring, sorted by name, with the same
+// facts ShowRing returns for each.
 func (m *RingService) ListRings(
 	ctx context.Context,
 	req *ringpb.ListRingsRequest,
@@ -212,6 +218,9 @@ func (m *RingService) ListRings(
 	for _, entry := range m.rings {
 		response.Rings = append(response.Rings, ringInfo(entry))
 	}
+	slices.SortFunc(response.Rings, func(a, b *ringpb.RingInfo) int {
+		return strings.Compare(a.GetName(), b.GetName())
+	})
 	return response, nil
 }
 
@@ -268,9 +277,8 @@ func (m *RingService) DeleteRing(
 				name, err,
 			)
 		case errors.Is(err, ffi.ErrNotFound) || !cring.Exists(m.agent, name):
-			// The dataplane no longer publishes the ring, so nothing
-			// is left to unpublish: dropping the entry below is the
-			// only way it ever leaves the registry.
+			// Nothing is left to unpublish, and dropping the entry
+			// below is the only way it ever leaves the registry.
 			m.log.Warn("ring already absent from the dataplane; dropping it",
 				zap.String("ring", name), zap.Error(err))
 		default:
@@ -290,9 +298,8 @@ func (m *RingService) DeleteRing(
 	return &ringpb.DeleteRingResponse{}, nil
 }
 
-// LookupHandle returns the handle currently registered under name, letting
-// a consumer resolve a configured ring name to the handle it binds
-// through.
+// LookupHandle returns the handle registered under a name, letting a
+// consumer resolve a configured ring name to the handle it binds through.
 func (m *RingService) LookupHandle(name string) (Handle, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -309,7 +316,7 @@ func (m *RingService) LookupHandle(name string) (Handle, bool) {
 //
 // Fails once that handle has been deleted, even if a new ring exists under
 // the name the handle used to name: the new ring has its own handle from
-// its own CreateRing call, and this call never matches it.
+// its own create, and this call never matches it.
 func (m *RingService) Acquire(handle Handle) (*Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -334,9 +341,10 @@ func (m *RingService) Acquire(handle Handle) (*Lease, error) {
 }
 
 // freeOrDefer frees an entry's object once nothing publishes it any more.
-// A refusal while a live generation still references it joins the
-// deferred list; any other failure is logged and the memory is leaked
-// rather than risk a double free. The caller must hold m.mu.
+//
+// A refusal while a live generation still references it defers the entry;
+// any other failure is logged and the memory leaked to avoid a double free.
+// The caller holds the service lock.
 func (m *RingService) freeOrDefer(entry *ringEntry) {
 	if err := entry.Object.Free(); err != nil {
 		if errors.Is(err, ffi.ErrStillReferenced) {
@@ -347,19 +355,19 @@ func (m *RingService) freeOrDefer(entry *ringEntry) {
 	}
 }
 
-// ReclaimDeferred retries every deferred ring entry, dropping the ones
-// whose generations have drained and keeping the rest deferred. It is the
-// reclamation handler for this service's retired objects; the service
-// itself runs it at the start of every RPC, and anything else may call it
-// at any time.
+// ReclaimDeferred retries every deferred ring, dropping the ones whose
+// generations have drained and keeping the rest.
+//
+// The service runs it at the start of every request; anything else may
+// call it at any time.
 func (m *RingService) ReclaimDeferred() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reclaimDeferred()
 }
 
-// reclaimDeferred is ReclaimDeferred without the lock. The caller must hold
-// m.mu.
+// reclaimDeferred is ReclaimDeferred without the lock; the caller holds the
+// service lock.
 func (m *RingService) reclaimDeferred() {
 	kept := m.deferred[:0]
 	for _, entry := range m.deferred {

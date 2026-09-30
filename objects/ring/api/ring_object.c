@@ -17,9 +17,9 @@
 #include "lib/dataplane/config/zone.h"
 #include "lib/dataplane/object/object.h"
 
-// Typed destructor: tears the object down and returns its storage to the
-// agent arena. Runs only on a dangling object, after
-// ring_object_config_free wins the try-destroy race.
+// Tear the object down and return its storage to the agent arena.
+//
+// Runs only on a dangling object, once the guarded destroy has claimed it.
 static void
 ring_object_destroy(struct cp_object *cp_object) {
 	struct ring_object *self =

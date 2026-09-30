@@ -1,7 +1,5 @@
-// Package cring provides Go bindings for the standalone ring cp_object: a
-// named, per-worker overwrite-oldest record buffer that any module can
-// create, publish and read, independent of any dataplane module of its
-// own.
+// Package cring provides Go bindings for the standalone ring object: a
+// named, per-worker overwrite-oldest record buffer with no dataplane module.
 package cring
 
 //#cgo CFLAGS: -I../../../../../
@@ -81,10 +79,11 @@ func (m *Object) Publish() error {
 }
 
 // Free destroys the object, or reports ffi.ErrStillReferenced while a live
-// generation still holds it — the handle stays usable and a later retry
-// may succeed. Safe to call multiple times. After a successful Free the
-// handle is inert: WorkerCount and Capacity report 0, Source and
-// OpenReader fail, and Publish is refused.
+// generation still holds it; the handle then stays usable for a retry.
+//
+// Safe to call multiple times. After a successful free the handle is inert:
+// its size accessors report 0, and opening a source or reader and
+// publishing are refused.
 func (m *Object) Free() error {
 	return m.ptr.Free(func(ptr unsafe.Pointer) (int, unsafe.Pointer, error) {
 		var cErr *C.yanet_error
@@ -130,20 +129,18 @@ func (m *Object) Capacity() uint32 {
 	return uint32(C.ring_object_capacity(ptr))
 }
 
-// Source resolves the RecordSource for one worker's ring, backed by the C
-// accessors so no caller does its own stride arithmetic across the
-// shared-memory boundary.
+// Source resolves the RecordSource for one worker's ring through the C
+// accessors, so no caller does stride arithmetic across shared memory.
 //
-// OpenReader is the usual entry point; Source is exported so a caller can
-// wrap the real source, for instance to drive the read protocol against
-// externally paced writer state.
+// OpenReader is the usual entry point; Source lets a caller wrap the real
+// source, for instance to drive the read protocol against externally paced
+// writer state.
 func (m *Object) Source(workerIdx uint64) (RecordSource, error) {
 	return SourceFromRaw(m.AsRawPtr(), workerIdx)
 }
 
-// SourceFromRaw is Source for a raw ring cp_object pointer, such as
-// Object.AsRawPtr or an object a sibling CGo package resolved from a
-// published generation, so every source goes through the same C accessors.
+// SourceFromRaw is Source for a raw ring object pointer, such as one a
+// sibling cgo package resolved from a published generation.
 func SourceFromRaw(objPtr unsafe.Pointer, workerIdx uint64) (RecordSource, error) {
 	if objPtr == nil {
 		return nil, errFreed

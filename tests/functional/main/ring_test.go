@@ -91,10 +91,8 @@ func dataplaneWorkerCount(t *testing.T) uint64 {
 // capture check sends; the capture filter selects only them.
 const pdumpCaptureDport = 5555
 
-// requirePdumpCapturesInput installs a pdump config in front of the test
-// pipeline's forwarding chain, sends UDP packets through it and asserts
-// that they are still forwarded and that the capture returns exactly the
-// sent frames.
+// requirePdumpCapturesInput installs pdump in front of the forwarding chain,
+// sends UDP packets and asserts they are forwarded and captured exactly.
 //
 // The pdump reader starts from the oldest retained record, so reading
 // after sending observes every captured packet without racing the sender.
@@ -165,12 +163,12 @@ func requirePdumpCapturesInput(t *testing.T, fw *framework.TestFramework, config
 	require.ElementsMatch(t, sent, captured, "pdump must capture exactly the sent frames")
 }
 
-// Test_RingCLI_LifecycleAndPdumpCapture verifies that the ring CLI talks to
-// the ring service hosted by a running pdump module: a created ring is
-// listed and shown with its capacity and the dataplane worker count, bad
-// creates fail without changing the registry, delete removes a ring and its
-// name can be reused, and pdump capture works the same with a ring present
-// and absent.
+// Test_RingCLI_LifecycleAndPdumpCapture verifies that the ring CLI drives the
+// ring service hosted by a running pdump module.
+//
+// A created ring is listed and shown with its capacity and the dataplane
+// worker count, bad creates leave the registry unchanged, a deleted name can
+// be reused, and pdump capture works with and without a ring present.
 func Test_RingCLI_LifecycleAndPdumpCapture(t *testing.T) {
 	t.Parallel()
 	withBootedVM(t, func(fw *framework.TestFramework) {
@@ -188,8 +186,9 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 	workers := dataplaneWorkerCount(t)
 
 	// A failed step may leave rings behind in the shared VM; remove them
-	// so later tests start from an empty registry. Delete of an absent
-	// ring just fails, which is fine here.
+	// so later tests start from an empty registry.
+	//
+	// Deleting an absent ring just fails, which is fine here.
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return

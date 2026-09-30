@@ -1,11 +1,9 @@
-// Package ringlink links a module config to a named ring object, for
-// service tests that must reproduce the dataplane's refusal to delete a
-// ring a published module still links.
+// Package ringlink links a module config to a named ring object, so service
+// tests can reproduce the refusal to delete a linked ring.
 //
-// Production code never links a module to a ring itself: linking is the
-// dataplane module's own concern, exercised here only to pin the delete
-// refusal end to end. Rooted directly under objects/ring so both the
-// cring bindings tests and the controlplane service tests can reach it.
+// Production code never links a module to a ring here: linking belongs to
+// the dataplane module itself. The package sits directly under objects/ring
+// so both the bindings and the service tests can reach it.
 package ringlink
 
 //#cgo CFLAGS: -I../../../../
@@ -22,9 +20,8 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
 
-// LinkRing links the module config at moduleConfigPtr (an
-// ffi.ModuleConfig.AsRawPtr value) to the named ring object, mapping 1:1 to
-// cp_module_link_object.
+// LinkRing links a raw module config pointer to the named ring object, a
+// direct wrapper of the C module link call.
 func LinkRing(moduleConfigPtr unsafe.Pointer, name string) error {
 	cpModule := (*C.struct_cp_module)(moduleConfigPtr)
 

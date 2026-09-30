@@ -31,7 +31,7 @@ fn client(channel: LayeredChannel) -> RingServiceClient<LayeredChannel> {
         .accept_compressed(CompressionEncoding::Gzip)
 }
 
-/// Manages standalone ring objects that other configs link by name.
+/// Manages standalone ring objects that module configs can link by name.
 #[derive(Debug, Clone, Parser)]
 #[command(version = ync::version(), about)]
 #[command(flatten_help = true)]
@@ -191,7 +191,7 @@ fn ring_candidates() -> Vec<CompletionCandidate> {
 }
 
 #[cfg(test)]
-mod tests {
+mod test {
     use super::*;
 
     #[test]

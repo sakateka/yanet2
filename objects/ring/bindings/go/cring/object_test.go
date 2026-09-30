@@ -34,10 +34,10 @@ func newTestAgent(t *testing.T, workerCount uint64) *ffi.Agent {
 	return agent
 }
 
-// Test_Object_NewObject_RejectsBadCapacity verifies that the C rejection of
-// a zero, undersized or non-power-of-two capacity is reported as
-// cerrors.InvalidArgument, so a service built on this binding can map it to
-// a gRPC status.
+// Test_Object_NewObject_RejectsBadCapacity verifies that a zero, undersized
+// or non-power-of-two capacity is reported as an invalid argument.
+//
+// A service built on this binding maps that kind to a gRPC status.
 func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
@@ -60,8 +60,7 @@ func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 }
 
 // Test_Object_WorkerCountAndCapacity verifies that a created object reports
-// the dataplane's configured worker count, not a value the caller passed,
-// and the capacity it was created with.
+// the dataplane's worker count and the capacity it was created with.
 func Test_Object_WorkerCountAndCapacity(t *testing.T) {
 	agent := newTestAgent(t, 3)
 
@@ -74,8 +73,7 @@ func Test_Object_WorkerCountAndCapacity(t *testing.T) {
 }
 
 // Test_Object_Free_RefusedWhileReferenced verifies that freeing a published
-// object is refused with ffi.ErrStillReferenced while its generation is
-// live, and that the handle stays usable afterward.
+// object is refused as still referenced while its generation is live.
 func Test_Object_Free_RefusedWhileReferenced(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
@@ -86,10 +84,8 @@ func Test_Object_Free_RefusedWhileReferenced(t *testing.T) {
 	require.ErrorIs(t, object.Free(), ffi.ErrStillReferenced)
 }
 
-// Test_Object_Exists_TracksPublishAndDelete verifies that Exists reflects
-// only the currently published generation: false before create, false
-// after create but before publish, true once published, and false again
-// once deleted.
+// Test_Object_Exists_TracksPublishAndDelete verifies that Exists is true
+// only between publishing and deleting the ring.
 func Test_Object_Exists_TracksPublishAndDelete(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
@@ -106,16 +102,14 @@ func Test_Object_Exists_TracksPublishAndDelete(t *testing.T) {
 	require.False(t, cring.Exists(agent, "maybe"))
 }
 
-// Test_Parity_MaxNameLen verifies that cring's name-length bound, mirrored
-// from the C object-name buffer size, agrees with the request-validation
-// bound the ring proto package enforces independently.
+// Test_Parity_MaxNameLen verifies that the C object-name bound agrees with
+// the name bound the proto package enforces independently.
 func Test_Parity_MaxNameLen(t *testing.T) {
 	require.Equal(t, ringpb.MaxRingNameLen, cring.MaxNameLen)
 }
 
-// Test_Object_Free_LeavesHandleInert verifies that every accessor on a
-// handle whose object was freed reports zero or an error instead of
-// touching the released memory.
+// Test_Object_Free_LeavesHandleInert verifies that every accessor on a freed
+// handle reports zero or an error instead of touching released memory.
 func Test_Object_Free_LeavesHandleInert(t *testing.T) {
 	agent := newTestAgent(t, 1)
 

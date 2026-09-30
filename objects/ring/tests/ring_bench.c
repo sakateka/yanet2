@@ -1,25 +1,13 @@
 /*
- * Compares the old pdump writer against the new ring writer at several
- * record sizes, single-threaded and with two threads writing adjacent
- * workers.
+ * Benchmark of the old pdump writer against the ring writer at several
+ * record sizes, single-threaded and with two threads on adjacent workers.
  *
- * Old publishes with fetch_add over a packed, unaligned per-worker
- * struct; new publishes with a release store over a cache-line aligned
- * one. Both headers are included in this one translation unit to prove
- * they do not collide. Each side's per-worker array is one contiguous,
- * 64-byte-aligned heap allocation — the layout a real block allocator
- * gives pdump today, deterministic instead of depending on stack
- * alignment — so the two-worker runs reproduce the cache-line sharing
- * (old) or isolation (new) that layout actually has. Every ring is
- * pre-faulted before timing, each timed phase runs long enough that
- * thread start/stop is negligible, both threads in a run start together
- * on a barrier, a discarded warm-up precedes every timed phase, and the
- * old/new order alternates so neither side systematically runs first.
- * Sizes are tried with and without the ring full enough to force eviction
- * on every write; the no-overflow case resets the indices between passes
- * over one pre-faulted ring instead of growing the ring to fit the whole
- * run. This is a benchmark, not a test: it prints ns/record for old vs
- * new and carries no pass/fail threshold.
+ * Each per-worker array is one contiguous 64-byte-aligned allocation, the
+ * layout a block allocator gives, so two-worker runs reproduce the old
+ * layout's cache-line sharing and the new one's isolation. Rings are
+ * pre-faulted, every timed phase follows a discarded warm-up, threads start
+ * on a barrier and the old/new order alternates. Sizes run with and without
+ * eviction on every write. It prints ns/record with no pass/fail threshold.
  */
 
 #include "modules/pdump/dataplane/ring.h"
@@ -38,8 +26,8 @@
 #define BENCH_PHASE_NS (100 * 1000 * 1000ull)
 // Duration of the discarded warm-up phase that precedes every timed one.
 #define BENCH_WARMUP_NS (20 * 1000 * 1000ull)
-// Iterations between deadline checks, so clock_gettime's own cost does not
-// bias the smallest record size's measurement.
+// Iterations between deadline checks, so reading the clock does not bias
+// the smallest record size's measurement.
 #define BENCH_CHECK_BATCH 256
 
 static uint64_t
@@ -68,8 +56,8 @@ bench_die(const char *what) {
 	abort();
 }
 
-// Allocate size bytes and touch every byte, so the first real write during
-// a timed phase never pays a first-touch page fault. Aborts on failure.
+// Allocate a buffer and touch every byte, so the first write in a timed
+// phase never pays a page fault. Aborts on failure.
 static uint8_t *
 alloc_touched(size_t size) {
 	uint8_t *block = malloc(size);
@@ -80,8 +68,7 @@ alloc_touched(size_t size) {
 	return block;
 }
 
-// Old writer: pdump's prepare/write/checkpoint over pdump's own fixed-size
-// message header.
+// Old writer: pdump's own writer over its fixed-size message header.
 static void
 old_write_record(
 	struct ring_buffer *ring,
@@ -97,7 +84,7 @@ old_write_record(
 	pdump_ring_write_msg(ring, data, &hdr, payload);
 }
 
-// New writer: prepare/write/commit over the 8-byte generic frame.
+// New writer: the ring writer over the 8-byte generic frame.
 static void
 new_write_record(
 	struct ring_worker *ring,
@@ -211,11 +198,11 @@ new_bench_thread(void *arg) {
 	return NULL;
 }
 
-// Allocate count workers' metadata as one contiguous, 64-byte-aligned
-// array — deterministically reproducing the layout a real block allocator
-// gives a contiguous per-worker metadata array, rather than leaving
-// adjacency to stack alignment — plus each worker's own pre-faulted data
-// area. Aborts on failure.
+// Allocate adjacent workers' metadata as one contiguous 64-byte-aligned
+// array, plus each worker's own pre-faulted data area.
+//
+// The array reproduces the layout a block allocator gives, independent of
+// stack alignment. Aborts on failure.
 static struct ring_buffer *
 old_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 	struct ring_buffer *workers;
@@ -258,12 +245,12 @@ new_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 	return workers;
 }
 
-// Run count adjacent workers concurrently, each writing records of size
-// bytes for one discarded warm-up phase and one timed phase, both threads
-// in each phase released together by a start barrier. reset_after_records
-// keeps a phase overflow-free by resetting the indices between passes
-// instead of evicting; 0 lets the ring evict naturally. Returns the
-// average ns/record across the timed phase.
+// Run adjacent workers concurrently through a discarded warm-up and a timed
+// phase, returning the timed phase's average ns/record.
+//
+// Both threads in a phase start together on a barrier. A nonzero reset
+// interval keeps a phase overflow-free by resetting the indices between
+// passes; zero lets the ring evict naturally.
 static double
 run_old(uint32_t size,
 	uint32_t ring_size,
@@ -390,8 +377,9 @@ int
 main(void) {
 	const uint32_t sizes[] = {64, 256, 1500, 9000};
 	const uint32_t overflow_ring_size = 1u << 16;
-	// Records held per no-overflow pass before the indices reset; the
-	// exact count only trades allocation size for reset frequency, so an
+	// Records per no-overflow pass before the indices reset.
+	//
+	// The count only trades allocation size for reset frequency, so an
 	// order-of-magnitude choice is enough.
 	const uint32_t records_per_pass = 256;
 

@@ -27,9 +27,8 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/internal/ringwriter"
 )
 
-// newTestAgent builds a throwaway dataplane_ut harness with the ring object
-// loaded, plus any extraModules, and one attached agent, both torn down at
-// test end.
+// newTestAgent builds a throwaway harness with the ring object and any extra
+// modules loaded and one attached agent, both torn down at test end.
 func newTestAgent(t *testing.T, workerCount uint64, extraModules ...string) *ffi.Agent {
 	t.Helper()
 
@@ -50,9 +49,8 @@ func newTestAgent(t *testing.T, workerCount uint64, extraModules ...string) *ffi
 	return agent
 }
 
-// startRingService hosts service behind a real gRPC server chained with
-// the validate interceptor the module runner applies to every module, so a
-// validation-row test observes InvalidArgument from the real request path.
+// startRingService hosts the service behind a real gRPC server with the
+// validate interceptor every module gets, so validation runs on the real path.
 func startRingService(t *testing.T, service *ring.RingService) ringpb.RingServiceClient {
 	t.Helper()
 
@@ -76,9 +74,8 @@ func startRingService(t *testing.T, service *ring.RingService) ringpb.RingServic
 	return ringpb.NewRingServiceClient(conn)
 }
 
-// newRingService builds a RingService over a throwaway agent and exposes it
-// behind a real gRPC client, for a test that needs both the client surface
-// and direct access to the owner's handle/lease API.
+// newRingService builds a RingService over a throwaway agent, returning it
+// with a real gRPC client for tests that also use the handle and lease API.
 func newRingService(t *testing.T, workerCount uint64, extraModules ...string) (*ring.RingService, ringpb.RingServiceClient) {
 	t.Helper()
 
@@ -87,10 +84,10 @@ func newRingService(t *testing.T, workerCount uint64, extraModules ...string) (*
 	return service, startRingService(t, service)
 }
 
-// requireRingUsable asserts that the ring published under name still
-// accepts a record from the C writer on its first worker and hands the same
-// bytes and seqno back to a cring reader over that worker. It assumes
-// nothing was written to the ring before.
+// requireRingUsable asserts that the named ring still carries a record from
+// the C writer on its first worker to a reader, bytes and seqno intact.
+//
+// It assumes nothing was written to the ring before.
 func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	t.Helper()
 
@@ -111,9 +108,8 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_RingService_CreateShowList verifies that a created ring is reported
-// by both ShowRing and ListRings with the same name, capacity and worker
-// count.
+// Test_RingService_CreateShowList verifies that a created ring is reported by
+// both show and list with the same name, capacity and worker count.
 func Test_RingService_CreateShowList(t *testing.T) {
 	_, client := newRingService(t, 2)
 	ctx := t.Context()
@@ -151,10 +147,10 @@ func Test_RingService_DeleteRing_UnknownNameNotFound(t *testing.T) {
 	require.Equal(t, codes.NotFound, status.Code(err))
 }
 
-// Test_RingService_CreateRing_ValidationRejectsInvalidRequests verifies
-// that a request the proto's own Validate rejects reaches the handler as
-// InvalidArgument through the real gRPC and interceptor path, and creates
-// nothing.
+// Test_RingService_CreateRing_ValidationRejectsInvalidRequests verifies that
+// an invalid request fails as InvalidArgument through the real gRPC path.
+//
+// A rejected create registers nothing.
 func Test_RingService_CreateRing_ValidationRejectsInvalidRequests(t *testing.T) {
 	_, client := newRingService(t, 1)
 	ctx := t.Context()
@@ -197,17 +193,16 @@ func Test_RingService_CreateRing_ValidationRejectsInvalidRequests(t *testing.T) 
 	}
 }
 
-// Test_RingService_CreateRing_AboveMaxCapacityRejected verifies that a
-// capacity the proto's Validate lets through — a power of two within the
-// uint32 range — but the C allocator refuses as too large is reported as
-// InvalidArgument from the real create path, and creates nothing.
+// Test_RingService_CreateRing_AboveMaxCapacityRejected verifies that a valid
+// power of two above the allocator's maximum is refused as InvalidArgument.
+//
+// The rejected create registers nothing.
 func Test_RingService_CreateRing_AboveMaxCapacityRejected(t *testing.T) {
 	_, client := newRingService(t, 1)
 	ctx := t.Context()
 
-	// 1<<27 exceeds MEMORY_BLOCK_ALLOCATOR_MAX_SIZE (1<<26, less an ASan
-	// red zone) regardless of build type, while itself staying a valid
-	// power of two well inside the uint32 range.
+	// 1<<27 exceeds the allocator's maximum block (64 MiB, less two ASan
+	// red zones) in any build while staying a valid power of two.
 	_, err := client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: "too-big", Capacity: 1 << 27})
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
 
@@ -216,9 +211,8 @@ func Test_RingService_CreateRing_AboveMaxCapacityRejected(t *testing.T) {
 	require.Empty(t, list.GetRings())
 }
 
-// Test_RingService_CreateRing_DuplicateNameRejected verifies that creating
-// a second ring under a name already registered reports AlreadyExists and
-// leaves the original the only entry.
+// Test_RingService_CreateRing_DuplicateNameRejected verifies that a duplicate
+// name reports AlreadyExists and leaves the original ring the only entry.
 func Test_RingService_CreateRing_DuplicateNameRejected(t *testing.T) {
 	_, client := newRingService(t, 1)
 	ctx := t.Context()
@@ -235,32 +229,38 @@ func Test_RingService_CreateRing_DuplicateNameRejected(t *testing.T) {
 	require.Equal(t, uint64(64), list.GetRings()[0].GetCapacity(), "the original ring must be unchanged")
 }
 
-// Test_RingService_ListRings_ReportsEveryRing verifies that ListRings
-// reports every registered ring exactly once, each with its own capacity.
-func Test_RingService_ListRings_ReportsEveryRing(t *testing.T) {
+// Test_RingService_ListRings_SortedByName verifies that list reports every
+// registered ring exactly once, sorted by name, with its own capacity.
+func Test_RingService_ListRings_SortedByName(t *testing.T) {
 	_, client := newRingService(t, 1)
 	ctx := t.Context()
 
-	want := map[string]uint64{"alpha": 64, "beta": 128, "gamma": 4096}
-	for name, capacity := range want {
-		_, err := client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: name, Capacity: capacity})
+	created := []*ringpb.RingInfo{
+		{Name: "gamma", Capacity: 4096},
+		{Name: "alpha", Capacity: 64},
+		{Name: "beta", Capacity: 128},
+	}
+	for _, info := range created {
+		_, err := client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: info.GetName(), Capacity: info.GetCapacity()})
 		require.NoError(t, err)
 	}
 
 	list, err := client.ListRings(ctx, &ringpb.ListRingsRequest{})
 	require.NoError(t, err)
-	got := map[string]uint64{}
+	var names []string
+	capacities := map[string]uint64{}
 	for _, info := range list.GetRings() {
-		got[info.GetName()] = info.GetCapacity()
+		names = append(names, info.GetName())
+		capacities[info.GetName()] = info.GetCapacity()
 	}
-	require.Len(t, list.GetRings(), len(want), "every ring must be listed exactly once")
-	require.Equal(t, want, got)
+	require.Equal(t, []string{"alpha", "beta", "gamma"}, names)
+	require.Equal(t, map[string]uint64{"alpha": 64, "beta": 128, "gamma": 4096}, capacities)
 }
 
-// Test_RingService_CreateRing_InProcessValidation verifies that a direct,
-// in-process call skipping the gRPC validate interceptor still has its
-// request validated, so a capacity beyond the uint32 range is rejected
-// instead of being truncated to a small ring.
+// Test_RingService_CreateRing_InProcessValidation verifies that an in-process
+// call skipping the interceptor is still validated.
+//
+// A capacity beyond 32 bits is therefore rejected instead of truncated.
 func Test_RingService_CreateRing_InProcessValidation(t *testing.T) {
 	service, client := newRingService(t, 1)
 	ctx := t.Context()
@@ -278,9 +278,8 @@ func Test_RingService_CreateRing_InProcessValidation(t *testing.T) {
 	require.Empty(t, list.GetRings())
 }
 
-// Test_RingService_CreateRing_ExternallyPublishedNameRejected verifies that
-// a name already published by someone other than the service is refused
-// with AlreadyExists and the published ring is left as it was.
+// Test_RingService_CreateRing_ExternallyPublishedNameRejected verifies that a
+// name published outside the service is refused and that ring left as is.
 func Test_RingService_CreateRing_ExternallyPublishedNameRejected(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
@@ -305,9 +304,10 @@ func Test_RingService_CreateRing_ExternallyPublishedNameRejected(t *testing.T) {
 }
 
 // Test_RingService_CreateRing_PublishFailureReleasesObject verifies that a
-// create whose publish the dataplane rejects for lack of controlplane
-// memory reports Internal, registers and publishes nothing, and returns the
-// object's memory to the agent arena.
+// create whose publish runs out of controlplane memory reports Internal.
+//
+// Nothing is registered or published, and the object's memory returns to
+// the agent arena.
 func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 	const cpMemory = 8 * datasize.MB
 
@@ -326,10 +326,10 @@ func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 	client := startRingService(t, service)
 	ctx := t.Context()
 
-	// Drain the rest of the controlplane pool into one filler agent,
-	// largest blocks first, so no block is left for the new configuration
-	// generation a publish allocates, while the service's own arena stays
-	// intact.
+	// Drain the rest of the controlplane pool into a filler agent, largest
+	// blocks first, so a publish finds no block for its new generation.
+	//
+	// The service's own arena stays intact.
 	filler, err := h.SharedMemory().AgentAttach("ring-cp-filler", 0, datasize.B)
 	require.NoError(t, err)
 	for size := cpMemory; size > 0; {
@@ -352,9 +352,7 @@ func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 }
 
 // Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry verifies that a
-// registered ring the dataplane no longer publishes is still deleted
-// successfully, unregistered and freed, rather than staying registered
-// forever.
+// ring the dataplane no longer publishes is still unregistered and freed.
 func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
@@ -375,11 +373,10 @@ func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 	require.Equal(t, baseline, agent.BlockAllocatorFreeSize())
 }
 
-// Test_RingService_DeleteRing_LeasedRingStaysUsable verifies that deleting
-// a ring pinned by an active lease is refused with FailedPrecondition,
-// that the ring stays registered and still carries a record from the C
-// writer to a reader meanwhile, and that releasing the lease lets the
-// delete succeed.
+// Test_RingService_DeleteRing_LeasedRingStaysUsable verifies that a leased
+// ring refuses deletion with FailedPrecondition yet stays usable.
+//
+// Releasing the lease lets the delete succeed.
 func Test_RingService_DeleteRing_LeasedRingStaysUsable(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
@@ -409,10 +406,10 @@ func Test_RingService_DeleteRing_LeasedRingStaysUsable(t *testing.T) {
 }
 
 // Test_RingService_DeleteRing_RefusedWhileLinked verifies that a published
-// module's link to a ring refuses its deletion with FailedPrecondition,
-// mapping the dataplane's link refusal end to end, and that the ring stays
-// registered and still carries a record from the C writer to a reader
-// afterward.
+// module's link refuses the ring's deletion with FailedPrecondition.
+//
+// The ring stays registered and usable, and removing the linking module
+// lets the delete succeed.
 func Test_RingService_DeleteRing_RefusedWhileLinked(t *testing.T) {
 	agent := newTestAgent(t, 1, "forward")
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
@@ -442,12 +439,12 @@ func Test_RingService_DeleteRing_RefusedWhileLinked(t *testing.T) {
 	require.False(t, cring.Exists(agent, "linked"))
 }
 
-// Test_RingService_DeleteRing_RefusedFreeRetried verifies that a delete
-// whose typed free is refused by a live reference still reports success
-// and unregisters the name — neither shown nor listed, and free to be
-// recreated under a fresh handle — that the ring's memory stays held while
-// the reference remains, and that a later mutation retries and completes
-// the deferred free once the reference releases.
+// Test_RingService_DeleteRing_RefusedFreeRetried verifies that a delete whose
+// free a live reference refuses still succeeds and unregisters the name.
+//
+// The name can be recreated under a fresh handle, the memory stays held
+// while the reference remains, and a later mutation completes the deferred
+// free once the reference is released.
 func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	agent := newTestAgent(t, 1)
 	service := ring.NewRingService(agent, ring.WithLog(zap.NewNop()))
@@ -476,9 +473,8 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	require.Less(t, agent.BlockAllocatorFreeSize(), baseline,
 		"the deferred ring's memory must still be held while a live reference remains")
 
-	// The name is free again while the old object is still referenced: a
-	// recreate succeeds under a fresh handle, and deleting that new ring
-	// does not reclaim the old one while its reference remains.
+	// The name is free again while the old object is referenced: a
+	// recreate gets a fresh handle, and deleting it keeps the old ring held.
 	_, err = client.CreateRing(ctx, &ringpb.CreateRingRequest{Name: "deferred", Capacity: 64})
 	require.NoError(t, err)
 	newHandle, ok := service.LookupHandle("deferred")
@@ -503,10 +499,11 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 		"the deferred ring's memory must be reclaimed once its last reference releases")
 }
 
-// Test_RingService_DeleteThenRecreate_NewHandle verifies that recreating a
-// ring under a deleted name yields a fresh handle: the old handle can
-// never be acquired again, and a stale release from before the delete does
-// not unpin the new ring.
+// Test_RingService_DeleteThenRecreate_NewHandle verifies that a ring
+// recreated under a deleted name gets a fresh handle.
+//
+// The old handle is never acquired again, and a stale release from before
+// the delete does not unpin the new ring.
 func Test_RingService_DeleteThenRecreate_NewHandle(t *testing.T) {
 	service, client := newRingService(t, 1)
 	ctx := t.Context()
@@ -552,10 +549,11 @@ func Test_RingService_DeleteThenRecreate_NewHandle(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// Test_RingService_LeaseVsDeleteRace verifies, under concurrent load, that
-// a delete never succeeds while any lease is admitted, that whichever way
-// the race falls the ring ends up deleted, and that the handle never
-// admits a lease again once it is.
+// Test_RingService_LeaseVsDeleteRace verifies under concurrent load that a
+// delete never succeeds while a lease is admitted.
+//
+// Whichever way the race falls the ring ends up deleted, and its handle
+// never admits a lease again.
 func Test_RingService_LeaseVsDeleteRace(t *testing.T) {
 	service, client := newRingService(t, 1)
 	ctx := t.Context()
@@ -599,18 +597,15 @@ func Test_RingService_LeaseVsDeleteRace(t *testing.T) {
 	mu.Unlock()
 
 	if raceErr == nil {
-		// The race's own delete won before any Acquire could be admitted:
-		// under the service's single lock, a delete and a later-admitted
-		// lease on the same handle can never both exist, so admitted must
-		// be exactly zero here, and the ring is already gone.
+		// The delete won before any lease was admitted: under the single
+		// service lock a delete and a later lease on one handle never coexist.
 		require.Zero(t, admitted, "a delete must never succeed while a lease is admitted")
 
 		_, err = client.DeleteRing(ctx, &ringpb.DeleteRingRequest{Name: "race"})
 		require.Equal(t, codes.NotFound, status.Code(err))
 	} else {
-		// Some Acquire won an admission before the race's delete checked,
-		// refusing it; releasing every admitted lease must let a retry
-		// succeed.
+		// A lease was admitted before the delete checked and refused it;
+		// releasing every admitted lease must let a retry succeed.
 		require.Equal(t, codes.FailedPrecondition, status.Code(raceErr))
 
 		_, err = client.DeleteRing(ctx, &ringpb.DeleteRingRequest{Name: "race"})
