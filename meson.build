@@ -337,6 +337,8 @@ install_data(
 
 if not dataplane_only
   subdir('lib/controlplane/tests')
+  # Declared here, not from objects/ring: the object test links the forward
+  # module and the plain device, which are declared after objects/.
   subdir('objects/ring/tests')
   # Operator proto targets must exist before their consumers are declared.
   #

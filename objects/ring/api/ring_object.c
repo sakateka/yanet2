@@ -74,6 +74,11 @@ ring_object_fini(struct ring_object *self) {
 			memory_bfree(ctx, raw, self->workers_raw_size);
 		}
 	}
+	// Forget the freed storage so a repeated fini frees nothing twice.
+	SET_OFFSET_OF(&self->workers, NULL);
+	SET_OFFSET_OF(&self->workers_raw, NULL);
+	self->workers_raw_size = 0;
+	self->worker_count = 0;
 	cp_object_fini(&self->cp_object);
 }
 
@@ -95,19 +100,26 @@ ring_object_config_new(
 	struct ring_object *self = ring_object_new(agent);
 	if (self == NULL) {
 		yanet_error_add(err, "failed to allocate ring object");
+		errno = ENOMEM;
 		return NULL;
 	}
 
+	// The cleanup below may clobber errno; restore the failing step's
+	// value so the header's errno contract holds for the caller.
 	if (ring_object_init(self, agent, name, err)) {
+		int saved_errno = errno;
 		yanet_error_add(err, "failed to init ring object");
 		ring_object_free(self, agent);
+		errno = saved_errno;
 		return NULL;
 	}
 
 	if (ring_object_create(self, capacity, err)) {
+		int saved_errno = errno;
 		yanet_error_add(err, "failed to create ring object");
 		ring_object_fini(self);
 		ring_object_free(self, agent);
+		errno = saved_errno;
 		return NULL;
 	}
 
@@ -215,6 +227,16 @@ ring_object_create(
 	struct agent *agent = ADDR_OF(&self->cp_object.agent);
 	struct dp_config *dp_config = ADDR_OF(&agent->dp_config);
 	uint64_t worker_count = dp_config->worker_count;
+	if (worker_count == 0) {
+		yanet_error_add_kind(
+			err,
+			YANET_ERROR_FAILED_PRECONDITION,
+			"dataplane reports zero workers; a ring needs at least "
+			"one"
+		);
+		errno = EINVAL;
+		return -1;
+	}
 
 	struct memory_context *ctx = &self->cp_object.memory_context;
 

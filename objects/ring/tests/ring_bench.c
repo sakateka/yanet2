@@ -60,11 +60,22 @@ next_pow2(uint32_t val) {
 	return val + 1;
 }
 
+// Abort the benchmark loudly: a failed setup step would otherwise time a
+// run that is not measuring what it claims.
+static void
+bench_die(const char *what) {
+	fprintf(stderr, "ring_bench: %s\n", what);
+	abort();
+}
+
 // Allocate size bytes and touch every byte, so the first real write during
-// a timed phase never pays a first-touch page fault.
+// a timed phase never pays a first-touch page fault. Aborts on failure.
 static uint8_t *
 alloc_touched(size_t size) {
 	uint8_t *block = malloc(size);
+	if (block == NULL) {
+		bench_die("failed to allocate a buffer");
+	}
 	memset(block, 0, size);
 	return block;
 }
@@ -95,7 +106,9 @@ new_write_record(
 	uint32_t payload_len
 ) {
 	uint32_t total_len = (uint32_t)(RING_RECORD_FRAME_SIZE + payload_len);
-	ring_worker_prepare(ring, data, total_len);
+	if (ring_worker_prepare(ring, data, total_len) != 0) {
+		bench_die("ring_worker_prepare refused a benchmark record");
+	}
 	ring_worker_write(
 		ring, data, RING_RECORD_FRAME_SIZE, payload, payload_len
 	);
@@ -202,7 +215,7 @@ new_bench_thread(void *arg) {
 // array — deterministically reproducing the layout a real block allocator
 // gives a contiguous per-worker metadata array, rather than leaving
 // adjacency to stack alignment — plus each worker's own pre-faulted data
-// area.
+// area. Aborts on failure.
 static struct ring_buffer *
 old_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 	struct ring_buffer *workers;
@@ -211,7 +224,7 @@ old_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 		    64,
 		    sizeof(struct ring_buffer) * (size_t)count
 	    ) != 0) {
-		return NULL;
+		bench_die("failed to allocate old worker metadata");
 	}
 	memset(workers, 0, sizeof(struct ring_buffer) * (size_t)count);
 
@@ -223,15 +236,17 @@ old_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 	return workers;
 }
 
+// Same as old_alloc_workers, aligned to the new struct's own cache-line
+// alignment, which exceeds 64 bytes on 128-byte cache-line targets.
 static struct ring_worker *
 new_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 	struct ring_worker *workers;
 	if (posix_memalign(
 		    (void **)&workers,
-		    64,
+		    _Alignof(struct ring_worker),
 		    sizeof(struct ring_worker) * (size_t)count
 	    ) != 0) {
-		return NULL;
+		bench_die("failed to allocate new worker metadata");
 	}
 	memset(workers, 0, sizeof(struct ring_worker) * (size_t)count);
 

@@ -63,12 +63,26 @@ type ringEntry struct {
 type Option func(*options)
 
 type options struct {
-	Log *zap.Logger
+	// Publish is CreateRing's publish step; only tests replace it, to
+	// drive the publish-failure path.
+	Publish func(*cring.Object) error
+	Log     *zap.Logger
 }
 
 func newOptions() *options {
 	return &options{
-		Log: zap.NewNop(),
+		Log:     zap.NewNop(),
+		Publish: (*cring.Object).Publish,
+	}
+}
+
+// WithPublish replaces CreateRing's publish step, which is
+// cring.Object.Publish by default. It exists for tests that must fail the
+// publish after the ring object was created; production code never sets
+// it.
+func WithPublish(publish func(*cring.Object) error) Option {
+	return func(o *options) {
+		o.Publish = publish
 	}
 }
 
@@ -98,11 +112,13 @@ type RingService struct {
 	// already raised.
 	leases     map[Handle]int
 	nextHandle Handle
-	// deferred holds superseded ring entries whose free was refused
-	// because a live configuration generation still referenced them. This
-	// service is their owner: it retries them on its next mutation and
-	// nothing else remembers them.
+	// deferred holds ring entries whose free was refused because a live
+	// configuration generation still referenced them: deleted rings, and
+	// created ones whose publish failed. This service is their owner: it
+	// retries them at the start of every RPC and through ReclaimDeferred,
+	// and nothing else remembers them.
 	deferred []*ringEntry
+	publish  func(*cring.Object) error
 	log      *zap.Logger
 }
 
@@ -118,6 +134,7 @@ func NewRingService(agent *ffi.Agent, opts ...Option) *RingService {
 		rings:    map[string]*ringEntry{},
 		byHandle: map[Handle]*ringEntry{},
 		leases:   map[Handle]int{},
+		publish:  o.Publish,
 		log:      o.Log,
 	}
 }
@@ -127,9 +144,12 @@ func (m *RingService) CreateRing(
 	ctx context.Context,
 	req *ringpb.CreateRingRequest,
 ) (*ringpb.CreateRingResponse, error) {
+	// Validated here too, not only by the gateway, so an in-process caller
+	// cannot slip a capacity past the uint32 truncation below.
+	if err := req.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	name := req.GetName()
-	// Validate already rejected a capacity too large for the uint32 the C
-	// API takes.
 	capacity := uint32(req.GetCapacity())
 
 	m.mu.Lock()
@@ -153,12 +173,9 @@ func (m *RingService) CreateRing(
 		return nil, status.Errorf(codes.Internal, "failed to create ring %q: %v", name, err)
 	}
 
-	if err := object.Publish(); err != nil {
-		if freeErr := object.Free(); freeErr != nil {
-			m.log.Error("failed to free unpublished ring",
-				zap.String("ring", name), zap.Error(freeErr))
-		}
+	if err := m.publish(object); err != nil {
 		m.log.Error("failed to publish ring", zap.String("ring", name), zap.Error(err))
+		m.freeOrDefer(&ringEntry{Name: name, Object: object})
 		return nil, status.Errorf(codes.Internal, "failed to publish ring %q: %v", name, err)
 	}
 
@@ -176,8 +193,14 @@ func (m *RingService) ShowRing(
 	ctx context.Context,
 	req *ringpb.ShowRingRequest,
 ) (*ringpb.ShowRingResponse, error) {
+	if err := req.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	m.reclaimDeferred()
 
 	entry, ok := m.rings[req.GetName()]
 	if !ok {
@@ -196,6 +219,8 @@ func (m *RingService) ListRings(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.reclaimDeferred()
+
 	response := &ringpb.ListRingsResponse{
 		Rings: make([]*ringpb.RingInfo, 0, len(m.rings)),
 	}
@@ -210,7 +235,7 @@ func ringInfo(entry *ringEntry) *ringpb.RingInfo {
 	return &ringpb.RingInfo{
 		Name:        entry.Name,
 		Capacity:    uint64(entry.Object.Capacity()),
-		WorkerCount: uint32(entry.Object.WorkerCount()),
+		WorkerCount: entry.Object.WorkerCount(),
 	}
 }
 
@@ -224,6 +249,9 @@ func (m *RingService) DeleteRing(
 	ctx context.Context,
 	req *ringpb.DeleteRingRequest,
 ) (*ringpb.DeleteRingResponse, error) {
+	if err := req.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	name := req.GetName()
 
 	m.mu.Lock()
@@ -245,7 +273,8 @@ func (m *RingService) DeleteRing(
 	}
 
 	if err := cring.DeleteObject(m.agent, name); err != nil {
-		if errors.Is(err, ffi.ErrBusy) {
+		switch {
+		case errors.Is(err, ffi.ErrBusy):
 			m.log.Warn("ring deletion refused while linked",
 				zap.String("ring", name), zap.Error(err))
 			return nil, status.Errorf(
@@ -253,21 +282,21 @@ func (m *RingService) DeleteRing(
 				"ring %q is linked by a published module config; update or delete the linking module first: %v",
 				name, err,
 			)
+		case errors.Is(err, ffi.ErrNotFound) || !cring.Exists(m.agent, name):
+			// The dataplane no longer publishes the ring, so nothing
+			// is left to unpublish: dropping the entry below is the
+			// only way it ever leaves the registry.
+			m.log.Warn("ring already absent from the dataplane; dropping it",
+				zap.String("ring", name), zap.Error(err))
+		default:
+			// Still published: keep the entry so a retry can finish
+			// the delete.
+			m.log.Error("failed to delete ring", zap.String("ring", name), zap.Error(err))
+			return nil, status.Errorf(codes.Internal, "failed to delete ring %q: %v", name, err)
 		}
-		m.log.Error("failed to delete ring", zap.String("ring", name), zap.Error(err))
-		return nil, status.Errorf(codes.Internal, "failed to delete ring %q: %v", name, err)
 	}
 
-	// The delete retired the generation holding the published object; a
-	// refusal here joins the deferred list, any other failure is logged
-	// and the entry's memory is leaked rather than risk a double free.
-	if err := entry.Object.Free(); err != nil {
-		if errors.Is(err, ffi.ErrStillReferenced) {
-			m.deferred = append(m.deferred, entry)
-		} else {
-			m.log.Error("failed to free deleted ring", zap.String("ring", name), zap.Error(err))
-		}
-	}
+	m.freeOrDefer(entry)
 	delete(m.rings, name)
 	delete(m.byHandle, entry.Handle)
 	delete(m.leases, entry.Handle)
@@ -319,11 +348,25 @@ func (m *RingService) Acquire(handle Handle) (*Lease, error) {
 	}, nil
 }
 
+// freeOrDefer frees an entry's object once nothing publishes it any more.
+// A refusal while a live generation still references it joins the
+// deferred list; any other failure is logged and the memory is leaked
+// rather than risk a double free. The caller must hold m.mu.
+func (m *RingService) freeOrDefer(entry *ringEntry) {
+	if err := entry.Object.Free(); err != nil {
+		if errors.Is(err, ffi.ErrStillReferenced) {
+			m.deferred = append(m.deferred, entry)
+			return
+		}
+		m.log.Error("failed to free ring", zap.String("ring", entry.Name), zap.Error(err))
+	}
+}
+
 // ReclaimDeferred retries every deferred ring entry, dropping the ones
 // whose generations have drained and keeping the rest deferred. It is the
-// reclamation handler for this service's superseded objects; the service
-// itself runs it at the start of every mutating RPC, and anything else may
-// call it at any time.
+// reclamation handler for this service's retired objects; the service
+// itself runs it at the start of every RPC, and anything else may call it
+// at any time.
 func (m *RingService) ReclaimDeferred() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

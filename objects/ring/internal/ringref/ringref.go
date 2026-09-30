@@ -85,10 +85,8 @@ import (
 
 	"github.com/yanet-platform/yanet2/bindings/go/cerrors"
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
+	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
-
-// ringObjectType matches the C RING_OBJECT_TYPE macro (objects/ring/api).
-const ringObjectType = "ring"
 
 // Reference is an artificial extra reference to a published ring object,
 // simulating a second live generation that has not yet retired. Release
@@ -109,7 +107,7 @@ type Reference struct {
 func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 	cAgent := (*C.struct_agent)(agent.AsRawPtr())
 
-	cType := C.CString(ringObjectType)
+	cType := C.CString(cring.ObjectType)
 	defer C.free(unsafe.Pointer(cType))
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
@@ -146,8 +144,12 @@ func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 }
 
 // Release drops the artificial reference and frees the registry. Safe to
-// call once; the underlying registry is gone afterward.
+// call more than once: later calls do nothing.
 func (m *Reference) Release() {
+	if m.registry == nil {
+		return
+	}
 	C.ringref_locked_fini(m.agent, m.registry)
 	C.free(unsafe.Pointer(m.registry))
+	m.registry = nil
 }

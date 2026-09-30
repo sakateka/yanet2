@@ -14,7 +14,7 @@ use ync::{
     GlobalArgs,
     client::{LayeredChannel, Service},
     completion, display,
-    errors::Error,
+    errors::{Error, ErrorKind},
     output,
 };
 
@@ -121,17 +121,23 @@ async fn ring_show(service: &mut RingCliService, cmd: ShowCmd) -> Result<(), Err
         )
         .await?;
 
+    let Some(ring) = &response.ring else {
+        return Err(Error::new(
+            ErrorKind::Rpc,
+            "show",
+            service.endpoint(),
+            format!("the service answered without ring '{}'", cmd.name),
+        ));
+    };
+
     output::data(
         || &response,
         || {
-            let mut kv = display::KeyValue::new();
-            if let Some(ring) = &response.ring {
-                kv = kv
-                    .row("name", &ring.name)
-                    .row("capacity", ByteSize::b(ring.capacity))
-                    .row("workers", ring.worker_count);
-            }
-            kv.print();
+            display::KeyValue::new()
+                .row("name", &ring.name)
+                .row("capacity", ByteSize::b(ring.capacity))
+                .row("workers", ring.worker_count)
+                .print();
         },
     );
 
@@ -189,7 +195,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_capacity_accepts_suffixes_and_plain_bytes() {
+    fn test_parse_capacity_accepts_iec_suffixes_and_plain_bytes() {
         assert_eq!(Ok(4096), args::parse_capacity("4KiB"));
         assert_eq!(Ok(1 << 20), args::parse_capacity("1MiB"));
         assert_eq!(Ok(64), args::parse_capacity("64"));
@@ -198,5 +204,17 @@ mod tests {
     #[test]
     fn test_parse_capacity_rejects_garbage() {
         assert!(args::parse_capacity("lots").is_err());
+    }
+
+    #[test]
+    fn test_parse_capacity_rejects_decimal_units() {
+        assert!(args::parse_capacity("1MB").is_err());
+        assert!(args::parse_capacity("4KB").is_err());
+    }
+
+    #[test]
+    fn test_parse_capacity_rejects_non_power_of_two() {
+        assert!(args::parse_capacity("24").is_err());
+        assert!(args::parse_capacity("0").is_err());
     }
 }

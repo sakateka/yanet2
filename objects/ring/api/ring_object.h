@@ -42,8 +42,9 @@ struct ring_object {
 // new allocates ONLY the struct in the agent shared memory. init zeroes
 // the enclosing struct and calls cp_object_init; on error callers must
 // call free. fini releases field memory (per-worker data blocks, the
-// metadata array, cp_object_fini) and is idempotent. free deallocates
-// ONLY the struct and is NULL-safe.
+// metadata array, cp_object_fini) and clears the fields it freed, so a
+// second call is a no-op. free deallocates ONLY the struct and is
+// NULL-safe.
 struct ring_object *
 ring_object_new(struct agent *agent);
 
@@ -63,7 +64,10 @@ ring_object_free(struct ring_object *self, struct agent *agent);
 
 // Registration convenience: allocate + init + create and return the
 // cp_object pointer for agent_update_objects. On failure the object is
-// fully cleaned up and NULL is returned.
+// fully cleaned up and NULL is returned with errno preserved from the
+// failing step across that cleanup: ENOMEM when the struct itself cannot
+// be allocated, otherwise the ring_object_create errno. cp_object_init
+// sets no errno of its own, so errno is unspecified when init fails.
 struct cp_object *
 ring_object_config_new(
 	struct agent *agent,
@@ -83,9 +87,10 @@ ring_object_config_free(struct cp_object *cp_object, yanet_error **err);
 //
 // The worker count comes from the agent's dp_config. Called once, before
 // the object is published. Returns 0 on success or -1 with errno set:
-// EINVAL for a capacity below the frame size or not a power of two, E2BIG
-// above the allocator's maximum block, EEXIST when the object was already
-// created, ENOMEM when an allocation fails. A failure leaves the object
+// EINVAL for a capacity below the frame size or not a power of two, or
+// for a dataplane reporting zero workers; E2BIG above the allocator's
+// maximum block; EEXIST when the object was already created; ENOMEM when
+// an allocation fails. A failure leaves the object
 // without storage and the agent's arena unchanged.
 int
 ring_object_create(

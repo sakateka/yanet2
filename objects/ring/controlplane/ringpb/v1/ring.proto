@@ -41,7 +41,7 @@ message RingInfo {
   uint64 capacity = 2;
   // worker_count is the number of per-worker ring instances behind this
   // name.
-  uint32 worker_count = 3;
+  uint64 worker_count = 3;
 }
 
 // CreateRingRequest names the ring to create and its fixed per-worker

@@ -5,6 +5,8 @@ import "C"
 
 import (
 	"encoding/binary"
+	"fmt"
+	"slices"
 	"sync/atomic"
 
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring/internal/ringabi"
@@ -18,11 +20,11 @@ const RecordFrameSize = uint32(C.RING_RECORD_FRAME_SIZE)
 // the worker it came from and the seqno the writer stamped it with at
 // commit.
 //
-// Bytes aliases the Reader's own buffer and stays valid and unchanged
-// across later Read calls on the same Reader: that buffer only ever grows
-// at the end or drops from the front, never overwrites a record already
-// handed out. Its capacity is capped to its length, so appending to it
-// always allocates instead of reaching into the reader's buffer.
+// Bytes is copied out of the Reader's internal buffer into memory owned by
+// the returned records alone (the records of one Read call share one
+// allocation), so it stays valid and unchanged across later Read calls on
+// the same Reader. Its capacity is capped to its length, so appending to
+// it always allocates instead of reaching into a neighbouring record.
 type Record struct {
 	Worker uint64
 	Seqno  uint32
@@ -86,14 +88,23 @@ type Reader struct {
 	src      RecordSource
 
 	readIdx atomic.Uint64
-	buf     []byte
+	// buf is scratch reused across calls and never handed to a caller:
+	// between calls it holds only the carried prefix of a record not yet
+	// fully copied, always compacted to its front.
+	buf []byte
 }
 
 // NewReader builds a Reader over the given RecordSource, tagging every
 // parsed record with worker and bounding a record's declared length
 // against capacity.
-func NewReader(worker uint64, capacity uint32, src RecordSource) *Reader {
-	return &Reader{worker: worker, capacity: capacity, src: src}
+//
+// Fails when capacity is below RecordFrameSize: no record fits such a
+// ring, and every declared length would be rejected as corruption.
+func NewReader(worker uint64, capacity uint32, src RecordSource) (*Reader, error) {
+	if capacity < RecordFrameSize {
+		return nil, fmt.Errorf("ring capacity %d is below the record frame size %d", capacity, RecordFrameSize)
+	}
+	return &Reader{worker: worker, capacity: capacity, src: src}, nil
 }
 
 // HasMore reports whether the ring holds data this Reader has not yet
@@ -113,6 +124,10 @@ func (m *Reader) HasMore() bool {
 // ever sees a record the writer trampled mid-copy. A declared record
 // length outside [frame size, capacity] is treated as corruption and the
 // whole buffer is discarded rather than trusted as a bound.
+//
+// The internal buffer is reused across calls, so a steady-state call
+// allocates only for the records it returns: one slice of Records and one
+// block holding their payloads, none when no whole record completed.
 func (m *Reader) Read(maxBytes uint32) []Record {
 	write, readable := m.src.Indices()
 
@@ -133,13 +148,7 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 
 	before := len(m.buf)
 	after := before + int(size)
-	if cap(m.buf) < after {
-		grown := make([]byte, after)
-		copy(grown, m.buf)
-		m.buf = grown
-	} else {
-		m.buf = m.buf[:after]
-	}
+	m.buf = slices.Grow(m.buf, int(size))[:after]
 	m.src.CopyRange(m.buf[before:after], readable, size)
 
 	// Both this atomic add and the atomic reload below are load-bearing on
@@ -161,40 +170,70 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 			m.readIdx.Store(latest)
 			return nil
 		}
-		m.buf = m.buf[diff:]
+		m.dropPrefix(int(diff))
+	}
+
+	// First pass: find how many whole records the buffer holds and how
+	// many payload bytes they carry, so the second pass allocates exactly
+	// once for each.
+	parsed := 0
+	count := 0
+	payloadBytes := 0
+	corrupt := false
+	for len(m.buf)-parsed >= int(RecordFrameSize) {
+		totalLen := binary.LittleEndian.Uint32(m.buf[parsed : parsed+4])
+		if totalLen < RecordFrameSize || totalLen > m.capacity {
+			corrupt = true
+			break
+		}
+		skip := int(ringabi.Align4(totalLen))
+		if skip > len(m.buf)-parsed {
+			break
+		}
+		count++
+		payloadBytes += int(totalLen - RecordFrameSize)
+		parsed += skip
 	}
 
 	var records []Record
-	for len(m.buf) >= int(RecordFrameSize) {
-		totalLen := binary.LittleEndian.Uint32(m.buf[0:4])
-		seqno := binary.LittleEndian.Uint32(m.buf[4:8])
+	if count > 0 {
+		records = make([]Record, 0, count)
+		payloads := make([]byte, payloadBytes)
+		for offset := 0; offset < parsed; {
+			totalLen := binary.LittleEndian.Uint32(m.buf[offset : offset+4])
+			seqno := binary.LittleEndian.Uint32(m.buf[offset+4 : offset+8])
 
-		if totalLen < RecordFrameSize || totalLen > m.capacity {
-			// The rest of this call's buffer cannot be trusted, but the
-			// write index captured at the top of this call is a genuine
-			// record boundary: the writer only ever advances it by whole
-			// committed records. Resuming there next time, rather than at
-			// wherever this call's copy happened to stop, keeps the next
-			// read aligned to a real frame instead of parsing a record's
-			// payload bytes as if they were a header.
-			m.buf = m.buf[:0]
-			m.readIdx.Store(write)
-			return records
+			n := copy(payloads, m.buf[offset+int(RecordFrameSize):offset+int(totalLen)])
+			records = append(records, Record{
+				Worker: m.worker,
+				Seqno:  seqno,
+				Bytes:  payloads[:n:n],
+			})
+			payloads = payloads[n:]
+			offset += int(ringabi.Align4(totalLen))
 		}
-
-		skip := ringabi.Align4(totalLen)
-		if int(skip) > len(m.buf) {
-			return records
-		}
-
-		records = append(records, Record{
-			Worker: m.worker,
-			Seqno:  seqno,
-			Bytes:  m.buf[RecordFrameSize:totalLen:totalLen],
-		})
-
-		m.buf = m.buf[skip:]
 	}
 
+	if corrupt {
+		// The rest of this call's buffer cannot be trusted, but the write
+		// index captured at the top of this call is a genuine record
+		// boundary: the writer only ever advances it by whole committed
+		// records. Resuming there next time, rather than at wherever this
+		// call's copy happened to stop, keeps the next read aligned to a
+		// real frame instead of parsing a record's payload bytes as if
+		// they were a header.
+		m.buf = m.buf[:0]
+		m.readIdx.Store(write)
+		return records
+	}
+
+	m.dropPrefix(parsed)
 	return records
+}
+
+// dropPrefix discards the first n buffered bytes, moving the remainder to
+// the buffer's front so its capacity keeps being reused. Safe because no
+// returned record aliases the buffer.
+func (m *Reader) dropPrefix(n int) {
+	m.buf = m.buf[:copy(m.buf, m.buf[n:])]
 }

@@ -1,15 +1,38 @@
 // Package ringwriter drives the C ring writer primitives directly against
-// one worker's ring, for cring tests that need to control eviction and
-// commit timing precisely against a concurrent Go reader.
+// one worker's ring, for tests that need to control eviction and commit
+// timing precisely against a concurrent Go reader, or to prove a ring still
+// accepts writes.
 //
 // Production code never writes ring records from Go: the dataplane is the
-// sole writer of a ring's data area.
+// sole writer of a ring's data area. Rooted directly under objects/ring so
+// both the cring bindings tests and the controlplane service tests can
+// reach it.
 package ringwriter
 
-//#cgo CFLAGS: -I../../../../../../../
-//#cgo LDFLAGS: -L../../../../../../../build/objects/ring/api -lring_objects
+//#cgo CFLAGS: -I../../../../
+//#cgo LDFLAGS: -L../../../../build/objects/ring/api -lring_objects
+//#cgo LDFLAGS: -L../../../../build/lib/controlplane/config -lconfig_cp
 //
+//#include <stdlib.h>
+//
+//#include "common/memory_address.h"
+//#include "lib/controlplane/agent/agent.h"
+//#include "lib/controlplane/config/zone.h"
 //#include "objects/ring/api/ring_object.h"
+//
+//// ringwriter_lookup_object resolves the ring published under name in
+//// agent's live generation, the same resolution ring_object_exists
+//// performs.
+//static inline struct cp_object *
+//ringwriter_lookup_object(struct agent *agent, const char *name) {
+//	struct cp_config *cp_config = ADDR_OF(&agent->cp_config);
+//	cp_config_lock(cp_config);
+//	struct cp_config_gen *gen = ADDR_OF(&cp_config->cp_config_gen);
+//	struct cp_object *object =
+//		cp_config_gen_lookup_object(gen, RING_OBJECT_TYPE, name);
+//	cp_config_unlock(cp_config);
+//	return object;
+//}
 import "C"
 
 import (
@@ -17,13 +40,18 @@ import (
 	"fmt"
 	"sync/atomic"
 	"unsafe"
+
+	"github.com/yanet-platform/yanet2/controlplane/ffi"
+	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
 
 // Writer drives the writer primitives for one worker of a ring object
 // resolved from a raw cp_object pointer, such as cring.Object.AsRawPtr.
 type Writer struct {
-	worker *C.struct_ring_worker
-	data   *C.uint8_t
+	object    unsafe.Pointer
+	workerIdx uint64
+	worker    *C.struct_ring_worker
+	data      *C.uint8_t
 }
 
 // NewWriter resolves the writer primitives for one worker of the ring
@@ -40,7 +68,39 @@ func NewWriter(objPtr unsafe.Pointer, workerIdx uint64) (*Writer, error) {
 		return nil, fmt.Errorf("worker index %d has no data area", workerIdx)
 	}
 
-	return &Writer{worker: worker, data: data}, nil
+	return &Writer{object: objPtr, workerIdx: workerIdx, worker: worker, data: data}, nil
+}
+
+// NewPublishedWriter resolves the writer primitives for one worker of the
+// ring published under name in agent's current generation, for a test
+// that reaches the ring only by name, as its owner service exposes it.
+func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint64) (*Writer, error) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+
+	object := C.ringwriter_lookup_object((*C.struct_agent)(agent.AsRawPtr()), cName)
+	if object == nil {
+		return nil, fmt.Errorf("ring %q is not published", name)
+	}
+	return NewWriter(unsafe.Pointer(object), workerIdx)
+}
+
+// Object returns the raw cp_object pointer this writer resolved its worker
+// from.
+func (m *Writer) Object() unsafe.Pointer {
+	return m.object
+}
+
+// Capacity reports the worker's data area size in bytes.
+func (m *Writer) Capacity() uint32 {
+	return uint32(m.worker.size)
+}
+
+// Source returns the production cring record source for this writer's
+// worker, so a test reads back what this writer committed through the
+// same C accessors and copy path a real reader uses.
+func (m *Writer) Source() (cring.RecordSource, error) {
+	return cring.SourceFromRaw(m.object, m.workerIdx)
 }
 
 // NextSeqno peeks the sequence number the next commit would stamp, without

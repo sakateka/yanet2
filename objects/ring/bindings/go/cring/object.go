@@ -12,6 +12,7 @@ package cring
 import "C"
 
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 
@@ -70,6 +71,9 @@ func (m *Object) asRawPtr() *C.struct_cp_object {
 	return (*C.struct_cp_object)(m.ptr.AsRawPtr())
 }
 
+// errFreed reports a method call on a handle whose object Free destroyed.
+var errFreed = errors.New("ring object already freed")
+
 // Publish upserts the object into a new configuration generation. A module
 // linking it by name follows it from then on.
 func (m *Object) Publish() error {
@@ -78,7 +82,9 @@ func (m *Object) Publish() error {
 
 // Free destroys the object, or reports ffi.ErrStillReferenced while a live
 // generation still holds it — the handle stays usable and a later retry
-// may succeed. Safe to call multiple times.
+// may succeed. Safe to call multiple times. After a successful Free the
+// handle is inert: WorkerCount and Capacity report 0, Source and
+// OpenReader fail, and Publish is refused.
 func (m *Object) Free() error {
 	return m.ptr.Free(func(ptr unsafe.Pointer) (int, unsafe.Pointer, error) {
 		var cErr *C.yanet_error
@@ -107,13 +113,21 @@ func DeleteObject(agent *ffi.Agent, name string) error {
 // WorkerCount reports the number of per-worker rings behind this object,
 // fixed at creation from the dataplane's configured worker count.
 func (m *Object) WorkerCount() uint64 {
-	return uint64(C.ring_object_worker_count(m.asRawPtr()))
+	ptr := m.asRawPtr()
+	if ptr == nil {
+		return 0
+	}
+	return uint64(C.ring_object_worker_count(ptr))
 }
 
 // Capacity reports the per-worker data area size in bytes, fixed at
 // creation.
 func (m *Object) Capacity() uint32 {
-	return uint32(C.ring_object_capacity(m.asRawPtr()))
+	ptr := m.asRawPtr()
+	if ptr == nil {
+		return 0
+	}
+	return uint32(C.ring_object_capacity(ptr))
 }
 
 // Source resolves the RecordSource for one worker's ring, backed by the C
@@ -124,16 +138,28 @@ func (m *Object) Capacity() uint32 {
 // wrap the real source, for instance to drive the read protocol against
 // externally paced writer state.
 func (m *Object) Source(workerIdx uint64) (RecordSource, error) {
-	count := m.WorkerCount()
+	return SourceFromRaw(m.AsRawPtr(), workerIdx)
+}
+
+// SourceFromRaw is Source for a raw ring cp_object pointer, such as
+// Object.AsRawPtr or an object a sibling CGo package resolved from a
+// published generation, so every source goes through the same C accessors.
+func SourceFromRaw(objPtr unsafe.Pointer, workerIdx uint64) (RecordSource, error) {
+	if objPtr == nil {
+		return nil, errFreed
+	}
+	ptr := (*C.struct_cp_object)(objPtr)
+
+	count := uint64(C.ring_object_worker_count(ptr))
 	if workerIdx >= count {
 		return nil, fmt.Errorf("worker index %d exceeds worker count %d", workerIdx, count)
 	}
 
-	worker := C.ring_object_worker(m.asRawPtr(), C.uint64_t(workerIdx))
+	worker := C.ring_object_worker(ptr, C.uint64_t(workerIdx))
 	if worker == nil {
 		return nil, fmt.Errorf("worker index %d has no ring", workerIdx)
 	}
-	data := C.ring_object_worker_data(m.asRawPtr(), C.uint64_t(workerIdx))
+	data := C.ring_object_worker_data(ptr, C.uint64_t(workerIdx))
 	if data == nil {
 		return nil, fmt.Errorf("worker index %d has no data area", workerIdx)
 	}
@@ -156,5 +182,5 @@ func (m *Object) OpenReader(workerIdx uint64) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewReader(workerIdx, m.Capacity(), src), nil
+	return NewReader(workerIdx, m.Capacity(), src)
 }

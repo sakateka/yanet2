@@ -34,6 +34,7 @@
 #include "lib/logging/log.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -403,6 +404,144 @@ run_ring_object_delete_refused_while_linked_test(struct yanet_shm *shm) {
 		"a refused delete must leave the ring published"
 	);
 
+	// Once the linking module is gone, the same delete goes through.
+	TEST_ASSERT_SUCCESS(
+		agent_delete_module(agent, "forward", "ring-linker", &err),
+		"agent_delete_module failed: %s",
+		err ? yanet_error_message(err) : "?"
+	);
+	TEST_ASSERT_SUCCESS(
+		agent_delete_object(agent, RING_OBJECT_TYPE, "linked", &err),
+		"deleting the ring after its linking module is removed must "
+		"succeed: %s",
+		err ? yanet_error_message(err) : "?"
+	);
+	TEST_ASSERT(
+		!ring_object_exists(agent, "linked"),
+		"a deleted ring must no longer be published"
+	);
+
+	agent_detach(agent);
+	return TEST_SUCCESS;
+}
+
+// A second fini after a full create is a no-op: the first one clears the
+// fields it freed, so nothing is returned to the arena twice.
+static int
+run_ring_object_fini_idempotent_test(struct yanet_shm *shm) {
+	yanet_error *err = NULL;
+
+	struct agent *agent = agent_attach(
+		shm, 0, "ring-fini-twice", RING_OBJECT_TEST_MEMORY_LIMIT, &err
+	);
+	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
+
+	size_t baseline = block_allocator_free_size(&agent->block_allocator);
+
+	struct ring_object *self = ring_object_new(agent);
+	TEST_ASSERT_NOT_NULL(self, "ring_object_new failed");
+	TEST_ASSERT_SUCCESS(
+		ring_object_init(self, agent, "fini-twice", &err),
+		"ring_object_init failed"
+	);
+	TEST_ASSERT_SUCCESS(
+		ring_object_create(self, 64, &err), "ring_object_create failed"
+	);
+
+	ring_object_fini(self);
+	ring_object_fini(self);
+	TEST_ASSERT_NULL(
+		ADDR_OF(&self->workers), "fini must forget the workers array"
+	);
+	TEST_ASSERT_EQUAL(
+		(long)self->worker_count, 0L, "fini must reset worker_count"
+	);
+	ring_object_free(self, agent);
+
+	TEST_ASSERT_EQUAL(
+		(long)block_allocator_free_size(&agent->block_allocator),
+		(long)baseline,
+		"a double fini must return the arena to exactly its baseline"
+	);
+
+	agent_detach(agent);
+	return TEST_SUCCESS;
+}
+
+// Running out of memory after some workers' data areas were allocated
+// rolls every one of them back: the create reports ENOMEM and the arena
+// returns to its baseline.
+//
+// The capacity at which worker 0 still fits but worker 1 does not depends
+// on the arena's layout, so the test probes powers of two downward and
+// picks the first whose failure names worker 1.
+static int
+run_ring_object_enomem_rollback_test(struct yanet_shm *shm) {
+	yanet_error *err = NULL;
+
+	struct agent *agent = agent_attach(
+		shm, 0, "ring-enomem", RING_OBJECT_TEST_MEMORY_LIMIT, &err
+	);
+	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
+	TEST_ASSERT_EQUAL(
+		(long)agent_dp_config(agent)->worker_count,
+		2L,
+		"the harness must run two workers"
+	);
+
+	size_t baseline = block_allocator_free_size(&agent->block_allocator);
+
+	bool rolled_back_mid_allocation = false;
+	for (uint32_t capacity =
+		     pow2_above(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE) >> 1;
+	     capacity >= RING_RECORD_FRAME_SIZE;
+	     capacity >>= 1) {
+		yanet_error *create_err = NULL;
+		struct cp_object *object = ring_object_config_new(
+			agent, "enomem", capacity, &create_err
+		);
+		if (object != NULL) {
+			// Both workers fit, and every smaller capacity will
+			// too: nothing left to probe.
+			yanet_error *free_err = NULL;
+			TEST_ASSERT_SUCCESS(
+				ring_object_config_free(object, &free_err),
+				"freeing a dangling ring object must succeed"
+			);
+			break;
+		}
+		int create_errno = errno;
+		TEST_ASSERT_EQUAL(
+			create_errno,
+			ENOMEM,
+			"capacity %u must fail only for lack of memory",
+			capacity
+		);
+		TEST_ASSERT_EQUAL(
+			(long)block_allocator_free_size(&agent->block_allocator
+			),
+			(long)baseline,
+			"a failed create must restore the arena: capacity=%u",
+			capacity
+		);
+		for (const yanet_error *cause = create_err; cause != NULL;
+		     cause = yanet_error_cause(cause)) {
+			const char *message = yanet_error_message(cause);
+			if (message != NULL &&
+			    strstr(message, "ring data for worker 1") != NULL) {
+				rolled_back_mid_allocation = true;
+			}
+		}
+		yanet_error_free(create_err);
+		if (rolled_back_mid_allocation) {
+			break;
+		}
+	}
+	TEST_ASSERT(
+		rolled_back_mid_allocation,
+		"some capacity must fit worker 0 but not worker 1"
+	);
+
 	agent_detach(agent);
 	return TEST_SUCCESS;
 }
@@ -496,24 +635,36 @@ main(void) {
 		return 1;
 	}
 
-	int res = run_ring_worker_layout_test(shm);
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_align_alloc_test(shm);
-	}
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_bad_capacity_test(shm);
-	}
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_worker_count_test(shm);
-	}
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_free_refused_while_referenced_test(shm);
-	}
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_delete_refused_while_linked_test(shm);
-	}
-	if (res == TEST_SUCCESS) {
-		res = run_ring_object_exists_test(shm);
+	struct test_case {
+		const char *name;
+		int (*func)(struct yanet_shm *shm);
+	};
+
+	struct test_case cases[] = {
+		{"worker_layout", run_ring_worker_layout_test},
+		{"align_alloc", run_ring_object_align_alloc_test},
+		{"bad_capacity", run_ring_object_bad_capacity_test},
+		{"worker_count", run_ring_object_worker_count_test},
+		{"free_refused_while_referenced",
+		 run_ring_object_free_refused_while_referenced_test},
+		{"delete_refused_while_linked",
+		 run_ring_object_delete_refused_while_linked_test},
+		{"exists", run_ring_object_exists_test},
+		{"fini_idempotent", run_ring_object_fini_idempotent_test},
+		{"enomem_rollback", run_ring_object_enomem_rollback_test},
+	};
+
+	// The cases share one harness, so a failure stops the run rather
+	// than letting later cases observe the state it left behind.
+	int res = TEST_SUCCESS;
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+		LOG(INFO, "%s running", cases[i].name);
+		res = cases[i].func(shm);
+		if (res != TEST_SUCCESS) {
+			LOG(ERROR, "%s failed", cases[i].name);
+			break;
+		}
+		LOG(INFO, "%s passed", cases[i].name);
 	}
 
 	dataplane_ut_free(ut);

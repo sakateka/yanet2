@@ -2,14 +2,16 @@ package cring_test
 
 import (
 	"encoding/binary"
+	"os"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
-	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring/internal/ringwriter"
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
+	"github.com/yanet-platform/yanet2/objects/ring/internal/ringwriter"
 )
 
 // repeatedFrameSizePayload returns n bytes built from repeated
@@ -337,7 +339,8 @@ func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 			hooked := &hookedSource{real: real}
 			tc.arm(hooked, evict)
 
-			reader := cring.NewReader(0, object.Capacity(), hooked)
+			reader, err := cring.NewReader(0, object.Capacity(), hooked)
+			require.NoError(t, err)
 			records := reader.Read(1024)
 			require.Empty(t, records, "an invalidated record must never be returned")
 
@@ -382,7 +385,8 @@ func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	require.NoError(t, err)
 	records := reader.Read(1024)
 	require.Len(t, records, 1, "only the invalidated prefix must be dropped")
 	require.Equal(t, []byte("survive-me!!"), records[0].Bytes)
@@ -421,7 +425,8 @@ func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	require.NoError(t, err)
 
 	// Captures only the frame and the first payload word (12 of the 24
 	// bytes), leaving the rest buffered for the next call.
@@ -473,7 +478,8 @@ func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	require.NoError(t, err)
 	records := reader.Read(10)
 	require.Empty(t, records, "a drop past the copied range must clear the whole buffer, not slice past it")
 }
@@ -512,4 +518,144 @@ func Test_Reader_Read_RecordBytesAppendDoesNotCorruptLaterRecords(t *testing.T) 
 // capacity the ring proto package enforces independently.
 func Test_Parity_RecordFrameSize(t *testing.T) {
 	require.Equal(t, uint32(ringpb.MinRingCapacity), cring.RecordFrameSize)
+}
+
+// Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial verifies that
+// when the writer evicts a record between two Read calls while the first
+// call left part of it buffered, the second call discards the buffered
+// bytes instead of completing a record from them.
+func Test_Reader_Read_EvictionBetweenReadsDropsCarriedPartial(t *testing.T) {
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "evict-between", 64)
+	writer := newWriter(t, object, 0)
+
+	// A 24-byte record of frame-size-shaped words, so stale bytes would
+	// parse as plausible records rather than trip the range guard.
+	_, err := writer.WriteRecord(repeatedFrameSizePayload(16))
+	require.NoError(t, err)
+
+	reader, err := object.OpenReader(0)
+	require.NoError(t, err)
+	require.Empty(t, reader.Read(12), "a partial record must stay buffered")
+
+	// 48 bytes exceed the 40 free, so this write evicts the whole
+	// buffered record before the next Read runs.
+	payload := repeatedFrameSizePayload(40)
+	seqno, err := writer.WriteRecord(payload)
+	require.NoError(t, err)
+
+	records := reader.Read(1024)
+	require.Len(t, records, 1, "only the record written after the eviction may be returned")
+	require.Equal(t, seqno, records[0].Seqno)
+	require.Equal(t, payload, records[0].Bytes)
+}
+
+// Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords verifies that
+// once the reader's buffer has grown, a Read allocates only for the
+// records it returns, and a call completing no record allocates nothing.
+func Test_Reader_Read_SteadyStateAllocatesOnlyReturnedRecords(t *testing.T) {
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "allocs", 4096)
+	writer := newWriter(t, object, 0)
+
+	reader, err := object.OpenReader(0)
+	require.NoError(t, err)
+
+	// 56 payload bytes make a 64-byte record, read in four 16-byte calls
+	// of which only the last completes it.
+	payload := make([]byte, 56)
+	cycle := func() int {
+		_, _ = writer.WriteRecord(payload)
+		returned := 0
+		for range 4 {
+			returned += len(reader.Read(16))
+		}
+		return returned
+	}
+	require.Equal(t, 1, cycle(), "warm-up must return the record")
+
+	returned := 0
+	allocs := testing.AllocsPerRun(100, func() {
+		returned += cycle()
+	})
+	require.Equal(t, 101, returned, "every cycle must return exactly one record")
+	// One Records slice and one payload block for the completing call.
+	require.LessOrEqual(t, allocs, 2.0)
+
+	_, err = writer.WriteRecord(payload)
+	require.NoError(t, err)
+	partial := testing.AllocsPerRun(1, func() {
+		require.Empty(t, reader.Read(8))
+	})
+	require.Zero(t, partial, "a call completing no record must not allocate")
+}
+
+// Test_Reader_NewReader_RejectsCapacityBelowFrame verifies that a reader
+// over a capacity too small to hold even one record frame is refused.
+func Test_Reader_NewReader_RejectsCapacityBelowFrame(t *testing.T) {
+	_, err := cring.NewReader(0, cring.RecordFrameSize-1, nil)
+	require.Error(t, err)
+
+	_, err = cring.NewReader(0, cring.RecordFrameSize, nil)
+	require.NoError(t, err)
+}
+
+// Test_Reader_Stress_ConcurrentWriterNeverTears verifies that the Go reader
+// never returns a torn record while the C writer overwrites the ring at
+// full speed from another OS thread.
+//
+// Opt-in: set RING_STRESS_RECORDS (records per run); RING_STRESS_CAPACITY
+// sets the ring size (default 4096, so almost every write evicts).
+func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
+	records := envUint(t, "RING_STRESS_RECORDS", 0)
+	if records == 0 {
+		t.Skip("set RING_STRESS_RECORDS to run the concurrent stress")
+	}
+	capacity := uint32(envUint(t, "RING_STRESS_CAPACITY", 4096))
+
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "stress", capacity)
+	writer := newWriter(t, object, 0)
+	reader, err := object.OpenReader(0)
+	require.NoError(t, err)
+
+	stress, err := writer.StartStress(records)
+	require.NoError(t, err)
+
+	var returned, torn uint64
+	for {
+		done := stress.Done()
+		for _, rec := range reader.Read(capacity) {
+			returned++
+			if !ringwriter.StressRecordValid(rec.Seqno, rec.Bytes) {
+				torn++
+				if torn <= 10 {
+					t.Logf("torn record: seqno=%d len=%d", rec.Seqno, len(rec.Bytes))
+				}
+			}
+		}
+		if done && !reader.HasMore() {
+			break
+		}
+	}
+	written := stress.Written()
+	stress.Wait()
+
+	t.Logf("written=%d returned=%d torn=%d", written, returned, torn)
+	require.Equal(t, records, written, "the writer must commit every record")
+	require.NotZero(t, returned, "the reader must keep up with some records")
+	require.Zero(t, torn, "no torn record may ever be returned")
+}
+
+// envUint reads an unsigned integer from the named environment variable,
+// returning def when it is unset.
+func envUint(t *testing.T, name string, def uint64) uint64 {
+	t.Helper()
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	val, err := strconv.ParseUint(raw, 10, 64)
+	require.NoError(t, err, name)
+	return val
 }

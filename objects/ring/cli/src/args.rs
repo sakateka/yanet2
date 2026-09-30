@@ -24,12 +24,20 @@ impl ModeCmd {
     }
 }
 
-/// Parses a per-worker capacity such as 1MiB or 4096 into bytes; the
-/// service checks that it is a power of two in range.
+/// Parses a per-worker capacity such as 1MiB or 4096 into bytes and
+/// requires a power of two, which rules out decimal units such as 1MB;
+/// the service checks the range.
 pub(crate) fn parse_capacity(raw: &str) -> Result<u64, String> {
-    raw.parse::<bytesize::ByteSize>()
+    let bytes = raw
+        .parse::<bytesize::ByteSize>()
         .map(|size| size.as_u64())
-        .map_err(|_| format!("expected a size such as 1MiB, got {raw:?}"))
+        .map_err(|_| format!("expected a size such as 1MiB, got {raw:?}"))?;
+    if !bytes.is_power_of_two() {
+        return Err(format!(
+            "{raw:?} is {bytes} bytes, not a power of two; use IEC units such as 64KiB or 1MiB (1MB is 1000000 bytes)"
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -38,8 +46,8 @@ pub struct CreateCmd {
     #[arg(long = "name", short = 'n')]
     pub name: String,
 
-    /// Per-worker buffer size, such as 1MiB (the service checks that it is
-    /// a power of two in range).
+    /// Per-worker buffer size as a power of two in bytes or IEC units, such as
+    /// 64KiB or 1MiB.
     #[arg(long, value_parser = parse_capacity)]
     pub capacity: u64,
 }

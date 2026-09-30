@@ -19,12 +19,8 @@ import (
 	"unsafe"
 
 	"github.com/yanet-platform/yanet2/bindings/go/cerrors"
+	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
-
-// ringObjectType matches the C RING_OBJECT_TYPE macro (objects/ring/api),
-// duplicated here rather than pulled in through a full cring import to
-// keep this cgo preamble independent of the ring object's own headers.
-const ringObjectType = "ring"
 
 // LinkRing links the module config at moduleConfigPtr (an
 // ffi.ModuleConfig.AsRawPtr value) to the named ring object, mapping 1:1 to
@@ -32,7 +28,7 @@ const ringObjectType = "ring"
 func LinkRing(moduleConfigPtr unsafe.Pointer, name string) error {
 	cpModule := (*C.struct_cp_module)(moduleConfigPtr)
 
-	cType := C.CString(ringObjectType)
+	cType := C.CString(cring.ObjectType)
 	defer C.free(unsafe.Pointer(cType))
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))

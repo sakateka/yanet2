@@ -18,7 +18,17 @@ own.
   owner's admission gate) or while a published module config still links
   it by name (the generic `cp_object` guard every shared object gets). In
   both cases the ring stays usable and the caller retries the delete once
-  the blocker clears.
+  the blocker clears. No production module links a ring yet, so the
+  link refusal is currently reachable only from tests.
+
+## Limitations
+
+- After a control-plane restart, rings still published in shared memory
+  are not re-adopted by `RingService`: `list` and `show` miss them,
+  `delete` reports not found and `create` of the same name reports that
+  it already exists. Module shutdown does not free them either. The
+  fwstate map service has the same limitation; both are tracked as
+  follow-up work.
 
 ## Capacity
 
@@ -38,7 +48,7 @@ own.
   dataplane's configured worker count.
 - Ring storage — each worker's buffer (capacity times worker count) plus
   the metadata array — is charged against the pdump module's agent
-  memory: `memory_requirements` in the controlplane config, 16 MB by
+  memory: `memory_requirements` in the controlplane config, 16 MiB by
   default. A create that would exceed it fails.
 
 ## Overwrite semantics
@@ -157,5 +167,7 @@ yanet-cli-ring delete --name captures
 ```
 
 `--name`/`-n` identifies the ring on every subcommand except `list`;
-`--capacity` takes a size such as `1MiB`, `4096`, or `64KiB` and is
-checked against the power-of-two range above before anything is created.
+`--capacity` takes a size in bytes or IEC units, such as `4096`, `64KiB`
+or `1MiB`; the CLI rejects a value that is not a power of two (including
+decimal units such as `1MB`), and the service checks the range above
+before anything is created.

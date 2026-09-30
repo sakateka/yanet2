@@ -78,7 +78,8 @@ run_ring_wrap_roundtrip_test() {
 
 // Write one fixed-size record through the full prepare/write/commit
 // sequence, filling its payload with one repeated byte so a later read
-// can identify which record occupies a given slot.
+// can identify which record occupies a given slot. Aborts if prepare
+// refuses the record, since every caller passes a valid size.
 static void
 write_fixed_record(
 	struct ring_worker *ring,
@@ -90,7 +91,10 @@ write_fixed_record(
 	uint8_t payload[64];
 	memset(payload, fill, payload_len);
 
-	ring_worker_prepare(ring, data, total_len);
+	if (ring_worker_prepare(ring, data, total_len) != 0) {
+		LOG(ERROR, "ring_worker_prepare(%u) failed", total_len);
+		abort();
+	}
 	ring_worker_write(
 		ring, data, RING_RECORD_FRAME_SIZE, payload, payload_len
 	);
@@ -193,7 +197,10 @@ run_ring_eviction_spans_multiple_records_test() {
 }
 
 // A corrupt length at the oldest record makes the eviction drop the whole
-// backlog by catching readable_idx up to write_idx.
+// backlog by catching readable_idx up to write_idx, never leaving it in
+// the middle of a record: zero, shorter than a frame, larger than the
+// ring (including values whose alignment wraps u32), or running past the
+// write position.
 static int
 run_ring_eviction_corrupt_length_catches_up_test() {
 	const uint32_t ring_size = 64;
@@ -211,15 +218,33 @@ run_ring_eviction_corrupt_length_catches_up_test() {
 		uint32_t total_len;
 	} cases[] = {
 		{"zero length", 0},
+		{"length 1", 1},
+		{"length 2", 2},
+		{"length 3", 3},
+		{"length 4", 4},
+		{"length 5", 5},
+		{"length 6", 6},
+		{"length 7", 7},
 		{"length past the write position", 32 + 64},
+		{"length one above the ring size", 64 + 1},
+		{"length near UINT32_MAX", UINT32_MAX - 3},
+		{"length whose alignment wraps", UINT32_MAX},
 	};
+	// The word after the oldest frame's length (its seqno) is planted as
+	// a plausible 4-byte length, and the probe record needs only one
+	// frame of room: a walk that trusted a short length would step 4 or
+	// 8 bytes into the record and stop there, mid-record.
+	const uint32_t planted_len = 4;
+	memcpy(data + sizeof(uint32_t), &planted_len, sizeof(planted_len));
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
 		// Rewind to the full ring and corrupt the oldest frame.
 		ring.readable_idx = 0;
 		memcpy(data, &cases[i].total_len, sizeof(cases[i].total_len));
 
 		TEST_ASSERT_EQUAL(
-			ring_worker_prepare(&ring, data, 16),
+			ring_worker_prepare(
+				&ring, data, RING_RECORD_FRAME_SIZE
+			),
 			0,
 			"%s: prepare must still succeed",
 			cases[i].name

@@ -149,23 +149,26 @@ ring_worker_prepare(
 	// it covers is overwritten; intermediate record boundaries tell it
 	// nothing more, so one release store followed by the fence below is
 	// sufficient. The readable position is therefore not an eviction
-	// counter. Invalid length data at the walk position (zero, or running
-	// past the write position) would stall or overshoot the walk, so the
-	// eviction then drops everything and catches up to the write position.
+	// counter. Invalid length data at the walk position (shorter than a
+	// frame, larger than the ring, or running past the write position)
+	// would stall, misalign or overshoot the walk, so the eviction then
+	// drops everything and catches up to the write position. The raw
+	// length is range-checked before alignment so a value near UINT32_MAX
+	// cannot wrap to a small aligned length.
 	do {
 		uint8_t *pos = data + (readable_idx & ring->mask);
 		uint32_t evicted_len;
 		memcpy(&evicted_len, pos, sizeof(evicted_len));
-		evicted_len = ring_align4(evicted_len);
 
 		if (unlikely(
-			    !evicted_len ||
-			    readable_idx + evicted_len > write_idx
+			    evicted_len < RING_RECORD_FRAME_SIZE ||
+			    evicted_len > ring->size ||
+			    readable_idx + ring_align4(evicted_len) > write_idx
 		    )) {
 			readable_idx = write_idx;
 			break;
 		}
-		readable_idx += evicted_len;
+		readable_idx += ring_align4(evicted_len);
 	} while (write_idx - readable_idx > free_limit);
 
 	atomic_store_explicit(

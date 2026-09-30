@@ -112,3 +112,23 @@ func Test_Object_Exists_TracksPublishAndDelete(t *testing.T) {
 func Test_Parity_MaxNameLen(t *testing.T) {
 	require.Equal(t, ringpb.MaxRingNameLen, cring.MaxNameLen)
 }
+
+// Test_Object_Free_LeavesHandleInert verifies that every accessor on a
+// handle whose object was freed reports zero or an error instead of
+// touching the released memory.
+func Test_Object_Free_LeavesHandleInert(t *testing.T) {
+	agent := newTestAgent(t, 1)
+
+	object, err := cring.NewObject(agent, "freed", 64)
+	require.NoError(t, err)
+	require.NoError(t, object.Free())
+	require.NoError(t, object.Free(), "a second Free must be a no-op")
+
+	require.Zero(t, object.WorkerCount())
+	require.Zero(t, object.Capacity())
+	_, err = object.Source(0)
+	require.Error(t, err)
+	_, err = object.OpenReader(0)
+	require.Error(t, err)
+	require.Error(t, object.Publish())
+}
