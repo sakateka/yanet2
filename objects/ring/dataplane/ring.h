@@ -84,10 +84,9 @@ _Static_assert(
 // Release ordering on the eviction itself only covers earlier accesses, so
 // a weakly ordered CPU (arm64) may expose the new bytes first; a reader
 // copying them would then pass its post-copy recheck and accept a torn
-// record. Cost: no instruction on x86-64, which never reorders stores; one
-// `dmb ish` on arm64, paid only by records that evicted something. It
-// stalls later memory accesses until earlier ones are complete, roughly
-// tens of cycles, and moves no data and makes no memory traffic.
+// record. Cost: one `dmb ish` on arm64 per record that evicted something,
+// roughly tens of cycles with no memory traffic; no instruction on x86-64,
+// where it only stops the compiler from caching ring fields across it.
 static inline void
 ring_evict_fence(void) {
 	// arm64 check branch only: build with -DRING_TEST_NO_EVICT_FENCE to
@@ -124,20 +123,29 @@ ring_worker_prepare(
 	// aligned length and slipping past this guard.
 	uint32_t aligned_total_len = ring_align4(total_len);
 
-	// While the occupied space (write_idx - readable_idx) exceeds the
-	// space this record needs, advance readable_idx to evict old
-	// records.
-	bool evicted = false;
-	while ((ring->write_idx - ring->readable_idx) >
-	       (ring->size - aligned_total_len)) {
-		uint8_t *pos = data + (ring->readable_idx & ring->mask);
+	// Evict whole oldest records until the occupied space leaves room
+	// for this record.
+	//
+	// This worker is the sole writer of both positions, so each is read
+	// once and advanced locally instead of being re-read right after its
+	// own atomic update; readers still observe one release advance per
+	// evicted record.
+	uint64_t write_idx = ring->write_idx;
+	uint64_t readable_idx = ring->readable_idx;
+	uint64_t free_limit = ring->size - aligned_total_len;
+	if (write_idx - readable_idx <= free_limit) {
+		return 0;
+	}
+
+	do {
+		uint8_t *pos = data + (readable_idx & ring->mask);
 		uint32_t evicted_len;
 		memcpy(&evicted_len, pos, sizeof(evicted_len));
 		evicted_len = ring_align4(evicted_len);
 
 		if (unlikely(
 			    !evicted_len ||
-			    ring->readable_idx + evicted_len > ring->write_idx
+			    readable_idx + evicted_len > write_idx
 		    )) {
 			// Invalid data at the current position: advancing
 			// further would either exceed write_idx or loop
@@ -145,23 +153,19 @@ ring_worker_prepare(
 			// write_idx instead.
 			atomic_store_explicit(
 				&ring->readable_idx,
-				ring->write_idx,
+				write_idx,
 				memory_order_release
 			);
-			ring_evict_fence();
-			return 0;
+			break;
 		}
 
 		atomic_fetch_add_explicit(
 			&ring->readable_idx, evicted_len, memory_order_release
 		);
-		evicted = true;
-	}
+		readable_idx += evicted_len;
+	} while (write_idx - readable_idx > free_limit);
 
-	if (evicted) {
-		ring_evict_fence();
-	}
-
+	ring_evict_fence();
 	return 0;
 }
 

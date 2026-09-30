@@ -103,8 +103,9 @@ replaced by this ring when pdump migrates.
 Verified instruction selection (GCC 13 x86-64, cross GCC aarch64
 `-march=armv8-a+crc` and `-mcpu=neoverse-n1`, `-O2`): x86-64 contains no
 `mfence`/`sfence`, only the pre-existing `lock add` of the invalidation;
-aarch64 adds exactly one `dmb ish` per eviction path, next to the
-existing release read-modify-write invalidation and the `stlr` publication. This
+aarch64 executes exactly one `dmb ish` per evicting record, shared by the
+normal and the corrupt-length eviction paths, next to the existing release
+read-modify-write invalidation and the `stlr` publication. This
 shows code generation, not cross-core behaviour; runtime validation on
 arm64 hardware is a separate check.
 
