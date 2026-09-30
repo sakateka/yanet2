@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package objects.ring.controlplane.ringpb.v1;
+
+option go_package = "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1;ringpb";
+
+// RingService manages standalone named ring objects.
+//
+// A ring is a per-worker, cache-line-isolated buffer of opaque records with
+// a single writer per worker; a full buffer overwrites the oldest record
+// rather than blocking the writer or failing the write. It has no
+// dataplane module of its own: other modules reference a ring by name and
+// the controlplane resolves the name to the concrete per-worker buffers at
+// publish time.
+service RingService {
+  // CreateRing creates a new named ring with a fixed per-worker capacity.
+  //
+  // Creation fails if a ring with the requested name already exists.
+  rpc CreateRing(CreateRingRequest) returns (CreateRingResponse);
+  // ListRings returns every registered ring with the same facts as
+  // ShowRing, so a caller can render a full table without a per-ring
+  // lookup.
+  rpc ListRings(ListRingsRequest) returns (ListRingsResponse);
+  // ShowRing returns the name, per-worker capacity and worker count of one
+  // named ring.
+  rpc ShowRing(ShowRingRequest) returns (ShowRingResponse);
+  // DeleteRing removes a named ring.
+  //
+  // Deletion fails while the ring is leased by a consumer or still linked
+  // into a published configuration generation.
+  rpc DeleteRing(DeleteRingRequest) returns (DeleteRingResponse);
+}
+
+// RingInfo describes one registered ring: the facts fixed at creation plus
+// the current worker count.
+message RingInfo {
+  // name identifies the ring.
+  string name = 1;
+  // capacity is the per-worker buffer size in bytes, fixed at creation as a
+  // power of two and never resized afterward.
+  uint64 capacity = 2;
+  // worker_count is the number of per-worker ring instances behind this
+  // name.
+  uint32 worker_count = 3;
+}
+
+// CreateRingRequest names the ring to create and its fixed per-worker
+// capacity.
+message CreateRingRequest {
+  // name identifies the new ring; creation fails if a ring with this name
+  // already exists.
+  string name = 1;
+  // capacity is the per-worker buffer size in bytes; it must be a power of
+  // two and hold at least one record frame, and it does not change for the
+  // life of the ring.
+  uint64 capacity = 2;
+}
+
+// CreateRingResponse is empty; a successful call publishes the new ring.
+message CreateRingResponse {}
+
+// ListRingsRequest carries no fields; ListRings always returns every
+// registered ring.
+message ListRingsRequest {}
+
+// ListRingsResponse lists every registered ring with the facts ShowRing
+// would return for each, so the caller can render a table in one call.
+message ListRingsResponse {
+  repeated RingInfo rings = 1;
+}
+
+// ShowRingRequest names the ring to describe.
+message ShowRingRequest {
+  // name identifies the ring to describe.
+  string name = 1;
+}
+
+// ShowRingResponse carries the facts of one named ring.
+message ShowRingResponse {
+  RingInfo ring = 1;
+}
+
+// DeleteRingRequest names the ring to remove.
+message DeleteRingRequest {
+  // name identifies the ring to remove; deletion fails while the ring is
+  // leased by a consumer or still linked into a published configuration
+  // generation.
+  string name = 1;
+}
+
+// DeleteRingResponse is empty; a successful call unpublishes the ring.
+message DeleteRingResponse {}

@@ -90,6 +90,8 @@ compile_commands.json
 
 buildclang/
 build/
+# Reports of objects/ring/tests/arm64-check.sh
+/arm64-check-*.txt
 web/dist/
 
 # generated files
