@@ -63,26 +63,12 @@ type ringEntry struct {
 type Option func(*options)
 
 type options struct {
-	// Publish is CreateRing's publish step; only tests replace it, to
-	// drive the publish-failure path.
-	Publish func(*cring.Object) error
-	Log     *zap.Logger
+	Log *zap.Logger
 }
 
 func newOptions() *options {
 	return &options{
-		Log:     zap.NewNop(),
-		Publish: (*cring.Object).Publish,
-	}
-}
-
-// WithPublish replaces CreateRing's publish step, which is
-// cring.Object.Publish by default. It exists for tests that must fail the
-// publish after the ring object was created; production code never sets
-// it.
-func WithPublish(publish func(*cring.Object) error) Option {
-	return func(o *options) {
-		o.Publish = publish
+		Log: zap.NewNop(),
 	}
 }
 
@@ -118,7 +104,6 @@ type RingService struct {
 	// retries them at the start of every RPC and through ReclaimDeferred,
 	// and nothing else remembers them.
 	deferred []*ringEntry
-	publish  func(*cring.Object) error
 	log      *zap.Logger
 }
 
@@ -134,7 +119,6 @@ func NewRingService(agent *ffi.Agent, opts ...Option) *RingService {
 		rings:    map[string]*ringEntry{},
 		byHandle: map[Handle]*ringEntry{},
 		leases:   map[Handle]int{},
-		publish:  o.Publish,
 		log:      o.Log,
 	}
 }
@@ -173,7 +157,7 @@ func (m *RingService) CreateRing(
 		return nil, status.Errorf(codes.Internal, "failed to create ring %q: %v", name, err)
 	}
 
-	if err := m.publish(object); err != nil {
+	if err := object.Publish(); err != nil {
 		m.log.Error("failed to publish ring", zap.String("ring", name), zap.Error(err))
 		m.freeOrDefer(&ringEntry{Name: name, Object: object})
 		return nil, status.Errorf(codes.Internal, "failed to publish ring %q: %v", name, err)
