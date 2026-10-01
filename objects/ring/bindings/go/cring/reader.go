@@ -142,15 +142,14 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	m.buf = slices.Grow(m.buf, int(size))[:after]
 	m.src.CopyRange(m.buf[before:after], readable, size)
 
-	// Both this atomic add and the atomic reload below are load-bearing on
-	// arm64: never make either a plain access or move the recheck above it.
+	// Keep this add and the reload below atomic and in this order: on arm64
+	// they make the recheck see every eviction whose overwrite the copy saw.
 	//
-	// Besides advancing the cursor another goroutine polls, the add's
-	// release half pairs with the acquire reload (RCsc release then
-	// acquire) so the copy above completes before the recheck reads the
-	// readable position; otherwise the recheck could miss an eviction
-	// whose overwrite the copy already saw. On x86-64 the ordering comes
-	// from TSO, but the same code must stay correct on both.
+	// The writer advances the readable position before overwriting, so the
+	// copy's loads must finish before the position is reread. The release
+	// half of the add keeps them above it, and the acquire reload cannot
+	// move above a release. The add also publishes the cursor that the
+	// waker goroutine polls through HasMore.
 	m.readIdx.Add(size)
 
 	_, latest := m.src.Indices()
