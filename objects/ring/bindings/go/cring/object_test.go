@@ -34,28 +34,44 @@ func newTestAgent(t testing.TB, workerCount uint64) *ffi.Agent {
 	return agent
 }
 
-// Test_Object_NewObject_RejectsBadCapacity verifies that a malformed or
-// oversized capacity is reported as an invalid argument.
+// Test_Object_NewObject_RejectsBadParameters verifies that a malformed or
+// oversized capacity, or a publish batch out of range, is reported as an
+// invalid argument.
 //
 // A service built on this binding maps that kind to a gRPC status.
-func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
+func Test_Object_NewObject_RejectsBadParameters(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
 	cases := []struct {
-		name     string
-		capacity uint32
+		name         string
+		capacity     uint32
+		publishBatch uint32
 	}{
-		{name: "not a power of two", capacity: 24},
-		{name: "above allocator maximum", capacity: 1 << 27},
+		{name: "not a power of two", capacity: 24, publishBatch: cring.DefaultPublishBatch},
+		{name: "above allocator maximum", capacity: 1 << 27, publishBatch: cring.DefaultPublishBatch},
+		{name: "zero publish batch", capacity: 64, publishBatch: 0},
+		{name: "publish batch above maximum", capacity: 64, publishBatch: cring.MaxPublishBatch + 1},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := cring.NewObject(agent, "bad-capacity-"+tc.name, tc.capacity)
+			_, err := cring.NewObject(agent, "bad-"+tc.name, tc.capacity, tc.publishBatch)
 			require.Error(t, err)
 			require.ErrorIs(t, err, cerrors.InvalidArgument)
 		})
 	}
+}
+
+// Test_Object_NewObject_KeepsPublishBatch verifies that the object reports
+// the publish batch it was created with.
+func Test_Object_NewObject_KeepsPublishBatch(t *testing.T) {
+	agent := newTestAgent(t, 1)
+
+	object, err := cring.NewObject(agent, "batch", 64, cring.MaxPublishBatch)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = object.Free() })
+
+	require.Equal(t, cring.MaxPublishBatch, object.PublishBatch())
 }
 
 // Test_Object_Free_RefusedWhileReferenced verifies that freeing a published
@@ -63,7 +79,7 @@ func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 func Test_Object_Free_RefusedWhileReferenced(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
-	object, err := cring.NewObject(agent, "referenced", 64)
+	object, err := cring.NewObject(agent, "referenced", 64, cring.DefaultPublishBatch)
 	require.NoError(t, err)
 	require.NoError(t, object.Publish())
 
@@ -77,7 +93,7 @@ func Test_Object_Exists_TracksPublishAndDelete(t *testing.T) {
 
 	require.False(t, cring.Exists(agent, "maybe"))
 
-	object, err := cring.NewObject(agent, "maybe", 64)
+	object, err := cring.NewObject(agent, "maybe", 64, cring.DefaultPublishBatch)
 	require.NoError(t, err)
 	require.False(t, cring.Exists(agent, "maybe"))
 
@@ -94,17 +110,25 @@ func Test_Parity_MaxNameLen(t *testing.T) {
 	require.Equal(t, ringpb.MaxRingNameLen, cring.MaxNameLen)
 }
 
+// Test_Parity_PublishBatch verifies that the C publish batch default and
+// bound agree with the ones the proto package enforces independently.
+func Test_Parity_PublishBatch(t *testing.T) {
+	require.Equal(t, uint32(ringpb.DefaultPublishBatch), cring.DefaultPublishBatch)
+	require.Equal(t, uint32(ringpb.MaxPublishBatch), cring.MaxPublishBatch)
+}
+
 // Test_Object_Free_LeavesHandleInert verifies that every accessor on a freed
 // handle reports zero or an error instead of touching released memory.
 func Test_Object_Free_LeavesHandleInert(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
-	object, err := cring.NewObject(agent, "freed", 64)
+	object, err := cring.NewObject(agent, "freed", 64, cring.DefaultPublishBatch)
 	require.NoError(t, err)
 	require.NoError(t, object.Free())
 	require.NoError(t, object.Free(), "a second Free must be a no-op")
 
 	require.Zero(t, object.Capacity())
+	require.Zero(t, object.PublishBatch())
 	_, err = object.Sources()
 	require.Error(t, err)
 	_, err = object.OpenReaders()

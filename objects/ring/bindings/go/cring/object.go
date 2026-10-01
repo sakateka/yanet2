@@ -25,6 +25,14 @@ const ObjectType = C.RING_OBJECT_TYPE
 // NUL. The longest accepted name is one byte shorter than this bound.
 const MaxNameLen = C.CP_OBJECT_NAME_LEN
 
+// DefaultPublishBatch is the publish batch a ring gets unless its creator
+// asks for another: the records a writer commits before publishing them on
+// its own.
+const DefaultPublishBatch = uint32(C.RING_PUBLISH_BATCH_DEFAULT)
+
+// MaxPublishBatch is the largest publish batch a ring accepts.
+const MaxPublishBatch = uint32(C.RING_PUBLISH_BATCH_MAX)
+
 // Object is an opaque handle to a standalone named ring object in shared
 // memory, owned by the control plane until it is freed.
 type Object struct {
@@ -32,22 +40,23 @@ type Object struct {
 	agent *ffi.Agent
 }
 
-// NewObject creates a new ring with the given fixed per-worker capacity.
+// NewObject creates a new ring with the given fixed per-worker capacity and
+// publish batch.
 //
 // The returned handle is not yet published to the dataplane; call Publish.
 // A capacity the C layer rejects — not a power of two, below the record
-// frame size, or above the allocator's maximum block — is reported through
-// the returned error, distinguishable with errors.Is against
-// cerrors.InvalidArgument. It does not check the name against what is
-// already published; a caller that must reject a duplicate name does that
-// check itself.
-func NewObject(agent *ffi.Agent, name string, capacity uint32) (*Object, error) {
+// frame size, or above the allocator's maximum block — or a publish batch
+// outside 1 to MaxPublishBatch is reported through the returned error,
+// distinguishable with errors.Is against cerrors.InvalidArgument. It does
+// not check the name against what is already published; a caller that
+// must reject a duplicate name does that check itself.
+func NewObject(agent *ffi.Agent, name string, capacity uint32, publishBatch uint32) (*Object, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
 	var cErr *C.yanet_error
 	ptr := C.ring_object_config_new(
-		(*C.struct_agent)(agent.AsRawPtr()), cName, C.uint32_t(capacity), &cErr,
+		(*C.struct_agent)(agent.AsRawPtr()), cName, C.uint32_t(capacity), C.uint32_t(publishBatch), &cErr,
 	)
 	if ptr == nil {
 		return nil, fmt.Errorf("failed to create ring object: %w", cerrors.FromC(unsafe.Pointer(cErr)))
@@ -119,6 +128,16 @@ func (m *Object) Capacity() uint32 {
 	return uint32(C.ring_object_capacity(ptr))
 }
 
+// PublishBatch reports the records a writer commits before publishing them
+// on its own, fixed at creation.
+func (m *Object) PublishBatch() uint32 {
+	ptr := m.asRawPtr()
+	if ptr == nil {
+		return 0
+	}
+	return uint32(C.ring_object_publish_batch(ptr))
+}
+
 // Sources resolves the RecordSource of every worker's ring through the C
 // accessors, so no caller does stride arithmetic across shared memory. The
 // slice is indexed by worker.
@@ -166,13 +185,12 @@ func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 }
 
 // OpenReaders opens one independent reader per worker's ring, each starting
-// at that ring's current oldest readable record and configured by the given
-// options. The slice is indexed by worker, and every record a reader
-// returns carries its worker index.
+// at that ring's current oldest readable record. The slice is indexed by
+// worker, and every record a reader returns carries its worker index.
 //
 // Calling it again opens another set of readers; each keeps its own read
 // cursor and does not affect the others.
-func (m *Object) OpenReaders(opts ...ReaderOption) ([]*Reader, error) {
+func (m *Object) OpenReaders() ([]*Reader, error) {
 	sources, err := m.Sources()
 	if err != nil {
 		return nil, err
@@ -181,7 +199,7 @@ func (m *Object) OpenReaders(opts ...ReaderOption) ([]*Reader, error) {
 	capacity := m.Capacity()
 	readers := make([]*Reader, 0, len(sources))
 	for idx, src := range sources {
-		reader, err := NewReader(uint16(idx), capacity, src, opts...)
+		reader, err := NewReader(uint16(idx), capacity, src)
 		if err != nil {
 			return nil, err
 		}

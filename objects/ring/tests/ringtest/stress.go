@@ -8,15 +8,13 @@ package ringtest
 //#include "objects/ring/api/ring_object.h"
 //
 //// ring_stress is one C writer thread committing records to a worker's
-//// ring at full speed, independent of the Go scheduler, and publishing
-//// them in batches.
+//// ring at full speed, independent of the Go scheduler; the ring publishes
+//// them by its own publish batch, and the writer publishes the tail once
+//// at the end.
 //struct ring_stress {
 //	struct ring_worker *worker;
 //	uint8_t *data;
 //	uint64_t records;
-//	// Records per publication; a batch is also published early when the
-//	// next record would exceed the batch limit.
-//	uint32_t batch;
 //	// Fixed payload of every record, or NULL to derive each from its seqno.
 //	uint8_t *fixed;
 //	uint32_t fixed_len;
@@ -42,7 +40,6 @@ package ringtest
 //ring_stress_run(void *arg) {
 //	struct ring_stress *s = arg;
 //	uint32_t buf[64];
-//	uint32_t pending = 0;
 //	uint64_t committed = 0;
 //
 //	for (; committed < s->records; committed++) {
@@ -57,12 +54,6 @@ package ringtest
 //			payload = (const uint8_t *)buf;
 //		}
 //		uint32_t total = RING_RECORD_FRAME_SIZE + len;
-//		if (pending == s->batch ||
-//		    ring_align4(total) > ring_worker_batch_room(s->worker)) {
-//			ring_worker_publish(s->worker);
-//			atomic_store_explicit(&s->written, committed, memory_order_relaxed);
-//			pending = 0;
-//		}
 //		if (ring_worker_prepare(s->worker, s->data, total) != 0) {
 //			break;
 //		}
@@ -70,7 +61,6 @@ package ringtest
 //			s->worker, s->data, RING_RECORD_FRAME_SIZE, payload, len
 //		);
 //		ring_worker_commit(s->worker, s->data, total);
-//		pending++;
 //	}
 //	ring_worker_publish(s->worker);
 //	atomic_store_explicit(&s->written, committed, memory_order_relaxed);
@@ -83,7 +73,7 @@ package ringtest
 //static struct ring_stress *
 //ring_stress_start(
 //	struct ring_worker *worker, uint8_t *data, uint64_t records,
-//	uint32_t batch, uint32_t fixed_len
+//	uint32_t fixed_len
 //) {
 //	struct ring_stress *s = calloc(1, sizeof(*s));
 //	if (s == NULL) {
@@ -92,7 +82,6 @@ package ringtest
 //	s->worker = worker;
 //	s->data = data;
 //	s->records = records;
-//	s->batch = batch;
 //	if (fixed_len != 0) {
 //		s->fixed = malloc(fixed_len);
 //		if (s->fixed == NULL) {
@@ -134,35 +123,31 @@ import (
 )
 
 // Stress runs the C writer on its own OS thread at full speed, publishing
-// in batches; unless fixed, each record's length and bytes derive from its
+// by the ring's publish batch; unless fixed, each record's length and bytes derive from its
 // seqno, so a reader can spot a torn one.
 type Stress struct {
 	s *C.struct_ring_stress
 }
 
-// StartStress starts committing records to the writer's worker ring,
-// publishing every batch of the given number of records, or earlier when
-// the next record would exceed the ring's batch limit. The writer stops
-// early if a record is ever refused.
-func (m *Writer) StartStress(records uint64, batch uint32) (*Stress, error) {
-	return m.startStress(records, batch, 0)
+// StartStress starts committing the given number of records to the
+// writer's worker ring, which publishes them by its own publish batch. The
+// writer stops early if a record is ever refused.
+func (m *Writer) StartStress(records uint64) (*Stress, error) {
+	return m.startStress(records, 0)
 }
 
 // StartStressFixed is StartStress with every payload the same given number
 // of bytes, for a reader benchmark at a fixed record size; such records do
 // not pass StressRecordValid.
-func (m *Writer) StartStressFixed(records uint64, batch uint32, payloadLen uint32) (*Stress, error) {
+func (m *Writer) StartStressFixed(records uint64, payloadLen uint32) (*Stress, error) {
 	if payloadLen == 0 {
 		return nil, errors.New("fixed payload length must be nonzero")
 	}
-	return m.startStress(records, batch, payloadLen)
+	return m.startStress(records, payloadLen)
 }
 
-func (m *Writer) startStress(records uint64, batch uint32, fixedLen uint32) (*Stress, error) {
-	if batch == 0 {
-		return nil, errors.New("batch must hold at least one record")
-	}
-	s := C.ring_stress_start(m.worker, m.data, C.uint64_t(records), C.uint32_t(batch), C.uint32_t(fixedLen))
+func (m *Writer) startStress(records uint64, fixedLen uint32) (*Stress, error) {
+	s := C.ring_stress_start(m.worker, m.data, C.uint64_t(records), C.uint32_t(fixedLen))
 	if s == nil {
 		return nil, errors.New("failed to start the stress writer thread")
 	}
@@ -174,7 +159,8 @@ func (m *Stress) Done() bool {
 	return C.ring_stress_done(m.s) != 0
 }
 
-// Written returns the number of published records.
+// Written returns the number of records the writer committed, known once
+// it has finished.
 func (m *Stress) Written() uint64 {
 	return uint64(C.ring_stress_written(m.s))
 }

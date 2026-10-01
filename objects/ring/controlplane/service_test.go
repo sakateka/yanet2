@@ -78,11 +78,23 @@ func newRingFixture(t *testing.T, extraModules ...string) *ringFixture {
 	}
 }
 
-// create registers a ring and fails the test if the service refuses it.
+// create registers a ring with the default publish batch and fails the
+// test if the service refuses it.
 func (m *ringFixture) create(t *testing.T, name string, capacity uint64) {
 	t.Helper()
+	m.createBatch(t, name, capacity, 0)
+}
 
-	_, err := m.client.CreateRing(t.Context(), &ringpb.CreateRingRequest{Name: name, Capacity: capacity})
+// createBatch registers a ring with the given publish batch, 0 for the
+// default, and fails the test if the service refuses it.
+func (m *ringFixture) createBatch(t *testing.T, name string, capacity uint64, publishBatch uint32) {
+	t.Helper()
+
+	_, err := m.client.CreateRing(t.Context(), &ringpb.CreateRingRequest{
+		Name:         name,
+		Capacity:     capacity,
+		PublishBatch: publishBatch,
+	})
 	require.NoError(t, err)
 }
 
@@ -92,7 +104,8 @@ func (m *ringFixture) delete(t *testing.T, name string) error {
 	return err
 }
 
-// list returns the listed rings as "name/capacity" strings, in list order.
+// list returns the listed rings as "name/capacity/publish batch" strings,
+// in list order.
 func (m *ringFixture) list(t *testing.T) []string {
 	t.Helper()
 
@@ -100,7 +113,7 @@ func (m *ringFixture) list(t *testing.T) []string {
 	require.NoError(t, err)
 	var rings []string
 	for _, info := range response.GetRings() {
-		rings = append(rings, fmt.Sprintf("%s/%d", info.GetName(), info.GetCapacity()))
+		rings = append(rings, fmt.Sprintf("%s/%d/%d", info.GetName(), info.GetCapacity(), info.GetPublishBatch()))
 	}
 	return rings
 }
@@ -120,15 +133,15 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	require.NoError(t, err)
 	reader, err := cring.NewReader(0, writer.Capacity(), src)
 	require.NoError(t, err)
-	// The writer is idle, so the reader drains past its distance.
-	records := reader.Drain(1024)
+	records := reader.Read(1024)
 	require.Len(t, records, 1)
 	require.Equal(t, seqno, records[0].Seqno)
 	require.Equal(t, payload, records[0].Bytes)
 }
 
 // Test_RingService_CreateRing_ShowAndListSortedByName verifies that every
-// created ring is listed once, sorted by name, and shown with its capacity.
+// created ring is listed once, sorted by name, and shown with its capacity
+// and publish batch.
 //
 // Sixteen rings created in reverse order cannot match sorted order by chance.
 func Test_RingService_CreateRing_ShowAndListSortedByName(t *testing.T) {
@@ -139,8 +152,9 @@ func Test_RingService_CreateRing_ShowAndListSortedByName(t *testing.T) {
 	for idx := ringCount - 1; idx >= 0; idx-- {
 		name := fmt.Sprintf("ring-%02d", idx)
 		capacity := uint64(64) << (idx % 4)
-		f.create(t, name, capacity)
-		want[idx] = fmt.Sprintf("%s/%d", name, capacity)
+		publishBatch := uint32(idx + 1)
+		f.createBatch(t, name, capacity, publishBatch)
+		want[idx] = fmt.Sprintf("%s/%d/%d", name, capacity, publishBatch)
 	}
 
 	require.Equal(t, want, f.list(t))
@@ -148,6 +162,18 @@ func Test_RingService_CreateRing_ShowAndListSortedByName(t *testing.T) {
 	show, err := f.client.ShowRing(t.Context(), &ringpb.ShowRingRequest{Name: "ring-03"})
 	require.NoError(t, err)
 	require.Equal(t, uint64(512), show.GetRing().GetCapacity())
+	require.Equal(t, uint32(4), show.GetRing().GetPublishBatch())
+}
+
+// Test_RingService_CreateRing_UnsetPublishBatchTakesDefault verifies that
+// a create leaving the publish batch unset gets the default one.
+func Test_RingService_CreateRing_UnsetPublishBatchTakesDefault(t *testing.T) {
+	f := newRingFixture(t)
+	f.create(t, "default-batch", 64)
+
+	show, err := f.client.ShowRing(t.Context(), &ringpb.ShowRingRequest{Name: "default-batch"})
+	require.NoError(t, err)
+	require.Equal(t, uint32(ringpb.DefaultPublishBatch), show.GetRing().GetPublishBatch())
 }
 
 // Test_RingService_UnknownName_NotFound verifies that show and delete of an
@@ -169,7 +195,7 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	f := newRingFixture(t)
 	f.create(t, "dup", 64)
 
-	external, err := cring.NewObject(f.agent, "taken", 64)
+	external, err := cring.NewObject(f.agent, "taken", 64, cring.DefaultPublishBatch)
 	require.NoError(t, err)
 	require.NoError(t, external.Publish())
 	t.Cleanup(func() {
@@ -178,12 +204,20 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	})
 
 	cases := []struct {
-		name     string
-		ringName string
-		capacity uint64
-		code     codes.Code
+		name         string
+		ringName     string
+		capacity     uint64
+		publishBatch uint32
+		code         codes.Code
 	}{
 		{name: "invalid request", ringName: "truncated", capacity: 1<<32 | 64, code: codes.InvalidArgument},
+		{
+			name:         "publish batch above maximum",
+			ringName:     "big-batch",
+			capacity:     64,
+			publishBatch: ringpb.MaxPublishBatch + 1,
+			code:         codes.InvalidArgument,
+		},
 		// Valid, but beyond the allocator's largest block in any build.
 		{name: "above allocator maximum", ringName: "too-big", capacity: 1 << 27, code: codes.InvalidArgument},
 		{name: "registered name", ringName: "dup", capacity: 128, code: codes.AlreadyExists},
@@ -192,9 +226,13 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := f.service.CreateRing(t.Context(), &ringpb.CreateRingRequest{Name: tc.ringName, Capacity: tc.capacity})
+			_, err := f.service.CreateRing(t.Context(), &ringpb.CreateRingRequest{
+				Name:         tc.ringName,
+				Capacity:     tc.capacity,
+				PublishBatch: tc.publishBatch,
+			})
 			require.Equal(t, tc.code, status.Code(err))
-			require.Equal(t, []string{"dup/64"}, f.list(t))
+			require.Equal(t, []string{"dup/64/8"}, f.list(t))
 		})
 	}
 
@@ -266,7 +304,7 @@ func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 			unpin := tc.pin(t, f, "pinned")
 
 			require.Equal(t, codes.FailedPrecondition, status.Code(f.delete(t, "pinned")))
-			require.Equal(t, []string{"pinned/64"}, f.list(t))
+			require.Equal(t, []string{"pinned/64/8"}, f.list(t))
 			requireRingUsable(t, f.agent, "pinned")
 
 			unpin()

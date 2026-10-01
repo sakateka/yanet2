@@ -1,9 +1,9 @@
 /*
  * Benchmark of the old pdump writer against the ring writer at several
  * record sizes: alone, with a concurrent reader per worker, and paced to a
- * fixed record rate. The ring writer publishes every 1, 8 or 32 records,
- * and its reader reads right up to the published position or keeps the
- * default distance from it; the old writer and its reader are the baseline.
+ * fixed record rate. The ring writer's publish batch is 1, 8 or 32 records,
+ * and its reader reads right up to the published position; the old writer
+ * and its reader are the baseline.
  *
  * Each per-worker array is one contiguous cache-line-aligned allocation, the
  * layout a block allocator gives, so two-worker runs reproduce the old
@@ -75,9 +75,6 @@
 #define BENCH_MAX_CELLS 512
 // Batch sizes, in records per publication, of the ring writer.
 #define BENCH_BATCH_COUNT 3
-// Reader distances, in bytes, of the ring reader: up to the published
-// position, and the default distance of one cache line.
-#define BENCH_DISTANCE_COUNT 2
 
 // Alignment of every thread's private context: two cache lines, as some
 // CPUs prefetch lines in adjacent pairs, so no thread's own writes contend
@@ -111,9 +108,6 @@ now_ns(void) {
 }
 
 static const uint32_t bench_batches[BENCH_BATCH_COUNT] = {1, 8, 32};
-static const uint32_t bench_distances[BENCH_DISTANCE_COUNT] = {
-	0, YANET_CACHE_LINE_SIZE
-};
 
 // Eviction chunk override in bytes, or a negative value to keep the ring's
 // own.
@@ -127,11 +121,12 @@ bench_die(const char *what) {
 	abort();
 }
 
-// Set up an empty ring, applying the chunk override capped to a quarter of
-// the ring, so a small ring still takes batches.
+// Set up an empty ring publishing every given number of records, applying
+// the chunk override capped to a quarter of the ring, so a small ring still
+// takes batches.
 static void
-bench_ring_init(struct ring_worker *ring, uint32_t size) {
-	ring_worker_init(ring, size);
+bench_ring_init(struct ring_worker *ring, uint32_t size, uint32_t batch) {
+	ring_worker_init(ring, size, batch);
 	if (bench_chunk >= 0) {
 		uint32_t cap = (size / 4) & ~3u;
 		ring->local.evict_chunk = (uint32_t)bench_chunk < cap
@@ -358,10 +353,6 @@ struct writer_ctx {
 	uint64_t period_ticks;
 	// Records per paced burst, timed together.
 	uint32_t burst;
-	// Records per publication of the new writer, and those committed
-	// since its last one.
-	uint32_t batch;
-	uint32_t pending;
 	pthread_barrier_t *start_barrier;
 	uint64_t run_ns;
 	int cpu;
@@ -380,7 +371,6 @@ writer_reset(struct writer_ctx *ctx, enum bench_side side) {
 		ctx->old_ring->readable_idx = 0;
 	} else {
 		ring_worker_set_positions(ctx->new_ring, 0, 0);
-		ctx->pending = 0;
 	}
 }
 
@@ -391,13 +381,10 @@ writer_write(struct writer_ctx *ctx, enum bench_side side) {
 			ctx->old_ring, ctx->data, ctx->payload, ctx->payload_len
 		);
 	} else {
+		// The ring publishes every batch of records on its own.
 		new_write_record(
 			ctx->new_ring, ctx->data, ctx->payload, ctx->payload_len
 		);
-		if (++ctx->pending == ctx->batch) {
-			ring_worker_publish(ctx->new_ring);
-			ctx->pending = 0;
-		}
 	}
 }
 
@@ -539,9 +526,6 @@ struct reader_ctx {
 	uint32_t capacity;
 	// Declared length of every record the paired writer commits.
 	uint32_t record_len;
-	// Bytes a read stays behind the published write position, rounded
-	// down to a cache-line boundary; 0 reads right up to it.
-	uint32_t distance;
 	pthread_barrier_t *start_barrier;
 	const atomic_bool *stop;
 	int cpu;
@@ -670,32 +654,13 @@ reader_load_indices(
 	}
 }
 
-// Logical position a read with the given distance stops at for a published
-// write position, as the Go reader computes it.
-static inline uint64_t
-reader_limit(uint64_t write, uint32_t distance) {
-	if (distance == 0) {
-		return write;
-	}
-	if (write < distance) {
-		return 0;
-	}
-	return (write - distance) & ~(uint64_t)(YANET_CACHE_LINE_SIZE - 1);
-}
-
 // Snapshot the indices and move the cursor past what the writer evicted.
 //
 // Returns false with nothing to read, after relaxing the CPU as the Go
 // reader backs off on an empty ring; otherwise the read starts at the
-// returned readable position and ends at the returned limit.
+// returned readable position and ends at the returned write position.
 static inline bool
-reader_begin(
-	struct reader_ctx *ctx,
-	uint32_t distance,
-	uint64_t *write,
-	uint64_t *readable,
-	uint64_t *limit
-) {
+reader_begin(struct reader_ctx *ctx, uint64_t *write, uint64_t *readable) {
 	reader_load_indices(ctx, write, readable);
 	uint64_t cursor = atomic_load(&ctx->cursor);
 	if (*readable > cursor) {
@@ -704,8 +669,7 @@ reader_begin(
 	} else {
 		*readable = cursor;
 	}
-	*limit = reader_limit(*write, distance);
-	if (*limit <= *readable) {
+	if (*write <= *readable) {
 		cpu_relax();
 		return false;
 	}
@@ -714,19 +678,18 @@ reader_begin(
 	return true;
 }
 
-// One read: snapshot the indices, copy the readable bytes short of the
-// distance, advance the cursor, recheck the readable position, drop the
-// invalidated prefix, parse.
+// One read: snapshot the indices, copy the readable bytes, advance the
+// cursor, recheck the readable position, drop the invalidated prefix,
+// parse.
 static void
-reader_read(struct reader_ctx *ctx, uint32_t distance) {
+reader_read(struct reader_ctx *ctx) {
 	uint64_t write;
 	uint64_t readable;
-	uint64_t limit;
-	if (!reader_begin(ctx, distance, &write, &readable, &limit)) {
+	if (!reader_begin(ctx, &write, &readable)) {
 		return;
 	}
 
-	uint64_t size = limit - readable;
+	uint64_t size = write - readable;
 	if (size > READER_READ_BUDGET) {
 		size = READER_READ_BUDGET;
 	}
@@ -766,15 +729,14 @@ reader_read(struct reader_ctx *ctx, uint32_t distance) {
 // One index-only read: the full read's index and cursor traffic in the same
 // order, without copying or parsing a byte.
 static void
-reader_poll(struct reader_ctx *ctx, uint32_t distance) {
+reader_poll(struct reader_ctx *ctx) {
 	uint64_t write;
 	uint64_t readable;
-	uint64_t limit;
-	if (!reader_begin(ctx, distance, &write, &readable, &limit)) {
+	if (!reader_begin(ctx, &write, &readable)) {
 		return;
 	}
 
-	uint64_t size = limit - readable;
+	uint64_t size = write - readable;
 	if (size > READER_READ_BUDGET) {
 		size = READER_READ_BUDGET;
 	}
@@ -797,16 +759,14 @@ reader_thread(void *arg) {
 	pthread_barrier_wait(ctx->start_barrier);
 
 	uint64_t start = now_ns();
-	// After the stop request, drain what the writer left published,
-	// distance aside, as a Go reader drains an idle writer.
+	// After the stop request, drain what the writer left published.
 	for (;;) {
 		bool stopping =
 			atomic_load_explicit(ctx->stop, memory_order_acquire);
-		uint32_t distance = stopping ? 0 : ctx->distance;
 		if (ctx->index_only) {
-			reader_poll(ctx, distance);
+			reader_poll(ctx);
 		} else {
-			reader_read(ctx, distance);
+			reader_read(ctx);
 		}
 		if (stopping &&
 		    atomic_load(&ctx->cursor) >=
@@ -932,7 +892,9 @@ old_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 // Same as old_alloc_workers, aligned to the new struct's own cache-line
 // alignment, which exceeds 64 bytes on 128-byte cache-line targets.
 static struct ring_worker *
-new_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
+new_alloc_workers(
+	int count, uint32_t ring_size, uint32_t batch, uint8_t *data[2]
+) {
 	struct ring_worker *workers;
 	if (posix_memalign(
 		    (void **)&workers,
@@ -945,7 +907,7 @@ new_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 
 	for (int i = 0; i < count; ++i) {
 		data[i] = alloc_touched(ring_size);
-		bench_ring_init(&workers[i], ring_size);
+		bench_ring_init(&workers[i], ring_size, batch);
 	}
 	return workers;
 }
@@ -975,10 +937,8 @@ struct bench_case {
 	// Target records per second per writer, in millions; 0 is unpaced.
 	double rate_mrps;
 	enum reader_mode reader;
-	// Records per publication of the new writer; 1 for the old one.
+	// Publish batch of the new writer's ring; 1 for the old writer.
 	uint32_t batch;
-	// Reader distance in bytes; 0 for the old reader and without one.
-	uint32_t distance;
 	const struct bench_cpus *cpus;
 };
 
@@ -1012,7 +972,7 @@ case_ring(const struct bench_case *bc, uint32_t *ring_size, uint64_t *reset) {
 static uint32_t
 case_batch(const struct bench_case *bc, uint32_t ring_size) {
 	struct ring_worker probe;
-	bench_ring_init(&probe, ring_size);
+	bench_ring_init(&probe, ring_size, 1);
 	uint32_t fit = ring_worker_batch_max(&probe) / ring_align4(bc->size);
 	uint32_t batch = bc->batch < fit ? bc->batch : fit;
 	return batch == 0 ? 1 : batch;
@@ -1065,7 +1025,8 @@ run_phase(const struct bench_case *bc) {
 	if (side == SIDE_OLD) {
 		old_workers = old_alloc_workers(bc->count, ring_size, data);
 	} else {
-		new_workers = new_alloc_workers(bc->count, ring_size, data);
+		new_workers =
+			new_alloc_workers(bc->count, ring_size, batch, data);
 	}
 	void *(*writer_fn)(void *) =
 		side == SIDE_OLD ? old_bench_thread : new_bench_thread;
@@ -1087,7 +1048,6 @@ run_phase(const struct bench_case *bc) {
 			.payload = payload,
 			.payload_len = record_len - hdr_len,
 			.reset_after_records = reset,
-			.batch = batch,
 			.start_barrier = &warmup_barrier,
 			.run_ns = BENCH_WARMUP_NS,
 			.cpu = bc->cpus->writer[i],
@@ -1144,7 +1104,6 @@ run_phase(const struct bench_case *bc) {
 				ring_size
 			);
 			readers[i].record_len = record_len;
-			readers[i].distance = bc->distance;
 			readers[i].start_barrier = &barrier;
 			readers[i].stop = &stop.flag;
 			readers[i].cpu = bc->cpus->reader[i];
@@ -1359,8 +1318,7 @@ plan_add(struct bench_plan *plan, struct bench_case bc) {
 	plan->cells[plan->count++].bc = bc;
 }
 
-// Add the old writer's cell and the new writer's cells for every batch
-// and, with a reader, every distance.
+// Add the old writer's cell and the new writer's cells for every batch.
 static void
 plan_add_sides(
 	struct bench_plan *plan,
@@ -1370,17 +1328,12 @@ plan_add_sides(
 ) {
 	bc.side = SIDE_OLD;
 	bc.batch = 1;
-	bc.distance = 0;
 	plan_add(plan, bc);
 
 	bc.side = SIDE_NEW;
-	int distances = bc.reader == READER_NONE ? 1 : BENCH_DISTANCE_COUNT;
 	for (int bi = 0; bi < batches_count; ++bi) {
-		for (int di = 0; di < distances; ++di) {
-			bc.batch = batches[bi];
-			bc.distance = bench_distances[di];
-			plan_add(plan, bc);
-		}
+		bc.batch = batches[bi];
+		plan_add(plan, bc);
 	}
 }
 
@@ -1388,8 +1341,7 @@ static bool
 case_equal(const struct bench_case *a, const struct bench_case *b) {
 	return a->side == b->side && a->ring == b->ring && a->size == b->size &&
 	       a->count == b->count && a->rate_mrps == b->rate_mrps &&
-	       a->reader == b->reader && a->batch == b->batch &&
-	       a->distance == b->distance;
+	       a->reader == b->reader && a->batch == b->batch;
 }
 
 static struct cell_stats
@@ -1447,7 +1399,7 @@ case_burst(const struct bench_case *bc) {
 // builds: ring, size, workers, rate, reader, side, writer ns/record, writer
 // Mrecords/s, reader Mrecords/s, lost %, backlog records, bad records, paced
 // records per burst and paced cost resolution in ns (1 and 0 unpaced),
-// records per publication and reader distance in bytes.
+// and records per publication.
 static void
 write_tsv(const struct bench_plan *plan, const char *path) {
 	FILE *f = fopen(path, "a");
@@ -1459,7 +1411,7 @@ write_tsv(const struct bench_plan *plan, const char *path) {
 		struct cell_stats st = cell_stats(plan, bc);
 		fprintf(f,
 			"%s\t%u\t%d\t%g\t%s\t%s\t%.3f\t%.4f\t%.4f\t%.3f\t%.2f\t"
-			"%lu\t%u\t%.4f\t%u\t%u\n",
+			"%lu\t%u\t%.4f\t%u\n",
 			ring_names[bc->ring],
 			bc->size,
 			bc->count,
@@ -1474,8 +1426,7 @@ write_tsv(const struct bench_plan *plan, const char *path) {
 			st.bad,
 			case_burst(bc),
 			st.resolution_ns,
-			bc->batch,
-			bc->distance);
+			bc->batch);
 	}
 	fclose(f);
 }
@@ -1532,34 +1483,14 @@ struct bench_matrix {
 };
 
 // Print the column header of a table keyed by the given row label: the old
-// writer, then the new one per batch and, with distances, per distance.
+// writer, then the new one per batch.
 static void
-print_columns(
-	const struct bench_matrix *m, const char *key, bool with_distance
-) {
+print_columns(const struct bench_matrix *m, const char *key) {
 	printf("%s |%9s ", key, "old");
 	for (int bi = 0; bi < m->batches_count; ++bi) {
-		int distances = with_distance ? BENCH_DISTANCE_COUNT : 1;
-		for (int di = 0; di < distances; ++di) {
-			char label[32];
-			if (with_distance) {
-				snprintf(
-					label,
-					sizeof(label),
-					"b%u d%u",
-					m->batches[bi],
-					bench_distances[di]
-				);
-			} else {
-				snprintf(
-					label,
-					sizeof(label),
-					"b%u",
-					m->batches[bi]
-				);
-			}
-			printf("%9s ", label);
-		}
+		char label[32];
+		snprintf(label, sizeof(label), "b%u", m->batches[bi]);
+		printf("%9s ", label);
 	}
 	printf("\n");
 }
@@ -1570,38 +1501,26 @@ print_row(
 	const struct bench_plan *plan,
 	const struct bench_matrix *m,
 	struct bench_case key,
-	enum bench_metric metric,
-	bool with_distance
+	enum bench_metric metric
 ) {
 	printf(" |");
 	key.side = SIDE_OLD;
 	key.batch = 1;
-	key.distance = 0;
 	struct cell_stats st = cell_stats(plan, &key);
 	print_metric(&st, metric, key.rate_mrps);
 	key.side = SIDE_NEW;
 	for (int bi = 0; bi < m->batches_count; ++bi) {
-		int distances = with_distance ? BENCH_DISTANCE_COUNT : 1;
-		for (int di = 0; di < distances; ++di) {
-			key.batch = m->batches[bi];
-			key.distance = bench_distances[di];
-			st = cell_stats(plan, &key);
-			print_metric(&st, metric, key.rate_mrps);
-		}
+		key.batch = m->batches[bi];
+		st = cell_stats(plan, &key);
+		print_metric(&st, metric, key.rate_mrps);
 	}
 	printf("\n");
 }
 
 static void
-print_columns_legend(bool with_distance) {
-	printf("old = pdump writer and reader; bN = ring writer publishing "
-	       "every N records");
-	if (with_distance) {
-		printf(";\ndX = ring reader staying X bytes behind the "
-		       "published "
-		       "position (0 = up to it)");
-	}
-	printf(".\n");
+print_columns_legend(void) {
+	printf("old = pdump writer and reader; bN = ring writer with a "
+	       "publish batch of N records.\n");
 }
 
 static void
@@ -1611,7 +1530,7 @@ print_writer_alone(
 	printf("\nWriter cost, ns/record (lower is better) - unpaced, no "
 	       "reader\n");
 	const char *key = "size, B  ring         workers";
-	print_columns(m, key, false);
+	print_columns(m, key);
 	for (int si = 0; si < m->sizes_count; ++si) {
 		for (int count = 1; count <= 2; ++count) {
 			for (int ring = 0; ring < RING_KIND_COUNT; ++ring) {
@@ -1624,11 +1543,11 @@ print_writer_alone(
 				       bc.size,
 				       ring_names[ring],
 				       count);
-				print_row(plan, m, bc, METRIC_WRITER_NS, false);
+				print_row(plan, m, bc, METRIC_WRITER_NS);
 			}
 		}
 	}
-	print_columns_legend(false);
+	print_columns_legend();
 	printf("ring: no-overflow = indices reset before the ring fills; "
 	       "overflow = 64 KiB ring\nevicting once full; 1m-ring = 1 MiB "
 	       "ring evicting once full, the ring of every\nreader and paced "
@@ -1643,7 +1562,7 @@ print_writer_by_reader(
 ) {
 	printf("\nWriter cost, ns/record (lower is better) - unpaced, 1 MiB "
 	       "ring, a reader per writer\n");
-	print_columns(m, "size, B  workers  reader    ", true);
+	print_columns(m, "size, B  workers  reader    ");
 	for (int si = 0; si < m->sizes_count; ++si) {
 		for (int count = 1; count <= reader_workers; ++count) {
 			for (int mode = READER_FULL; mode < READER_MODE_COUNT;
@@ -1658,11 +1577,11 @@ print_writer_by_reader(
 				       bc.size,
 				       count,
 				       reader_mode_names[mode]);
-				print_row(plan, m, bc, METRIC_WRITER_NS, true);
+				print_row(plan, m, bc, METRIC_WRITER_NS);
 			}
 		}
 	}
-	print_columns_legend(true);
+	print_columns_legend();
 	printf("full = copy-then-recheck reader copying and parsing every "
 	       "record; index-only = the\nsame index loads and cursor "
 	       "atomics, never touching the data area.\n");
@@ -1676,7 +1595,7 @@ print_writer_paced(
 	       "ring, 1 worker; timer %s, %.3f ns/tick\n",
 	       bench_timer.name,
 	       bench_timer.ns_per_tick);
-	print_columns(m, "size, B  rate, Mrec/s  reader    ", true);
+	print_columns(m, "size, B  rate, Mrec/s  reader    ");
 	for (int si = 0; si < m->paced_sizes_count; ++si) {
 		for (int ri = 0; ri < m->rates_count; ++ri) {
 			for (int mode = 0; mode < READER_MODE_COUNT; ++mode) {
@@ -1691,11 +1610,11 @@ print_writer_paced(
 				       bc.size,
 				       bc.rate_mrps,
 				       reader_mode_names[mode]);
-				print_row(plan, m, bc, METRIC_WRITER_NS, true);
+				print_row(plan, m, bc, METRIC_WRITER_NS);
 			}
 		}
 	}
-	print_columns_legend(true);
+	print_columns_legend();
 	printf("rate = target records/s per writer, in millions. Records are "
 	       "written in bursts\nspaced at the target rate (about %.0f ns "
 	       "of records per burst, whole batches for bN);\ncost = time "
@@ -1718,7 +1637,7 @@ print_reader_metric(
 	const char *title
 ) {
 	printf("\n%s - full reader, 1 MiB ring\n", title);
-	print_columns(m, "size, B  workers  rate, Mrec/s", true);
+	print_columns(m, "size, B  workers  rate, Mrec/s");
 	for (int si = 0; si < m->sizes_count; ++si) {
 		for (int count = 1; count <= reader_workers; ++count) {
 			struct bench_case bc = {
@@ -1728,7 +1647,7 @@ print_reader_metric(
 				.reader = READER_FULL,
 			};
 			printf("%7u  %7d  %12s", bc.size, count, "unpaced");
-			print_row(plan, m, bc, metric, true);
+			print_row(plan, m, bc, metric);
 		}
 	}
 	for (int si = 0; si < m->paced_sizes_count; ++si) {
@@ -1741,10 +1660,10 @@ print_reader_metric(
 				.reader = READER_FULL,
 			};
 			printf("%7u  %7d  %12g", bc.size, 1, bc.rate_mrps);
-			print_row(plan, m, bc, metric, true);
+			print_row(plan, m, bc, metric);
 		}
 	}
-	print_columns_legend(true);
+	print_columns_legend();
 }
 
 static void

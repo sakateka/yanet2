@@ -134,11 +134,12 @@ oversize_capacity(void) {
 }
 
 // A capacity of zero, below the frame, not a power of two or above the
-// allocator's maximum block is refused with the arena left unchanged.
+// allocator's maximum block, or a publish batch of zero or above the
+// maximum, is refused with the arena left unchanged.
 //
 // The errno names the failed check.
 static int
-run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
+run_ring_object_bad_parameters_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
 
 	struct agent *agent = agent_attach(
@@ -146,34 +147,47 @@ run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 	);
 	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
 
+	const uint32_t batch = RING_PUBLISH_BATCH_DEFAULT;
 	struct {
 		uint32_t capacity;
+		uint32_t publish_batch;
 		int expected_errno;
-	} bad_capacities[] = {
-		{0, EINVAL},
-		{4, EINVAL},
-		{24, EINVAL},
-		{oversize_capacity(), E2BIG},
+	} bad_params[] = {
+		{0, batch, EINVAL},
+		{4, batch, EINVAL},
+		{24, batch, EINVAL},
+		{oversize_capacity(), batch, E2BIG},
+		{64, 0, EINVAL},
+		{64, RING_PUBLISH_BATCH_MAX + 1, EINVAL},
 	};
-	for (size_t i = 0;
-	     i < sizeof(bad_capacities) / sizeof(bad_capacities[0]);
+	for (size_t i = 0; i < sizeof(bad_params) / sizeof(bad_params[0]);
 	     ++i) {
-		uint32_t capacity = bad_capacities[i].capacity;
+		uint32_t capacity = bad_params[i].capacity;
+		uint32_t publish_batch = bad_params[i].publish_batch;
 		size_t baseline =
 			block_allocator_free_size(&agent->block_allocator);
 
 		yanet_error *create_err = NULL;
 		struct cp_object *object = ring_object_config_new(
-			agent, "bad-capacity", capacity, &create_err
+			agent,
+			"bad-capacity",
+			capacity,
+			publish_batch,
+			&create_err
 		);
 		TEST_ASSERT_NULL(
-			object, "capacity %u must be refused", capacity
+			object,
+			"capacity %u, publish batch %u must be refused",
+			capacity,
+			publish_batch
 		);
 		TEST_ASSERT_EQUAL(
 			errno,
-			bad_capacities[i].expected_errno,
-			"capacity %u must set the expected errno",
-			capacity
+			bad_params[i].expected_errno,
+			"capacity %u, publish batch %u must set the expected "
+			"errno",
+			capacity,
+			publish_batch
 		);
 		TEST_ASSERT(
 			create_err != NULL,
@@ -185,9 +199,10 @@ run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 			(long)block_allocator_free_size(&agent->block_allocator
 			),
 			(long)baseline,
-			"a refused capacity must leave the arena unchanged: "
-			"capacity=%u",
-			capacity
+			"a refused create must leave the arena unchanged: "
+			"capacity=%u publish_batch=%u",
+			capacity,
+			publish_batch
 		);
 	}
 
@@ -229,7 +244,11 @@ run_ring_object_bad_worker_count_test(struct yanet_shm *shm) {
 		dp_config->worker_count = worker_count;
 		yanet_error *create_err = NULL;
 		struct cp_object *object = ring_object_config_new(
-			agent, "bad-workers", 64, &create_err
+			agent,
+			"bad-workers",
+			64,
+			RING_PUBLISH_BATCH_DEFAULT,
+			&create_err
 		);
 		int create_errno = errno;
 		dp_config->worker_count = saved_worker_count;
@@ -285,8 +304,10 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 		(long)worker_count, 2L, "the harness must run two workers"
 	);
 
-	struct cp_object *object =
-		ring_object_config_new(agent, "worker-rings", 64, &err);
+	const uint32_t publish_batch = 32;
+	struct cp_object *object = ring_object_config_new(
+		agent, "worker-rings", 64, publish_batch, &err
+	);
 	TEST_ASSERT_NOT_NULL(
 		object,
 		"ring_object_config_new failed: %s",
@@ -297,6 +318,11 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 		64,
 		"the object's capacity must stick"
 	);
+	TEST_ASSERT_EQUAL(
+		ring_object_publish_batch(object),
+		publish_batch,
+		"the object's publish batch must stick"
+	);
 
 	for (uint64_t idx = 0; idx < worker_count; ++idx) {
 		struct ring_worker *worker = ring_object_worker(object, idx);
@@ -306,6 +332,12 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 		);
 		TEST_ASSERT_NOT_NULL(
 			data, "worker %lu has no data", (unsigned long)idx
+		);
+		TEST_ASSERT_EQUAL(
+			worker->local.publish_batch,
+			publish_batch,
+			"worker %lu must take the object's publish batch",
+			(unsigned long)idx
 		);
 
 		for (uint64_t prev = 0; prev < idx; ++prev) {
@@ -355,8 +387,9 @@ run_ring_object_free_refused_while_referenced_test(struct yanet_shm *shm) {
 
 	size_t baseline = block_allocator_free_size(&agent->block_allocator);
 
-	struct cp_object *object =
-		ring_object_config_new(agent, "referenced", 64, &err);
+	struct cp_object *object = ring_object_config_new(
+		agent, "referenced", 64, RING_PUBLISH_BATCH_DEFAULT, &err
+	);
 	TEST_ASSERT_NOT_NULL(
 		object,
 		"ring_object_config_new failed: %s",
@@ -428,7 +461,8 @@ run_ring_object_fini_idempotent_test(struct yanet_shm *shm) {
 		"ring_object_init failed"
 	);
 	TEST_ASSERT_SUCCESS(
-		ring_object_create(self, 64, &err), "ring_object_create failed"
+		ring_object_create(self, 64, RING_PUBLISH_BATCH_DEFAULT, &err),
+		"ring_object_create failed"
 	);
 
 	ring_object_fini(self);
@@ -479,7 +513,11 @@ run_ring_object_enomem_rollback_test(struct yanet_shm *shm) {
 	     capacity >>= 1) {
 		yanet_error *create_err = NULL;
 		struct cp_object *object = ring_object_config_new(
-			agent, "enomem", capacity, &create_err
+			agent,
+			"enomem",
+			capacity,
+			RING_PUBLISH_BATCH_DEFAULT,
+			&create_err
 		);
 		if (object != NULL) {
 			// Both workers fit, and every smaller capacity will
@@ -561,7 +599,7 @@ main(void) {
 
 	struct test_case cases[] = {
 		{"align_alloc", run_ring_object_align_alloc_test},
-		{"bad_capacity", run_ring_object_bad_capacity_test},
+		{"bad_parameters", run_ring_object_bad_parameters_test},
 		{"bad_worker_count", run_ring_object_bad_worker_count_test},
 		{"worker_rings", run_ring_object_worker_rings_test},
 		{"free_refused_while_referenced",

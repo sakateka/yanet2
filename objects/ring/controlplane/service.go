@@ -138,6 +138,7 @@ func (m *RingService) CreateRing(
 	}
 	name := req.GetName()
 	capacity := uint32(req.GetCapacity())
+	publishBatch := req.PublishBatchOrDefault()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -149,7 +150,7 @@ func (m *RingService) CreateRing(
 		return nil, status.Errorf(codes.AlreadyExists, "ring %q already exists", name)
 	}
 
-	object, err := cring.NewObject(m.agent, name, capacity)
+	object, err := cring.NewObject(m.agent, name, capacity, publishBatch)
 	if err != nil {
 		if errors.Is(err, cerrors.InvalidArgument) {
 			return nil, status.Errorf(codes.InvalidArgument, "failed to create ring %q: %v", name, err)
@@ -170,11 +171,16 @@ func (m *RingService) CreateRing(
 	entry := &ringEntry{Handle: m.nextHandle, Name: name, Object: object}
 	m.rings[name] = entry
 
-	m.log.Info("created ring", zap.String("ring", name), zap.Uint32("capacity", capacity))
+	m.log.Info("created ring",
+		zap.String("ring", name),
+		zap.Uint32("capacity", capacity),
+		zap.Uint32("publish_batch", publishBatch),
+	)
 	return &ringpb.CreateRingResponse{}, nil
 }
 
-// ShowRing returns the name and per-worker capacity of one named ring.
+// ShowRing returns the name, per-worker capacity and publish batch of one
+// named ring.
 func (m *RingService) ShowRing(
 	ctx context.Context,
 	req *ringpb.ShowRingRequest,
@@ -218,8 +224,9 @@ func (m *RingService) ListRings(
 // ringInfo builds the proto facts for one registered ring.
 func ringInfo(entry *ringEntry) *ringpb.RingInfo {
 	return &ringpb.RingInfo{
-		Name:     entry.Name,
-		Capacity: uint64(entry.Object.Capacity()),
+		Name:         entry.Name,
+		Capacity:     uint64(entry.Object.Capacity()),
+		PublishBatch: entry.Object.PublishBatch(),
 	}
 }
 

@@ -14,14 +14,6 @@ import (
 // payload: the smallest declared record length a ring accepts.
 const RecordFrameSize = uint32(C.RING_RECORD_FRAME_SIZE)
 
-// CacheLineSize is the cache line the ring's layout is built around, and
-// the granularity a Reader rounds its distance from the writer to.
-const CacheLineSize = uint64(C.YANET_CACHE_LINE_SIZE)
-
-// DefaultDistance is the distance a Reader keeps from the published write
-// position unless told otherwise: one cache line.
-const DefaultDistance = uint32(CacheLineSize)
-
 // Record is one payload parsed out of a worker's ring, tagged with its
 // worker and the sequence number the writer stamped at commit.
 //
@@ -81,13 +73,12 @@ func (m *shmSource) CopyRange(dst []byte, start, size uint64) {
 // Reader parses published records out of one worker's ring, keeping a read
 // cursor independent of any other reader over the same worker.
 //
-// Read must not run concurrently with itself or with Drain; HasMore may be
-// polled from another goroutine while either runs.
+// Read must not run concurrently with itself; HasMore may be polled from
+// another goroutine while it runs.
 type Reader struct {
 	worker   uint16
 	capacity uint32
 	src      RecordSource
-	distance uint64
 
 	readIdx atomic.Uint64
 	// buf is scratch reused across calls and never handed to a caller.
@@ -97,61 +88,27 @@ type Reader struct {
 	buf []byte
 }
 
-// ReaderOption configures a Reader.
-type ReaderOption func(*Reader)
-
-// WithDistance sets how far, in bytes, Read stays behind the published
-// write position; 0 reads right up to it.
-//
-// A nonzero distance makes Read stop at the last cache-line boundary at
-// least that many bytes before the write position, so it never copies the
-// line the writer is filling with its next batch and never pulls that line
-// away from the writer's CPU. Records in the held-back tail are returned
-// once the writer publishes past them, or by Drain.
-func WithDistance(bytes uint32) ReaderOption {
-	return func(m *Reader) {
-		m.distance = uint64(bytes)
-	}
-}
-
 // NewReader builds a Reader that tags every parsed record with its worker
-// and bounds each declared record length by the ring's capacity. It keeps
-// DefaultDistance from the writer unless an option says otherwise.
+// and bounds each declared record length by the ring's capacity.
 //
 // Fails for a capacity below the frame size: no record fits such a ring,
 // and every declared length would be rejected as corruption.
-func NewReader(worker uint16, capacity uint32, src RecordSource, opts ...ReaderOption) (*Reader, error) {
+func NewReader(worker uint16, capacity uint32, src RecordSource) (*Reader, error) {
 	if capacity < RecordFrameSize {
 		return nil, fmt.Errorf("ring capacity %d is below the record frame size %d", capacity, RecordFrameSize)
 	}
-	reader := &Reader{worker: worker, capacity: capacity, src: src, distance: uint64(DefaultDistance)}
-	for _, opt := range opts {
-		opt(reader)
-	}
-	return reader, nil
+	return &Reader{worker: worker, capacity: capacity, src: src}, nil
 }
 
 // HasMore reports whether Read would find data this Reader has not yet
-// consumed, honouring the distance.
+// consumed.
 func (m *Reader) HasMore() bool {
 	write, _ := m.src.Indices()
-	return readLimit(write, m.distance) > m.readIdx.Load()
+	return write > m.readIdx.Load()
 }
 
-// readLimit returns the logical position a read with the given distance
-// stops at for a published write position.
-func readLimit(write, distance uint64) uint64 {
-	if distance == 0 {
-		return write
-	}
-	if write < distance {
-		return 0
-	}
-	return (write - distance) &^ (CacheLineSize - 1)
-}
-
-// Read copies up to the given byte budget of newly readable data, short of
-// the distance from the writer, and parses the whole records it completes.
+// Read copies up to the given byte budget of newly readable data and
+// parses the whole records it completes.
 //
 // After copying, the cursor advances and a recheck of the readable position
 // drops any prefix the writer invalidated mid-copy, so no caller sees a
@@ -161,17 +118,6 @@ func readLimit(write, distance uint64) uint64 {
 // call's snapshot. A steady-state call allocates only for the records it
 // returns: one slice and one payload block, none when none completed.
 func (m *Reader) Read(maxBytes uint32) []Record {
-	return m.read(maxBytes, m.distance)
-}
-
-// Drain is Read with no distance: it reads right up to the published write
-// position, for a caller that knows the writer is idle, such as after a
-// capture stopped.
-func (m *Reader) Drain(maxBytes uint32) []Record {
-	return m.read(maxBytes, 0)
-}
-
-func (m *Reader) read(maxBytes uint32, distance uint64) []Record {
 	write, readable := m.src.Indices()
 
 	if readable > m.readIdx.Load() {
@@ -184,14 +130,12 @@ func (m *Reader) read(maxBytes uint32, distance uint64) []Record {
 	}
 
 	// Everything below the published write position is whole records,
-	// complete in memory; the distance only keeps the copy off the lines
-	// the writer is still filling.
-	limit := readLimit(write, distance)
-	if limit <= readable {
+	// complete in memory.
+	if write <= readable {
 		return nil
 	}
 
-	size := min(limit-readable, uint64(maxBytes))
+	size := min(write-readable, uint64(maxBytes))
 
 	before := len(m.buf)
 	after := before + int(size)

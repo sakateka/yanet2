@@ -30,6 +30,9 @@ struct ring_object {
 	// Per-worker data area size in bytes: a power of two fixed at
 	// creation, from the frame size up to the allocator's maximum block.
 	uint32_t capacity;
+	// Records each worker's writer commits before publishing them on its
+	// own, fixed at creation.
+	uint32_t publish_batch;
 
 	// Raw allocation of the metadata array and its byte count, kept for
 	// freeing.
@@ -77,6 +80,7 @@ ring_object_config_new(
 	struct agent *agent,
 	const char *name,
 	uint32_t capacity,
+	uint32_t publish_batch,
 	yanet_error **err
 );
 
@@ -91,20 +95,29 @@ ring_object_config_free(struct cp_object *cp_object, yanet_error **err);
 //
 // The worker count follows the dataplane's configured worker count. Called
 // once, before the object is published. Returns 0 on success or -1 with errno
-// set: EINVAL for a capacity below the frame size or not a power of two, or for
-// a dataplane reporting zero workers; E2BIG for a capacity above the
+// set: EINVAL for a capacity below the frame size or not a power of two, for a
+// publish batch outside 1 to RING_PUBLISH_BATCH_MAX records, or for a
+// dataplane reporting zero workers; E2BIG for a capacity above the
 // allocator's maximum block or a dataplane reporting more than UINT16_MAX
 // workers; EEXIST when the object was already created; ENOMEM when an
 // allocation fails. A failure leaves the object without storage and the agent's
 // arena unchanged.
 int
 ring_object_create(
-	struct ring_object *self, uint32_t capacity, yanet_error **err
+	struct ring_object *self,
+	uint32_t capacity,
+	uint32_t publish_batch,
+	yanet_error **err
 );
 
 // Per-worker data area size in bytes, fixed at creation.
 uint32_t
 ring_object_capacity(const struct cp_object *cp_object);
+
+// Records a writer commits before publishing them on its own, fixed at
+// creation.
+uint32_t
+ring_object_publish_batch(const struct cp_object *cp_object);
 
 // Metadata of one worker, located in the object's aligned array so a caller
 // never does stride arithmetic across the shared-memory boundary.

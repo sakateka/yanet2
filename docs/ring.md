@@ -96,33 +96,29 @@ its own.
   write position; readers see nothing of it yet. A publication makes
   every record committed since the previous one visible with one store
   of the published write position, and does nothing when there is none.
-  A producer publishes once at the end of each call or burst.
-- A batch — the records committed between two publications — must total
-  at most the batch limit, the capacity minus the eviction chunk, in
-  aligned record lengths. The writer reports the room left in the
-  current batch; a producer whose next record exceeds it publishes
-  first. Assertions enforce the limit.
-- Within the limit a batch never evicts itself: eviction only drops
-  published records, and evicting all of them always frees the whole
-  chunk. A build without assertions that lets an oversized batch
-  through drops the batch's own oldest records as a last resort; readers
-  never saw them and observe a seqno gap.
-
-## Reader distance
-
+- Each ring has a publish batch, 8 records unless `create` asks for
+  another, from 1 to 1024, fixed at `create`. The commit that brings the
+  unpublished records to the publish batch publishes them itself, so a
+  steady producer pays one store of the published line per batch rather
+  than per record, and a reader polling that line takes it away from the
+  writer's CPU at most once per batch.
+- A producer still publishes once at the end of each call or burst. The
+  publish batch only bounds how many records wait unpublished while the
+  producer keeps writing; it never holds back the tail of a call, so a
+  slow producer's last records reach readers without waiting for the
+  batch to fill.
+- A batch also totals at most the batch limit, the capacity minus the
+  eviction chunk, in aligned record lengths. A record that would take the
+  batch past it makes the writer publish the records committed so far
+  first, exactly as an explicit publication does, and start a new batch
+  with that record, however few records the batch holds; exceeding the
+  limit is never an error. The writer reports the room left in the
+  current batch, so a producer may still size its batches by it.
+- A batch never evicts itself: eviction only drops published records,
+  and within the limit evicting all of them always frees the whole chunk,
+  so no record is lost to its own batch and seqnos stay contiguous.
 - Everything below the published write position is whole records,
-  complete in memory, so reading right up to it is correct. A reader
-  still keeps a distance from it by default, to leave the cache line the
-  writer fills with its next batch alone: copying that line would pull
-  it away from the writer's CPU and make the writer pay for taking it
-  back.
-- With a nonzero distance D (one cache line by default, configurable,
-  0 to disable), a read stops at the last cache-line boundary at least D
-  bytes before the published write position. Records past that boundary
-  are returned once the writer publishes past them.
-- `Drain` reads right up to the published write position regardless of
-  the distance, for a consumer that knows the writer is idle, for
-  example after a capture stopped.
+  complete in memory, so a reader reads right up to it.
 
 ## Metadata layout
 
@@ -132,7 +128,7 @@ contends with the writer's per-record bookkeeping:
 
 | Line (offset) | Fields (offset within the line, bytes) | Written by | Read by |
 |---|---|---|---|
-| Writer-private `local` (0) | `write_idx` (0), `readable_idx` (8), `published_write_idx` (16), `evict_idx` (24), `data` (32), `next_seqno` (40), `size` (44), `mask` (48), `evict_chunk` (52) | writer, every record | writer; readers load `size`, `mask`, `data` once at attach |
+| Writer-private `local` (0) | `write_idx` (0), `readable_idx` (8), `published_write_idx` (16), `evict_idx` (24), `data` (32), `next_seqno` (40), `size` (44), `mask` (48), `evict_chunk` (52), `publish_batch` (56), `batch_records` (60) | writer, every record | writer; readers load `size`, `mask`, `data` once at attach |
 | Guard (L) | unused | — | — |
 | Published `published` (2L) | `write_idx` (0), `readable_idx` (8) | writer, release stores only | readers |
 | Guard (3L) | unused | — | — |
@@ -141,7 +137,8 @@ The writer keeps its authoritative positions in the private line and
 never loads the published one; the published positions are copies it
 release-stores after updating its own. `published_write_idx` is its
 private record of the last write position it published, the start of
-the unpublished batch, and `evict_idx` is the record boundary its
+the unpublished batch, `batch_records` counts that batch's records
+against `publish_batch`, and `evict_idx` is the record boundary its
 eviction walk has reached ahead of the next eviction. The guard lines
 stop a CPU that prefetches lines in adjacent pairs from pulling a line a
 reader polls together with one the writer stores to, of the same worker
@@ -152,8 +149,11 @@ or the next one in the array.
 The writer (`common/ring.h`) is the sole mutator of both indices and
 uses no lock and no read-modify-write. Per record:
 
-1. Read its private `write_idx` and `readable_idx` with plain loads. If
-   the record fits, walk the eviction cursor over at most one more
+1. If the record would take the unpublished batch past the batch limit,
+   publish the batch first, exactly as step 6, before any eviction and
+   any byte of the record. Rare: at most once per batch limit of bytes.
+   Then read its private `write_idx` and `readable_idx` with plain loads.
+   If the record fits, walk the eviction cursor over at most one more
    published record's frame (reads only) and skip to step 4.
 2. Otherwise continue the walk over whole oldest published records
    locally until a chunk is free (to the batch start on a corrupt
@@ -162,9 +162,10 @@ uses no lock and no read-modify-write. Per record:
 3. Issue a release fence before touching any evicted byte. Steps 2 and 3
    run only when something was evicted: once per chunk, not per record.
 4. `memcpy` the frame and payload.
-5. Advance the private `write_idx` (commit).
+5. Advance the private `write_idx` (commit). If the unpublished records
+   now make up the publish batch, publish them as step 6.
 
-Per batch:
+Per batch, on a full publish batch and at the end of each producer call:
 
 6. Publish every committed record with one release store of the
    published `write_idx`, skipped when nothing was committed.
@@ -174,7 +175,7 @@ record: it is not an eviction counter.
 
 The reader (`objects/ring/bindings/go/cring`) acquire-loads both
 published indices, copies into a private buffer up to the published
-`write_idx` less its distance, advances its cursor with `atomic.Add`,
+`write_idx`, advances its cursor with `atomic.Add`,
 acquire-reloads `readable_idx` and drops the prefix that the recheck
 shows was invalidated before parsing. The add and the reload must stay
 atomic and in this order.
@@ -182,7 +183,9 @@ atomic and in this order.
 **Why it is correct.** Publication: the release store of `write_idx`
 follows every frame and payload store of the batch (and of any earlier
 batch) in program order, so a reader whose acquire load sees it also
-sees every byte below it; the distance only shortens the range read.
+sees every byte below it. The publications of steps 1 and 5 are the
+same store at a point where every committed record is whole and the next
+one has no byte written, so the same argument covers them.
 Unpublished records lie at or past the published `write_idx`, which no
 reader copies. Eviction: if the reader copied any overwritten byte, its
 recheck must see the eviction that covers it. One readable store and
@@ -212,6 +215,26 @@ design; this is not ISO C data-race-free code. Correctness rests on
 invalidating whole records before overwriting them and on the reader's
 copy-then-recheck.
 
+## Performance
+
+Writer cost per record and reader throughput at 64-byte records, each
+design step on top of the previous one, against the pdump writer it
+replaces. "Alone" is the writer with no reader; "full reader" is one
+concurrent reader per writer copying and parsing every record.
+
+| Design step | x86-64 alone, ns | x86-64 full reader, ns | arm64 alone, ns | arm64 full reader, ns | x86-64 reader, Mrec/s | arm64 reader, Mrec/s |
+|---|---|---|---|---|---|---|
+| Baseline: pdump writer | 34.5 | 151 | 36.2 | 307 | 6.6 | 3.25 |
+| 1. Single-writer publication, cache-line isolated workers, single readable store per eviction, eviction fence | 13.0 | 59 | 22.3 | 130 | ~17 | ~7.7 |
+| 2. Writer-private and published cache lines with guard lines | 13.3 | 45 | 22.7 | 40 | — | 24.8 |
+| 3. Batch publication (default 8) and chunked eviction | 12.8 | 24.6 | 23.0 | 31.6 | 40.6 | 31.6 |
+
+x86-64: Xeon Gold 6230 under KVM, pinned to 4 vCPUs; arm64: Cortex-A76,
+128-byte cache lines. 1 MiB ring, 64-byte records, unpaced, one worker;
+reproduce with `build/tests/common/ring_bench` (`RING_BENCH_CPUS`,
+`RING_BENCH_REPS`, `RING_BENCH_QUICK`). The numbers are indicative and
+will drift with hardware, compiler and load.
+
 ## Pdump capture status
 
 Pdump's own packet capture still writes into its private, module-local
@@ -224,19 +247,22 @@ is a later change.
 json` (a global flag from the shared `ync` CLI framework) switches any of
 these from human-readable output to the JSON wire response.
 
-Create a ring with a 1 MiB per-worker capacity:
+Create a ring with a 1 MiB per-worker capacity and the default publish
+batch, or one publishing every 32 records:
 
 ```bash
 yanet-cli-ring create --name captures --capacity 1MiB
+yanet-cli-ring create --name bursts --capacity 1MiB --publish-batch 32
 ```
 
-List every registered ring, sorted by name, as a `NAME`/`CAPACITY` table:
+List every registered ring, sorted by name, as a
+`NAME`/`CAPACITY`/`PUBLISH BATCH` table:
 
 ```bash
 yanet-cli-ring list
 ```
 
-Show one ring's capacity:
+Show one ring's capacity and publish batch:
 
 ```bash
 yanet-cli-ring show --name captures
@@ -252,4 +278,5 @@ yanet-cli-ring delete --name captures
 `--capacity` takes a size in bytes or IEC units, such as `4096`, `64KiB`
 or `1MiB`; the CLI rejects a value that is not a power of two (including
 decimal units such as `1MB`), and the service checks the range above
-before anything is created.
+before anything is created. `--publish-batch` takes 1 to 1024 records and
+defaults to the service's 8.

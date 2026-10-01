@@ -17,8 +17,9 @@ import (
 
 // ringInfo is one ring as the ring CLI renders it in JSON.
 type ringInfo struct {
-	Name     string `json:"name"`
-	Capacity uint64 `json:"capacity"`
+	Name         string `json:"name"`
+	Capacity     uint64 `json:"capacity"`
+	PublishBatch uint32 `json:"publish_batch"`
 }
 
 // ringCLI runs the ring CLI with the given arguments in the guest.
@@ -141,9 +142,10 @@ func requirePdumpCapturesInput(t *testing.T, fw *framework.TestFramework, config
 // Test_RingCLI_LifecycleAndPdumpCapture verifies that the ring CLI drives the
 // ring service hosted by a running pdump module.
 //
-// A created ring is listed and shown with its capacity, bad creates leave the
-// registry unchanged, a deleted name can be reused, and pdump capture works
-// with and without a ring present.
+// A created ring is listed and shown with its capacity and publish batch,
+// bad creates leave the registry unchanged, a deleted name can be reused
+// with another publish batch, and pdump capture works with and without a
+// ring present.
 func Test_RingCLI_LifecycleAndPdumpCapture(t *testing.T) {
 	t.Parallel()
 	withBootedVM(t, func(fw *framework.TestFramework) {
@@ -157,6 +159,9 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		badRingName  = "ring-tfn-bad"
 		capacity     = uint64(64 << 10)
 		recreatedCap = uint64(128 << 10)
+		// The service default for a create without --publish-batch.
+		defaultBatch   = uint32(8)
+		recreatedBatch = uint32(32)
 	)
 
 	// A failed step may leave rings behind in the shared VM; remove them
@@ -179,7 +184,7 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		_, err := ringCLI(fw, fmt.Sprintf("create --name %s --capacity %d", ringName, capacity))
 		require.NoError(t, err, "ring create failed")
 
-		want := ringInfo{Name: ringName, Capacity: capacity}
+		want := ringInfo{Name: ringName, Capacity: capacity, PublishBatch: defaultBatch}
 		ring, listed := findRing(listRings(t, fw), ringName)
 		require.True(t, listed, "created ring must be listed")
 		require.Equal(t, want, ring)
@@ -241,10 +246,13 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 	})
 
 	fw.Run("Recreate_reuses_name", func(fw *framework.TestFramework, t *testing.T) {
-		_, err := ringCLI(fw, fmt.Sprintf("create --name %s --capacity %d", ringName, recreatedCap))
+		_, err := ringCLI(fw, fmt.Sprintf(
+			"create --name %s --capacity %d --publish-batch %d",
+			ringName, recreatedCap, recreatedBatch,
+		))
 		require.NoError(t, err, "recreate after delete failed")
 		require.Equal(t,
-			ringInfo{Name: ringName, Capacity: recreatedCap},
+			ringInfo{Name: ringName, Capacity: recreatedCap, PublishBatch: recreatedBatch},
 			showRing(t, fw, ringName),
 		)
 

@@ -140,11 +140,12 @@ func (m *Writer) WriteRecord(payload []byte) (uint32, error) {
 
 // CommitRecord prepares, writes and commits one opaque record into the
 // unpublished batch, returning the seqno it was stamped with; readers see
-// it only after the next Publish.
+// it after the next Publish, or once the ring publishes the batch on its
+// own: when the record fills the publish batch, or when a later record
+// would take the batch past BatchRoom.
 //
 // Reports an error without writing anything when the record does not fit
-// the ring, matching the C writer's contract. The caller keeps the batch
-// within BatchRoom, as a producer must.
+// the ring, matching the C writer's contract.
 func (m *Writer) CommitRecord(payload []byte) (uint32, error) {
 	totalLen := uint32(C.RING_RECORD_FRAME_SIZE) + uint32(len(payload))
 

@@ -8,7 +8,7 @@
 # reader against a full-speed batching C writer with and without the fence,
 # and benchmarks both writers alone, with a full or index-only concurrent
 # reader per worker, unpaced and paced to fixed record rates, across
-# publication batches and reader distances, and the Go reader. Everything is
+# publish batches, and the Go reader. Everything is
 # logged to arm64-check-<host>-<date>.txt in the repository root. See
 # ARM64_CHECK.md.
 
@@ -26,7 +26,7 @@ Environment overrides:
   RING_CHECK_RECORDS         records per stress run (skips calibration)
   RING_CHECK_REPS            stress repetitions per build and capacity
   RING_CHECK_CAPACITIES      space-separated ring capacities to stress
-  RING_CHECK_STRESS_BATCH    records per publication of the stress writer
+  RING_CHECK_STRESS_BATCH    publish batch of the stress ring, in records
   RING_CHECK_BENCH_REPS      benchmark repetitions per build
   RING_CHECK_BENCH_CPUS      benchmark CPUs as w0,r0[,w1,r1]: the writer and
                              reader CPU of worker 0, then of worker 1
@@ -467,10 +467,12 @@ check_writer cring '^(ring_stress_run|ring_worker_prepare|ring_worker_evict)' \
 check_writer bench '^(new_bench_thread|new_write_record|ring_worker_prepare|ring_worker_evict)' \
 	"$WORK/ring_bench-fence" "$WORK/ring_bench-nofence"
 
-# A producer call committing a batch and publishing it once: on aarch64 it
-# must hold exactly two release stores, the batch's publication of the
-# write position and the eviction chunk's store of the readable position,
-# and exactly one fence, right after the latter.
+# A producer call committing records and publishing at its end: on aarch64
+# it holds the release stores of the write position (the explicit
+# publication, and the commit's and the full batch limit's own
+# publications, which the compiler may merge) and exactly one release store
+# of the readable position, the eviction chunk's, with exactly one fence
+# right after it.
 cat >"$WORK/batch-probe.c" <<'EOF'
 #include "common/ring.h"
 
@@ -520,8 +522,8 @@ for variant in fence nofence; do
 	echo "--- batch probe ($variant): $profile stlr=$stlr"
 	grep -E -B3 -A2 '[[:space:]](dmb|stlr)[[:space:]]' "$WORK/batch-probe-$variant.asm" | head -40 || true
 	((IS_ARM64)) || continue
-	if ((stlr != 2)); then
-		codegen_fail+=("batch probe ($variant): $stlr stlr, expected one publication and one eviction store")
+	if ((stlr < 2 || stlr > 4)); then
+		codegen_fail+=("batch probe ($variant): $stlr stlr, expected one to three publication stores and one eviction store")
 	fi
 	if [[ $variant == fence ]]; then
 		if [[ $(field "$profile" fences) != 1 || $(field "$profile" after_stlr) != 1 ]]; then
@@ -536,8 +538,7 @@ done
 # memory source, and the cursor add between the copy and the recheck.
 # Bracket expressions, not backslashes: awk -v would eat the escapes.
 READER_PKG='github[.]com/yanet-platform/yanet2/objects/ring/bindings/go/cring'
-# Read and Drain share the unexported read, which holds the protocol.
-READ_FUNC="^${READER_PKG}[.][(][*]Reader[)][.]read\$"
+READ_FUNC="^${READER_PKG}[.][(][*]Reader[)][.]Read\$"
 INDICES_FUNC="^${READER_PKG}[.][(][*]shmSource[)][.]Indices\$"
 disasm_funcs "$WORK/cring-fence.test" "$READ_FUNC" >"$WORK/reader-read.asm"
 disasm_funcs "$WORK/cring-fence.test" "$INDICES_FUNC" >"$WORK/reader-indices.asm"
@@ -554,7 +555,7 @@ count_ops() {
 	' "$1"
 }
 if [[ ! -s $WORK/reader-read.asm || ! -s $WORK/reader-indices.asm ]]; then
-	codegen_fail+=("reader: (*Reader).read or (*shmSource).Indices not found in the cring test binary")
+	codegen_fail+=("reader: (*Reader).Read or (*shmSource).Indices not found in the cring test binary")
 else
 	ldar=$(count_ops "$WORK/reader-indices.asm" '^ldar$')
 	ldaddal=$(count_ops "$WORK/reader-read.asm" '^ldaddal$')
@@ -564,10 +565,10 @@ else
 	{
 		printf '\nGo reader (cring fence build):\n'
 		printf '(*shmSource).Indices  ldar=%s\n' "$ldar"
-		printf '(*Reader).read        ldaddal=%s ldaxr=%s stlxr=%s lock_xadd=%s\n' \
+		printf '(*Reader).Read        ldaddal=%s ldaxr=%s stlxr=%s lock_xadd=%s\n' \
 			"$ldaddal" "$ldaxr" "$stlxr" "$xadd"
 	} >>"$WORK/codegen.txt"
-	echo "--- reader: atomics in (*Reader).read and (*shmSource).Indices:"
+	echo "--- reader: atomics in (*Reader).Read and (*shmSource).Indices:"
 	grep -hE '[[:space:]](ldar|ldaddal|ldaxr|stlxr|stlr|xadd|lock)[[:space:]]' \
 		"$WORK/reader-indices.asm" "$WORK/reader-read.asm" | head -20 || true
 	if ((IS_ARM64)); then
@@ -575,7 +576,7 @@ else
 			codegen_fail+=("reader: (*shmSource).Indices has $ldar ldar, expected acquire loads of both indices")
 		fi
 		if ((ldaddal == 0)) && ((ldaxr == 0 || stlxr == 0)); then
-			codegen_fail+=("reader: (*Reader).read has no ldaddal or ldaxr/stlxr pair for the cursor add")
+			codegen_fail+=("reader: (*Reader).Read has no ldaddal or ldaxr/stlxr pair for the cursor add")
 		fi
 	fi
 fi
@@ -584,7 +585,7 @@ cat "$WORK/codegen.txt"
 if ((${#codegen_fail[@]})); then
 	set_status codegen FAIL "$(printf '%s; ' "${codegen_fail[@]}")"
 elif ((IS_ARM64)); then
-	set_status codegen PASS "writer: stlr then one fence per eviction chunk, one stlr per batch, no ldadd, knob drops the fence; reader: ldar + ldaddal/ldaxr-stlxr"
+	set_status codegen PASS "writer: stlr then one fence per eviction chunk, release-store publications, no ldadd, knob drops the fence; reader: ldar + ldaddal/ldaxr-stlxr"
 else
 	set_status codegen INFO "not aarch64: profiles reported only (x86-64 emits no fence)"
 fi
@@ -595,7 +596,7 @@ header "STRESS"
 GOMAXPROCS=${GOMAXPROCS:-$(nproc)}
 ((GOMAXPROCS < 2)) && GOMAXPROCS=2
 export GOMAXPROCS
-echo "GOMAXPROCS=$GOMAXPROCS; the writer runs on its own pthread, unpinned, publishing every $STRESS_BATCH records; the reader keeps the default distance"
+echo "GOMAXPROCS=$GOMAXPROCS; the writer runs on its own pthread, unpinned, into a ring with a publish batch of $STRESS_BATCH records; the reader reads up to the published position"
 
 STRESS_TSV="$WORK/stress.tsv"
 : >"$STRESS_TSV"
@@ -731,8 +732,7 @@ echo "ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, 
 # Each run appends its cells' values as tab-separated rows: ring, size,
 # workers, rate, reader, side, writer ns/record, writer Mrec/s, reader
 # Mrec/s, lost %, backlog records, bad records, paced records per burst,
-# paced cost resolution in ns (1 and 0 unpaced), records per publication
-# and reader distance in bytes.
+# paced cost resolution in ns (1 and 0 unpaced) and records per publication.
 BENCH_TSV="$WORK/bench.tsv"
 : >"$BENCH_TSV"
 bench_fail=()
@@ -763,8 +763,8 @@ PACED_RATE_MET = 0.95
 # resolution steps (one timer tick over the burst size).
 FENCE_MIN_STEPS = 4
 
-# Rows are (ring, size, workers, rate, reader); columns are (side, batch,
-# distance) configurations.
+# Rows are (ring, size, workers, rate, reader); columns are (side, batch)
+# configurations.
 vals = defaultdict(list)
 resolution = {}
 rows = []
@@ -773,7 +773,7 @@ for line in open(sys.argv[1]):
     f = line.rstrip("\n").split("\t")
     variant = f[0]
     row = (f[2], int(f[3]), int(f[4]), float(f[5]), f[6])
-    config = (f[7], int(f[16]), int(f[17]))
+    config = (f[7], int(f[16]))
     for name, val in zip(METRICS, f[8:14]):
         vals[(row, config, variant, name)].append(float(val))
     resolution[(row, config)] = max(resolution.get((row, config), 0.0), float(f[15]))
@@ -782,18 +782,14 @@ for line in open(sys.argv[1]):
     configs.add(config)
 
 batches = sorted({c[1] for c in configs if c[0] == "new"})
-distances = sorted({c[2] for c in configs if c[0] == "new"})
-OLD = ("old", 1, 0)
-NO_READER = [OLD] + [("new", b, 0) for b in batches]
-WITH_READER = [OLD] + [("new", b, d) for b in batches for d in distances]
-LEGEND = ("old = pdump writer and reader; bN = ring writer publishing every N records;\n"
-          "dX = ring reader staying X bytes behind the published position (0 = up to it).")
+OLD = ("old", 1)
+NO_READER = [OLD] + [("new", b) for b in batches]
+WITH_READER = NO_READER
+LEGEND = "old = pdump writer and reader; bN = ring writer with a publish batch of N records."
 
 def label(config, columns):
     if config[0] == "old":
         return "old"
-    if columns is WITH_READER or columns == WITH_READER[1:]:
-        return f"b{config[1]} d{config[2]}"
     return f"b{config[1]}"
 
 def med(row, config, variant, name):
@@ -857,7 +853,7 @@ RATE = "size, B  workers  rate, Mrec/s"
 table("Writer cost, ns/record (lower is better) - unpaced, no reader, fence build",
       ALONE, alone_key, lambda ring, size, w, rate, reader: rate == 0 and reader == "none",
       NO_READER, metric_cell("fence", "writer_ns"))
-print("old = pdump writer; bN = ring writer publishing every N records. ring: no-overflow =")
+print("old = pdump writer; bN = ring writer with a publish batch of N records. ring: no-overflow =")
 print("indices reset before the ring fills; overflow = 64 KiB ring evicting once full;")
 print("1m-ring = 1 MiB ring evicting once full, the ring of every reader and paced row.")
 

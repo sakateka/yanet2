@@ -14,6 +14,14 @@ const MaxRingNameLen = 80
 // bytes: room for exactly one record frame.
 const MinRingCapacity = 8
 
+// DefaultPublishBatch is the publish batch a ring gets when the request
+// leaves it unset: the records a writer commits before publishing them on
+// its own.
+const DefaultPublishBatch = 8
+
+// MaxPublishBatch is the largest publish batch a ring accepts.
+const MaxPublishBatch = 1024
+
 // ValidateRingName validates a ring name against the C object-name
 // contract, reporting the given proto field on failure.
 func ValidateRingName(field, name string) error {
@@ -29,7 +37,8 @@ func ValidateRingName(field, name string) error {
 	return nil
 }
 
-// Validate checks the ring name and the per-worker capacity.
+// Validate checks the ring name, the per-worker capacity and the publish
+// batch, which may be left unset for the default.
 //
 // The upper bound is the C layer's, which varies by build; the service maps
 // its rejection of an oversized capacity to InvalidArgument. A capacity
@@ -56,7 +65,22 @@ func (m *CreateRingRequest) Validate() error {
 			capacity, MinRingCapacity,
 		)
 	}
+	if batch := m.GetPublishBatch(); batch > MaxPublishBatch {
+		return fmt.Errorf(
+			"publish_batch %d must be at most %d records",
+			batch, MaxPublishBatch,
+		)
+	}
 	return nil
+}
+
+// PublishBatchOrDefault returns the requested publish batch, or
+// DefaultPublishBatch when the request leaves it unset.
+func (m *CreateRingRequest) PublishBatchOrDefault() uint32 {
+	if batch := m.GetPublishBatch(); batch != 0 {
+		return batch
+	}
+	return DefaultPublishBatch
 }
 
 // Validate checks that the request names the ring to describe.

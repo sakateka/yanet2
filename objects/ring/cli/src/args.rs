@@ -7,7 +7,7 @@ pub enum ModeCmd {
     Create(CreateCmd),
     /// List registered ring objects.
     List,
-    /// Show the capacity of a named ring.
+    /// Show the capacity and publish batch of a named ring.
     Show(ShowCmd),
     /// Delete a named ring.
     Delete(DeleteCmd),
@@ -51,6 +51,11 @@ pub struct CreateCmd {
     /// 64KiB or 1MiB.
     #[arg(long, value_parser = parse_capacity)]
     pub capacity: u64,
+
+    /// Records a worker's writer commits before publishing them on its own,
+    /// from 1 to 1024; the service default when omitted.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1024))]
+    pub publish_batch: Option<u32>,
 }
 
 #[derive(Debug, Clone, Parser)]

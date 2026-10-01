@@ -74,6 +74,44 @@ func Test_CreateRingRequest_Validate(t *testing.T) {
 	}
 }
 
+// Test_CreateRingRequest_ValidatePublishBatch verifies the publish batch
+// range, where 0 leaves the default.
+func Test_CreateRingRequest_ValidatePublishBatch(t *testing.T) {
+	cases := []struct {
+		name    string
+		batch   uint32
+		message string
+	}{
+		{name: "unset", batch: 0},
+		{name: "one record", batch: 1},
+		{name: "maximum", batch: ringpb.MaxPublishBatch},
+		{
+			name:    "above maximum",
+			batch:   ringpb.MaxPublishBatch + 1,
+			message: "publish_batch 1025 must be at most 1024 records",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &ringpb.CreateRingRequest{Name: "ring0", Capacity: 64, PublishBatch: tc.batch}
+			err := req.Validate()
+			if tc.message == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.message)
+		})
+	}
+}
+
+// Test_CreateRingRequest_PublishBatchOrDefault verifies that an unset
+// publish batch resolves to the default and a set one is kept.
+func Test_CreateRingRequest_PublishBatchOrDefault(t *testing.T) {
+	require.Equal(t, uint32(ringpb.DefaultPublishBatch), (&ringpb.CreateRingRequest{}).PublishBatchOrDefault())
+	require.Equal(t, uint32(32), (&ringpb.CreateRingRequest{PublishBatch: 32}).PublishBatchOrDefault())
+}
+
 // Test_Requests_ValidateName verifies that every request applies the name
 // rules to its name field, including a nil request.
 func Test_Requests_ValidateName(t *testing.T) {

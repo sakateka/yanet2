@@ -97,6 +97,7 @@ ring_object_config_new(
 	struct agent *agent,
 	const char *name,
 	uint32_t capacity,
+	uint32_t publish_batch,
 	yanet_error **err
 ) {
 	struct ring_object *self = ring_object_new(agent);
@@ -116,7 +117,7 @@ ring_object_config_new(
 		return NULL;
 	}
 
-	if (ring_object_create(self, capacity, err)) {
+	if (ring_object_create(self, capacity, publish_batch, err)) {
 		int saved_errno = errno;
 		yanet_error_add(err, "failed to create ring object");
 		ring_object_fini(self);
@@ -189,7 +190,10 @@ ring_object_align_alloc(
 
 int
 ring_object_create(
-	struct ring_object *self, uint32_t capacity, yanet_error **err
+	struct ring_object *self,
+	uint32_t capacity,
+	uint32_t publish_batch,
+	yanet_error **err
 ) {
 	if (self->workers != NULL) {
 		yanet_error_add_kind(
@@ -210,6 +214,17 @@ ring_object_create(
 			"least %zu bytes",
 			capacity,
 			RING_RECORD_FRAME_SIZE
+		);
+		errno = EINVAL;
+		return -1;
+	}
+	if (publish_batch == 0 || publish_batch > RING_PUBLISH_BATCH_MAX) {
+		yanet_error_add_kind(
+			err,
+			YANET_ERROR_INVALID_ARGUMENT,
+			"ring publish batch %u must be from 1 to %u records",
+			publish_batch,
+			RING_PUBLISH_BATCH_MAX
 		);
 		errno = EINVAL;
 		return -1;
@@ -298,12 +313,13 @@ ring_object_create(
 		}
 		memset(data, 0, capacity);
 
-		ring_worker_init(&workers[idx], capacity);
+		ring_worker_init(&workers[idx], capacity, publish_batch);
 		SET_OFFSET_OF(&workers[idx].local.data, data);
 	}
 
 	self->worker_count = worker_count;
 	self->capacity = capacity;
+	self->publish_batch = publish_batch;
 	self->workers_raw_size = raw_size;
 	SET_OFFSET_OF(&self->workers_raw, raw);
 	SET_OFFSET_OF(&self->workers, workers);
@@ -317,6 +333,14 @@ ring_object_capacity(const struct cp_object *cp_object) {
 		container_of(cp_object, struct ring_object, cp_object);
 
 	return self->capacity;
+}
+
+uint32_t
+ring_object_publish_batch(const struct cp_object *cp_object) {
+	const struct ring_object *self =
+		container_of(cp_object, struct ring_object, cp_object);
+
+	return self->publish_batch;
 }
 
 struct ring_worker *

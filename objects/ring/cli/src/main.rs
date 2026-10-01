@@ -45,17 +45,22 @@ pub struct Cmd {
 type RingCliService = Service<RingServiceClient<LayeredChannel>>;
 
 impl Tabled for RingInfo {
-    const LENGTH: usize = 2;
+    const LENGTH: usize = 3;
 
     fn fields(&self) -> Vec<Cow<'_, str>> {
         vec![
             Cow::Borrowed(self.name.as_str()),
             Cow::Owned(ByteSize::b(self.capacity).to_string()),
+            Cow::Owned(self.publish_batch.to_string()),
         ]
     }
 
     fn headers() -> Vec<Cow<'static, str>> {
-        vec![Cow::Borrowed("NAME"), Cow::Borrowed("CAPACITY")]
+        vec![
+            Cow::Borrowed("NAME"),
+            Cow::Borrowed("CAPACITY"),
+            Cow::Borrowed("PUBLISH BATCH"),
+        ]
     }
 }
 
@@ -63,6 +68,7 @@ async fn ring_create(service: &mut RingCliService, cmd: CreateCmd) -> Result<(),
     let request = CreateRingRequest {
         name: cmd.name.clone(),
         capacity: cmd.capacity,
+        publish_batch: cmd.publish_batch.unwrap_or(0),
     };
 
     service
@@ -131,6 +137,7 @@ async fn ring_show(service: &mut RingCliService, cmd: ShowCmd) -> Result<(), Err
             display::KeyValue::new()
                 .row("name", &ring.name)
                 .row("capacity", ByteSize::b(ring.capacity))
+                .row("publish batch", ring.publish_batch)
                 .print();
         },
     );

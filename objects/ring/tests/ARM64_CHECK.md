@@ -89,9 +89,9 @@ it.
 | preflight | Architecture, CPU model, tools. Fails if a tool is missing. |
 | build | Builds with meson, generates protobufs and prints DPDK's cache line size. Fails if the C build and DPDK disagree on it. Every Go build gets that size through `CGO_CPPFLAGS`, like the Makefile. |
 | correctness | `meson test ring ring_object pdump_ring` and `go test ./objects/ring/...`. |
-| codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and disassembles the writer and the Go reader. On aarch64 the writer must publish each eviction chunk with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. A probe of one producer call (commit a batch, publish once) must hold exactly two `stlr`, the batch publication and the eviction, and one fence right after the eviction's. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
-| stress | A C writer thread overwrites a small ring at full speed, publishing every 8 records (`RING_CHECK_STRESS_BATCH`), while the production Go reader, at its default distance, checks every record it returns. Runs cover both builds, several ring capacities and repetitions. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
-| performance | Runs `ring_bench` for both builds with every writer and reader thread pinned to its own CPU, and prints median ns/record of both writers alone and with one concurrent reader per worker, unpaced and paced to fixed record rates, with the ring writer publishing every 1, 8 or 32 records and its reader reading up to the published position or keeping one cache line of distance (`--quick` runs a smaller size, rate and batch matrix). The full reader is the production read protocol transcribed to C; the index-only reader issues the same index loads and cursor atomics without touching the data area. The reader table gives each reader's rate, loss and bad records. Then runs the Go reader benchmarks from both cring test binaries: a prefilled ring with no writer, and a full-speed C writer. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
+| codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and disassembles the writer and the Go reader. On aarch64 the writer must publish each eviction chunk with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. A probe of one producer call (commit records, publish at the end) must hold one to three publication `stlr` (explicit, full publish batch, full batch limit) plus the eviction's, and one fence right after the eviction's. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).Read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
+| stress | A C writer thread overwrites a small ring at full speed, the ring publishing every 8 records (its publish batch, `RING_CHECK_STRESS_BATCH`), while the production Go reader checks every record it returns. Runs cover both builds, several ring capacities and repetitions. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
+| performance | Runs `ring_bench` for both builds with every writer and reader thread pinned to its own CPU, and prints median ns/record of both writers alone and with one concurrent reader per worker, unpaced and paced to fixed record rates, with the ring's publish batch at 1, 8 or 32 records and its reader reading up to the published position (`--quick` runs a smaller size, rate and batch matrix). The full reader is the production read protocol transcribed to C; the index-only reader issues the same index loads and cursor atomics without touching the data area. The reader table gives each reader's rate, loss and bad records. Then runs the Go reader benchmarks from both cring test binaries: a prefilled ring with no writer, and a full-speed C writer. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
 
 The script exits non-zero only when there is a real failure (build, tests,
 codegen on aarch64, or a torn record in the fence build).
@@ -115,9 +115,8 @@ by the tables:
 - Stress: `torn` is 0 for every `fence` row. `runs_torn` for the `nofence`
   rows counts the runs that reproduced the bug.
 - Benchmark tables, one metric per table: columns are `old` (the pdump
-  writer and reader), then the ring writer publishing every N records
-  (`bN`) and, with a reader, its reader distance in bytes (`dX`, 0 = up
-  to the published position). Writer cost tables are the fence build;
+  writer and reader), then the ring writer with a publish batch of N
+  records (`bN`). Writer cost tables are the fence build;
   each has a matching "fence cost, %" table, the fence build against the
   no-fence build of the same cell (`n/r` when a paced base is too close
   to the timer's resolution).
@@ -135,8 +134,7 @@ by the tables:
   number: it must be 0 for the ring in the fence build.
 - Go reader: ns/record, Mrecords/s and MB/s of the production reader over
   the real shared-memory ring, for each build; `lost%` only for the
-  concurrent-writer case, whose writer publishes every 32 records and
-  whose reader runs at distance 0 and at the default distance.
+  concurrent-writer case, whose ring has the default publish batch.
 
 ## What to send back
 
