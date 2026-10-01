@@ -5,7 +5,8 @@
 # that an eviction is one release store plus a fence (which the test-only
 # knob removes) and that the Go reader uses acquire/release atomics,
 # stress-tests the Go reader against a full-speed C writer with and without
-# the fence, and benchmarks both writers. Everything is logged to
+# the fence, and benchmarks both writers, alone and with a concurrent reader
+# per worker, and the Go reader. Everything is logged to
 # arm64-check-<host>-<date>.txt in the repository root. See ARM64_CHECK.md.
 
 set -euo pipefail
@@ -14,8 +15,8 @@ usage() {
 	cat <<'EOF'
 Usage: objects/ring/tests/arm64-check.sh [--quick]
 
-  --quick   short run (about 2-3 minutes after the build) instead of the
-            default one (about 10-15 minutes after the build)
+  --quick   short run (about 4 minutes after the build) instead of the
+            default one (about 12-18 minutes after the build)
 
 Environment overrides:
   RING_CHECK_STRESS_SECONDS  target seconds per stress run
@@ -23,7 +24,9 @@ Environment overrides:
   RING_CHECK_REPS            stress repetitions per build and capacity
   RING_CHECK_CAPACITIES      space-separated ring capacities to stress
   RING_CHECK_BENCH_REPS      benchmark repetitions per build
-  RING_CHECK_BENCH_CPUS      taskset CPU list for the benchmark (e.g. 2,3)
+  RING_CHECK_BENCH_CPUS      benchmark CPUs as w0,r0[,w1,r1]: the writer and
+                             reader CPU of worker 0, then of worker 1
+  RING_CHECK_GOBENCH_TIME    -benchtime of each Go reader benchmark run
 EOF
 }
 
@@ -60,11 +63,13 @@ if ((QUICK)); then
 	REPS=${RING_CHECK_REPS:-1}
 	CAPACITIES=${RING_CHECK_CAPACITIES:-"4096 65536"}
 	BENCH_REPS=${RING_CHECK_BENCH_REPS:-3}
+	GOBENCH_TIME=${RING_CHECK_GOBENCH_TIME:-0.5s}
 else
 	STRESS_SECONDS=${RING_CHECK_STRESS_SECONDS:-30}
 	REPS=${RING_CHECK_REPS:-3}
 	CAPACITIES=${RING_CHECK_CAPACITIES:-"1024 4096 65536"}
 	BENCH_REPS=${RING_CHECK_BENCH_REPS:-5}
+	GOBENCH_TIME=${RING_CHECK_GOBENCH_TIME:-1s}
 fi
 
 exec > >(tee "$REPORT") 2>&1
@@ -124,6 +129,11 @@ summary() {
 		echo
 		echo "Benchmark medians, ns/record (lower is better):"
 		cat "$WORK/bench-summary.txt"
+	fi
+	if [[ -s "$WORK/gobench-summary.txt" ]]; then
+		echo
+		echo "Go reader benchmark medians:"
+		cat "$WORK/gobench-summary.txt"
 	fi
 	echo
 	if ((FAILED)) || { ((rc != 0)) && ((${#SEC_ORDER[@]} == 0)); }; then
@@ -264,7 +274,7 @@ export CGO_CPPFLAGS="${CGO_CPPFLAGS:+$CGO_CPPFLAGS }-DYANET_CACHE_LINE_SIZE=$CAC
 # cgo does not track headers outside a package directory, so the Go build
 # cache can serve a writer compiled from an older ring header. Keying the
 # flags on the headers' content recompiles the cgo packages when they change.
-RING_HEADERS_SUM=$(cat objects/ring/dataplane/ring.h objects/ring/api/*.h | sha256sum | cut -c1-16)
+RING_HEADERS_SUM=$(cat common/record_ring.h objects/ring/api/*.h | sha256sum | cut -c1-16)
 export CGO_CPPFLAGS="$CGO_CPPFLAGS -DRING_CHECK_HEADERS=$RING_HEADERS_SUM"
 echo "CGO_CPPFLAGS=$CGO_CPPFLAGS"
 rm -rf "$WORK"
@@ -276,14 +286,14 @@ header "CORRECTNESS"
 
 unset RING_STRESS_RECORDS RING_STRESS_CAPACITY
 correct_fail=()
-log "meson test ring ring_object pdump_ring"
-meson test -C "$BUILD_DIR" --print-errorlogs ring ring_object pdump_ring || correct_fail+=("meson test")
+log "meson test record_ring ring_object pdump_ring"
+meson test -C "$BUILD_DIR" --print-errorlogs record_ring ring_object pdump_ring || correct_fail+=("meson test")
 log "go test -count=1 ./objects/ring/..."
 go test -count=1 ./objects/ring/... || correct_fail+=("go test")
 if ((${#correct_fail[@]})); then
 	set_status correctness FAIL "failed: ${correct_fail[*]}"
 else
-	set_status correctness PASS "meson ring/ring_object/pdump_ring, go ./objects/ring/..."
+	set_status correctness PASS "meson record_ring/ring_object/pdump_ring, go ./objects/ring/..."
 fi
 
 # ---------------------------------------------------------------------------
@@ -298,13 +308,13 @@ go test -c -o "$WORK/cring-fence.test" "$CRING_PKG" ||
 CGO_CFLAGS="$GO_CFLAGS_BASE $NOFENCE_DEFINE" go test -c -o "$WORK/cring-nofence.test" "$CRING_PKG" ||
 	die codegen "go test -c (no fence) failed"
 
-# Emit meson's ring_bench compile command, minus its object/dependency
+# Emit meson's record_ring_bench compile command, minus its object/dependency
 # outputs, as NUL-separated words preceded by its working directory.
 bench_command() {
 	python3 - "$BUILD_DIR/compile_commands.json" <<'EOF'
 import json, shlex, shutil, sys
 for entry in json.load(open(sys.argv[1])):
-    if not entry["file"].endswith("objects/ring/tests/ring_bench.c"):
+    if not entry["file"].endswith("tests/common/record_ring_bench.c"):
         continue
     args = entry.get("arguments") or shlex.split(entry["command"])
     if args[0] == "ccache" and shutil.which("ccache") is None:
@@ -319,22 +329,22 @@ for entry in json.load(open(sys.argv[1])):
             out.append(arg)
     sys.stdout.write("\0".join([entry["directory"]] + out) + "\0")
     sys.exit(0)
-sys.exit("ring_bench.c not found in compile_commands.json")
+sys.exit("record_ring_bench.c not found in compile_commands.json")
 EOF
 }
 
 mapfile -d '' BENCH_CMD < <(bench_command) || true
 if ((${#BENCH_CMD[@]} < 2)); then
-	die codegen "cannot extract the ring_bench compile command"
+	die codegen "cannot extract the record_ring_bench compile command"
 fi
 BENCH_DIR=${BENCH_CMD[0]}
 BENCH_ARGS=("${BENCH_CMD[@]:1}")
-echo "ring_bench flags (from compile_commands.json): ${BENCH_ARGS[*]}"
+echo "record_ring_bench flags (from compile_commands.json): ${BENCH_ARGS[*]}"
 for variant in fence nofence; do
 	extra=()
 	[[ $variant == nofence ]] && extra=("$NOFENCE_DEFINE")
 	(cd "$BENCH_DIR" && "${BENCH_ARGS[@]}" "${extra[@]}" -Wl,--as-needed -Wl,--no-undefined \
-		-o "$ROOT/$WORK/ring_bench-$variant") || die codegen "ring_bench ($variant) build failed"
+		-o "$ROOT/$WORK/record_ring_bench-$variant") || die codegen "record_ring_bench ($variant) build failed"
 done
 
 IS_ARM64=0
@@ -449,8 +459,8 @@ check_writer() {
 }
 check_writer cring '^(ring_stress_run|ring_worker_prepare)' \
 	"$WORK/cring-fence.test" "$WORK/cring-nofence.test"
-check_writer ring_bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
-	"$WORK/ring_bench-fence" "$WORK/ring_bench-nofence"
+check_writer bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
+	"$WORK/record_ring_bench-fence" "$WORK/record_ring_bench-nofence"
 
 # The Go reader: the index snapshot and recheck load through the shared
 # memory source, and the cursor add between the copy and the recheck.
@@ -629,31 +639,48 @@ fi
 # ---------------------------------------------------------------------------
 header "PERFORMANCE"
 
+# Four distinct CPUs, past the first one when enough are allowed: writers on
+# the first two, their readers on the next two. With fewer, one writer and
+# its reader.
 if [[ -n ${RING_CHECK_BENCH_CPUS:-} ]]; then
 	BENCH_CPUS=$RING_CHECK_BENCH_CPUS
 else
 	BENCH_CPUS=$(python3 -c '
 import os
 cpus = sorted(os.sched_getaffinity(0))
-pick = cpus[2:4] if len(cpus) >= 4 else cpus[:2]
+if len(cpus) >= 5:
+    cpus = cpus[1:]
+w0, w1, r0, r1 = (cpus + [None] * 4)[:4]
+pick = [w0, r0, w1, r1] if r1 is not None else cpus[:2]
 print(",".join(map(str, pick)))
 ')
 fi
-echo "ring_bench pinned to CPUs $BENCH_CPUS, $BENCH_REPS runs per build, builds alternate"
+echo "record_ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, builds alternate"
 
 BENCH_TSV="$WORK/bench.tsv"
+READER_TSV="$WORK/bench-reader.tsv"
 : >"$BENCH_TSV"
+: >"$READER_TSV"
 bench_fail=()
 for ((rep = 1; rep <= BENCH_REPS; rep++)); do
 	if ((rep % 2)); then order=(fence nofence); else order=(nofence fence); fi
 	for variant in "${order[@]}"; do
 		out="$WORK/bench-$variant-$rep.txt"
-		log "ring_bench $variant run $rep"
-		if taskset -c "$BENCH_CPUS" "$WORK/ring_bench-$variant" >"$out" 2>&1; then
+		log "record_ring_bench $variant run $rep"
+		if RING_BENCH_REPS=1 taskset -c "$BENCH_CPUS" \
+			"$WORK/record_ring_bench-$variant" "$BENCH_CPUS" >"$out" 2>&1; then
 			cat "$out"
-			awk -v v="$variant" -v r="$rep" 'NR > 1 && NF == 5 {
-				print v "\t" r "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5
-			}' "$out" >>"$BENCH_TSV"
+			# Writer-only rows have 5 fields, reader rows 12; both start
+			# with the record size.
+			awk -v v="$variant" -v r="$rep" -v w="$BENCH_TSV" -v rd="$READER_TSV" '
+				$1 !~ /^[0-9]+$/ { next }
+				NF == 5 { print v "\t" r "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 >> w }
+				NF == 12 {
+					line = v "\t" r
+					for (i = 1; i <= NF; i++) line = line "\t" $i
+					print line >> rd
+				}
+			' "$out"
 		else
 			cat "$out"
 			bench_fail+=("$variant run $rep")
@@ -661,14 +688,17 @@ for ((rep = 1; rep <= BENCH_REPS; rep++)); do
 	done
 done
 
-python3 - "$BENCH_TSV" >"$WORK/bench-summary.txt" <<'EOF'
+python3 - "$BENCH_TSV" "$READER_TSV" >"$WORK/bench-summary.txt" <<'EOF'
 import statistics, sys
 from collections import defaultdict
+
+def pct(a, b):
+    return (a - b) / b * 100 if b else float("nan")
 
 vals = defaultdict(list)
 keys = []
 for line in open(sys.argv[1]):
-    variant, _, size, scen, workers, old, new = line.split("\t")
+    variant, _, size, scen, workers, old, new = line.rstrip("\n").split("\t")
     key = (int(size), scen, int(workers))
     if key not in keys:
         keys.append(key)
@@ -679,10 +709,7 @@ def med(key, variant, side):
     xs = vals.get(key + (variant, side))
     return statistics.median(xs) if xs else float("nan")
 
-def pct(a, b):
-    return (a - b) / b * 100 if b else float("nan")
-
-print("old = pdump writer, new = ring writer; f = fence build, nf = no-fence build")
+print("Writer alone. old = pdump writer, new = ring writer; f = fence build, nf = no-fence build")
 print("fence% = new(f) vs new(nf); new/old% = new(f) vs old(f);")
 print("noise% = old(f) vs old(nf), the same code in both builds")
 print(f"{'size':>5} {'scenario':<11} {'wrk':>3} {'old(f)':>8} {'old(nf)':>8} "
@@ -693,11 +720,112 @@ for key in keys:
     print(f"{key[0]:>5} {key[1]:<11} {key[2]:>3} {of:8.2f} {onf:8.2f} "
           f"{nf_:8.2f} {nnf:8.2f} {pct(nf_, nnf):+7.1f} {pct(nf_, of):+8.1f} "
           f"{pct(of, onf):+7.1f}")
+
+# Reader rows: size workers old_w old_wr new_w new_wr old_Mrps new_Mrps
+# old_l% new_l% o_bad n_bad.
+cols = ["old_w", "old_wr", "new_w", "new_wr", "old_Mrps", "new_Mrps",
+        "old_l", "new_l", "o_bad", "n_bad"]
+rvals = defaultdict(list)
+rkeys = []
+for line in open(sys.argv[2]):
+    f = line.rstrip("\n").split("\t")
+    variant, size, workers = f[0], int(f[2]), int(f[3])
+    key = (size, workers)
+    if key not in rkeys:
+        rkeys.append(key)
+    for name, val in zip(cols, f[4:]):
+        rvals[key + (variant, name)].append(float(val))
+
+def rmed(key, variant, name):
+    xs = rvals.get(key + (variant, name))
+    return statistics.median(xs) if xs else float("nan")
+
+def rsum(key, variant, name):
+    return int(sum(rvals.get(key + (variant, name), [])))
+
+if rkeys:
+    print()
+    print("Writer with one concurrent reader per worker (1 MiB ring): writer ns/record")
+    print("alone (w) and with the reader (wr); rd% = new wr(f) vs new w(f);")
+    print("fence% = new wr(f) vs new wr(nf); reader Mrecords/s and % of records")
+    print("lost to overwrite for the new ring; bad = returned records with a wrong")
+    print("length or seqno order, summed over runs (must be 0 in the fence build);")
+    print("old_bad = the same for the old pdump writer and reader, both builds")
+    print(f"{'size':>5} {'wrk':>3} {'old_wr(f)':>9} {'new_w(f)':>8} {'new_wr(f)':>9} "
+          f"{'new_wr(nf)':>10} {'rd%':>7} {'fence%':>7} {'Mrps(f)':>7} {'Mrps(nf)':>8} "
+          f"{'lost%(f)':>8} {'lost%(nf)':>9} {'bad(f)':>6} {'bad(nf)':>7} {'old_bad':>7}")
+    for key in rkeys:
+        nw = rmed(key, "fence", "new_w")
+        nwr = rmed(key, "fence", "new_wr")
+        nwr_nf = rmed(key, "nofence", "new_wr")
+        print(f"{key[0]:>5} {key[1]:>3} {rmed(key, 'fence', 'old_wr'):9.2f} {nw:8.2f} "
+              f"{nwr:9.2f} {nwr_nf:10.2f} {pct(nwr, nw):+7.1f} {pct(nwr, nwr_nf):+7.1f} "
+              f"{rmed(key, 'fence', 'new_Mrps'):7.2f} {rmed(key, 'nofence', 'new_Mrps'):8.2f} "
+              f"{rmed(key, 'fence', 'new_l'):8.1f} {rmed(key, 'nofence', 'new_l'):9.1f} "
+              f"{rsum(key, 'fence', 'n_bad'):6d} {rsum(key, 'nofence', 'n_bad'):7d} "
+              f"{rsum(key, 'fence', 'o_bad') + rsum(key, 'nofence', 'o_bad'):7d}")
 EOF
 cat "$WORK/bench-summary.txt"
 
+FENCE_BAD=$(awk -F'\t' '$1 == "fence" { b += $14 } END { print b + 0 }' "$READER_TSV")
+if ((FENCE_BAD > 0)); then
+	bench_fail+=("the fence build's reader returned $FENCE_BAD bad records")
+fi
+
+# The Go reader benchmarks run from the package directory, as the stress
+# does, on the benchmark CPUs.
+GOBENCH_COUNT=$BENCH_REPS
+GOBENCH_TSV="$WORK/gobench.tsv"
+: >"$GOBENCH_TSV"
+echo
+echo "Go reader benchmark: -benchtime $GOBENCH_TIME, $GOBENCH_COUNT runs per build"
+for variant in fence nofence; do
+	out="$WORK/gobench-$variant.txt"
+	log "Go reader benchmark ($variant)"
+	if (cd "$CRING_DIR" && taskset -c "$BENCH_CPUS" "$ROOT/$WORK/cring-$variant.test" \
+		-test.run '^$' -test.bench 'Reader' -test.benchtime "$GOBENCH_TIME" \
+		-test.count "$GOBENCH_COUNT" -test.timeout 30m) >"$out" 2>&1; then
+		cat "$out"
+		awk -v v="$variant" '/^Benchmark/ { print v "\t" $0 }' "$out" >>"$GOBENCH_TSV"
+	else
+		cat "$out"
+		bench_fail+=("Go reader benchmark ($variant)")
+	fi
+done
+
+python3 - "$GOBENCH_TSV" >"$WORK/gobench-summary.txt" <<'EOF'
+import re, statistics, sys
+from collections import defaultdict
+
+vals = defaultdict(list)
+keys = []
+for line in open(sys.argv[1]):
+    variant, rest = line.rstrip("\n").split("\t", 1)
+    fields = rest.split()
+    name = re.sub(r"-\d+$", "", fields[0]).replace("Benchmark_Reader_Read_", "")
+    if name not in keys:
+        keys.append(name)
+    # After the name and iteration count, fields come in value/unit pairs.
+    for val, unit in zip(fields[2::2], fields[3::2]):
+        vals[(name, variant, unit)].append(float(val))
+
+def med(name, variant, unit):
+    xs = vals.get((name, variant, unit))
+    return statistics.median(xs) if xs else float("nan")
+
+print("Prefilled = no writer; ConcurrentWriter = full-speed C writer, 1 MiB ring")
+print(f"{'case':<28} {'build':<8} {'ns/record':>10} {'Mrec/s':>8} {'MB/s':>8} {'lost%':>6}")
+for name in keys:
+    for variant in ("fence", "nofence"):
+        lost = med(name, variant, "lost%")
+        print(f"{name:<28} {variant:<8} {med(name, variant, 'ns/record'):10.1f} "
+              f"{med(name, variant, 'records/s') / 1e6:8.2f} {med(name, variant, 'MB/s'):8.0f} "
+              f"{'-' if lost != lost else f'{lost:6.1f}':>6}")
+EOF
+cat "$WORK/gobench-summary.txt"
+
 if ((${#bench_fail[@]})); then
-	set_status performance FAIL "ring_bench failed: ${bench_fail[*]}"
+	set_status performance FAIL "$(printf '%s; ' "${bench_fail[@]}")"
 else
-	set_status performance INFO "no threshold; see the table"
+	set_status performance INFO "no threshold; see the tables"
 fi

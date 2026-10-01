@@ -1,10 +1,4 @@
-// Package ringwriter drives the C ring writer directly against one worker's
-// ring, for tests that control eviction and commit timing precisely.
-//
-// Production code never writes ring records from Go: the dataplane is the
-// sole writer of a ring's data area. The package sits directly under
-// objects/ring so both the bindings and the service tests can reach it.
-package ringwriter
+package ringtest
 
 //#cgo CFLAGS: -I../../../../
 //#cgo LDFLAGS: -L../../../../build/objects/ring/api -lring_objects
@@ -17,11 +11,11 @@ package ringwriter
 //#include "lib/controlplane/config/zone.h"
 //#include "objects/ring/api/ring_object.h"
 //
-//// ringwriter_lookup_object resolves the ring published under name in
+//// ringtest_writer_lookup_object resolves the ring published under name in
 //// agent's live generation, the same resolution ring_object_exists
 //// performs.
 //static inline struct cp_object *
-//ringwriter_lookup_object(struct agent *agent, const char *name) {
+//ringtest_writer_lookup_object(struct agent *agent, const char *name) {
 //	struct cp_config *cp_config = ADDR_OF(&agent->cp_config);
 //	cp_config_lock(cp_config);
 //	struct cp_config_gen *gen = ADDR_OF(&cp_config->cp_config_gen);
@@ -74,7 +68,7 @@ func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint16) (*Write
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	object := C.ringwriter_lookup_object((*C.struct_agent)(agent.AsRawPtr()), cName)
+	object := C.ringtest_writer_lookup_object((*C.struct_agent)(agent.AsRawPtr()), cName)
 	if object == nil {
 		return nil, fmt.Errorf("ring %q is not published", name)
 	}

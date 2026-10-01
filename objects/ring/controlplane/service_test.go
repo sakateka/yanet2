@@ -22,9 +22,7 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 	ring "github.com/yanet-platform/yanet2/objects/ring/controlplane"
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
-	"github.com/yanet-platform/yanet2/objects/ring/internal/ringlink"
-	"github.com/yanet-platform/yanet2/objects/ring/internal/ringref"
-	"github.com/yanet-platform/yanet2/objects/ring/internal/ringwriter"
+	"github.com/yanet-platform/yanet2/objects/ring/tests/ringtest"
 )
 
 // ringFixture is a service over a fresh single-worker harness, reached
@@ -112,7 +110,7 @@ func (m *ringFixture) list(t *testing.T) []string {
 func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	t.Helper()
 
-	writer, err := ringwriter.NewPublishedWriter(agent, name, 0)
+	writer, err := ringtest.NewPublishedWriter(agent, name, 0)
 	require.NoError(t, err)
 	payload := []byte("still-usable")
 	seqno, err := writer.WriteRecord(payload)
@@ -199,7 +197,7 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 		})
 	}
 
-	writer, err := ringwriter.NewPublishedWriter(f.agent, "taken", 0)
+	writer, err := ringtest.NewPublishedWriter(f.agent, "taken", 0)
 	require.NoError(t, err)
 	require.Equal(t, external.AsRawPtr(), writer.Object(), "the externally published ring must not be replaced")
 }
@@ -243,7 +241,7 @@ func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 			pin: func(t *testing.T, f *ringFixture, name string) func() {
 				handle, ok := f.service.LookupHandle(name)
 				require.True(t, ok)
-				lease, err := f.service.Acquire(handle)
+				lease, err := f.service.Acquire(name, handle)
 				require.NoError(t, err)
 				return lease.Release
 			},
@@ -253,7 +251,7 @@ func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 			pin: func(t *testing.T, f *ringFixture, name string) func() {
 				config, err := cforward.NewModuleConfig(f.agent, "ring-linker")
 				require.NoError(t, err)
-				require.NoError(t, ringlink.LinkRing(config.AsFFIModule().AsRawPtr(), name))
+				require.NoError(t, ringtest.LinkRing(config.AsFFIModule().AsRawPtr(), name))
 				require.NoError(t, f.agent.UpdateModules([]ffi.ModuleConfig{config.AsFFIModule()}))
 				return func() { require.NoError(t, f.agent.DeleteModuleConfig("forward", "ring-linker")) }
 			},
@@ -295,7 +293,7 @@ func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 // free a live generation reference refuses still unregisters the name.
 //
 // The name is recreated under a fresh handle while the old memory stays held,
-// and the next request frees it once the reference is released.
+// and the next delete frees it once the reference is released.
 func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	f := newRingFixture(t)
 	baseline := f.agent.BlockAllocatorFreeSize()
@@ -303,7 +301,7 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	f.create(t, "deferred", 64)
 	oldHandle, ok := f.service.LookupHandle("deferred")
 	require.True(t, ok)
-	ref, err := ringref.Hold(f.agent, "deferred")
+	ref, err := ringtest.Hold(f.agent, "deferred")
 	require.NoError(t, err)
 
 	require.NoError(t, f.delete(t, "deferred"))
@@ -318,6 +316,10 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 
 	ref.Release()
 	f.list(t)
+	require.Less(t, f.agent.BlockAllocatorFreeSize(), baseline, "only a delete retries deferred frees")
+
+	f.create(t, "other", 64)
+	require.NoError(t, f.delete(t, "other"))
 	require.Equal(t, baseline, f.agent.BlockAllocatorFreeSize())
 }
 
@@ -337,7 +339,7 @@ func Test_RingService_DeleteThenRecreate_NewHandle(t *testing.T) {
 	require.True(t, ok)
 	require.NotEqual(t, oldHandle, newHandle)
 
-	_, err := f.service.Acquire(oldHandle)
+	_, err := f.service.Acquire("recreate", oldHandle)
 	require.Error(t, err)
 }
 
@@ -355,7 +357,7 @@ func Test_RingService_LeaseVsDeleteRace(t *testing.T) {
 	var group errgroup.Group
 	for range 64 {
 		group.Go(func() error {
-			if lease, err := f.service.Acquire(handle); err == nil {
+			if lease, err := f.service.Acquire("race", handle); err == nil {
 				mu.Lock()
 				leases = append(leases, lease)
 				mu.Unlock()
@@ -381,6 +383,6 @@ func Test_RingService_LeaseVsDeleteRace(t *testing.T) {
 		require.NoError(t, f.delete(t, "race"))
 	}
 
-	_, err := f.service.Acquire(handle)
+	_, err := f.service.Acquire("race", handle)
 	require.Error(t, err, "a deleted handle must never admit a lease")
 }

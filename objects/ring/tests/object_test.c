@@ -13,6 +13,7 @@
 #include "common/asan.h"
 #include "common/memory.h"
 #include "common/memory_block.h"
+#include "common/numutils.h"
 #include "common/test_assert.h"
 
 #include "lib/controlplane/agent/agent.h"
@@ -201,17 +202,15 @@ run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// Smallest power of two strictly greater than the given value.
-//
-// Builds an oversize capacity that is a power of two yet exceeds the
-// allocator's maximum whether or not ASan red zones lowered it.
+// Smallest power of two strictly above the allocator's maximum block: an
+// oversize capacity that is a power of two whether or not ASan red zones
+// lowered the maximum.
 static uint32_t
-pow2_above(uint32_t val) {
-	uint32_t pow2 = 1;
-	while (pow2 <= val) {
-		pow2 <<= 1;
-	}
-	return pow2;
+oversize_capacity(void) {
+	uint64_t capacity = next_power_of_two(
+		(uint64_t)MEMORY_BLOCK_ALLOCATOR_MAX_SIZE + 1
+	);
+	return (uint32_t)capacity;
 }
 
 // A capacity of zero, below the frame, not a power of two or above the
@@ -234,7 +233,7 @@ run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 		{0, EINVAL},
 		{4, EINVAL},
 		{24, EINVAL},
-		{pow2_above(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE), E2BIG},
+		{oversize_capacity(), E2BIG},
 	};
 	for (size_t i = 0;
 	     i < sizeof(bad_capacities) / sizeof(bad_capacities[0]);
@@ -659,8 +658,7 @@ run_ring_object_enomem_rollback_test(struct yanet_shm *shm) {
 	size_t baseline = block_allocator_free_size(&agent->block_allocator);
 
 	bool rolled_back_mid_allocation = false;
-	for (uint32_t capacity =
-		     pow2_above(MEMORY_BLOCK_ALLOCATOR_MAX_SIZE) >> 1;
+	for (uint32_t capacity = oversize_capacity() >> 1;
 	     capacity >= RING_RECORD_FRAME_SIZE;
 	     capacity >>= 1) {
 		yanet_error *create_err = NULL;

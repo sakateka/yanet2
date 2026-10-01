@@ -19,7 +19,9 @@
 #include <string.h>
 
 #include "common/cache.h"
+#include "common/likely.h"
 #include "common/memory_address.h"
+#include "common/numutils.h"
 
 // Readers in other languages decode the record frame as little-endian.
 _Static_assert(
@@ -27,14 +29,10 @@ _Static_assert(
 	"the ring wire format is little-endian"
 );
 
-#ifndef unlikely
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#endif
-
 // Round a record length up to the 4-byte boundary every record starts at.
 static inline uint32_t
 ring_align4(uint32_t val) {
-	return (val + 3) & ~(uint32_t)3;
+	return (uint32_t)next_divisible_pow2(val, 4);
 }
 
 // Frame preceding every record's opaque payload.

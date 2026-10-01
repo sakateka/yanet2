@@ -91,10 +91,9 @@ func WithLog(log *zap.Logger) Option {
 type RingService struct {
 	ringpb.UnimplementedRingServiceServer
 
-	mu       sync.Mutex
-	agent    *ffi.Agent
-	rings    map[string]*ringEntry
-	byHandle map[Handle]*ringEntry
+	mu    sync.Mutex
+	agent *ffi.Agent
+	rings map[string]*ringEntry
 	// leases counts active leases per handle and holds only positive
 	// counts: a missing key means zero.
 	//
@@ -106,8 +105,8 @@ type RingService struct {
 	// deferred holds deleted entries whose free was refused because a live
 	// configuration generation still referenced them.
 	//
-	// Nothing else remembers them; the service retries them at the start
-	// of every request and on explicit reclamation.
+	// Nothing else remembers them; the service retries them on every delete
+	// and on explicit reclamation.
 	deferred []*ringEntry
 	log      *zap.Logger
 }
@@ -120,11 +119,10 @@ func NewRingService(agent *ffi.Agent, opts ...Option) *RingService {
 	}
 
 	return &RingService{
-		agent:    agent,
-		rings:    map[string]*ringEntry{},
-		byHandle: map[Handle]*ringEntry{},
-		leases:   map[Handle]int{},
-		log:      o.Log,
+		agent:  agent,
+		rings:  map[string]*ringEntry{},
+		leases: map[Handle]int{},
+		log:    o.Log,
 	}
 }
 
@@ -143,8 +141,6 @@ func (m *RingService) CreateRing(
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	m.reclaimDeferred()
 
 	if _, exists := m.rings[name]; exists {
 		return nil, status.Errorf(codes.AlreadyExists, "ring %q already exists", name)
@@ -173,7 +169,6 @@ func (m *RingService) CreateRing(
 	m.nextHandle++
 	entry := &ringEntry{Handle: m.nextHandle, Name: name, Object: object}
 	m.rings[name] = entry
-	m.byHandle[entry.Handle] = entry
 
 	m.log.Info("created ring", zap.String("ring", name), zap.Uint32("capacity", capacity))
 	return &ringpb.CreateRingResponse{}, nil
@@ -191,8 +186,6 @@ func (m *RingService) ShowRing(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.reclaimDeferred()
-
 	entry, ok := m.rings[req.GetName()]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "ring %q not found", req.GetName())
@@ -209,8 +202,6 @@ func (m *RingService) ListRings(
 ) (*ringpb.ListRingsResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	m.reclaimDeferred()
 
 	response := &ringpb.ListRingsResponse{
 		Rings: make([]*ringpb.RingInfo, 0, len(m.rings)),
@@ -250,8 +241,6 @@ func (m *RingService) DeleteRing(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.reclaimDeferred()
-
 	entry, ok := m.rings[name]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "ring %q not found", name)
@@ -288,9 +277,11 @@ func (m *RingService) DeleteRing(
 		}
 	}
 
+	// The delete retired the generation holding the published object;
+	// retry the deferred ones, then retire this one.
+	m.reclaimDeferred()
 	m.freeOrDefer(entry)
 	delete(m.rings, name)
-	delete(m.byHandle, entry.Handle)
 	delete(m.leases, entry.Handle)
 
 	m.log.Info("deleted ring", zap.String("ring", name))
@@ -310,18 +301,17 @@ func (m *RingService) LookupHandle(name string) (Handle, bool) {
 	return entry.Handle, true
 }
 
-// Acquire pins the ring behind handle against deletion and returns a lease
-// releasing that pin.
+// Acquire pins the named ring against deletion, provided it is still the
+// ring behind handle, and returns a lease releasing that pin.
 //
-// Fails once that handle has been deleted, even if a new ring exists under
-// the name the handle used to name: the new ring has its own handle from
-// its own create, and this call never matches it.
-func (m *RingService) Acquire(handle Handle) (*Lease, error) {
+// Fails once that ring has been deleted, even if a new ring exists under the
+// same name: the new ring has its own handle from its own create.
+func (m *RingService) Acquire(name string, handle Handle) (*Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, ok := m.byHandle[handle]; !ok {
-		return nil, fmt.Errorf("ring handle %d no longer exists", handle)
+	if entry, ok := m.rings[name]; !ok || entry.Handle != handle {
+		return nil, fmt.Errorf("ring %q handle %d no longer exists", name, handle)
 	}
 
 	m.leases[handle]++
@@ -357,8 +347,8 @@ func (m *RingService) freeOrDefer(entry *ringEntry) {
 // ReclaimDeferred retries every deferred ring, dropping the ones whose
 // generations have drained and keeping the rest.
 //
-// The service runs it at the start of every request; anything else may
-// call it at any time.
+// The service runs it on every delete; anything else may call it at any
+// time.
 func (m *RingService) ReclaimDeferred() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -1,6 +1,6 @@
 package cring
 
-//#include "objects/ring/dataplane/ring.h"
+//#include "common/record_ring.h"
 import "C"
 
 import (

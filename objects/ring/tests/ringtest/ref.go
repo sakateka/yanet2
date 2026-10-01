@@ -1,10 +1,4 @@
-// Package ringref places an artificial extra reference on a published ring,
-// so service tests can reproduce a refused free without generation timing.
-//
-// Production code never does this: a ring's only real reference comes from
-// a published configuration generation. The package sits directly under
-// objects/ring so both the bindings and the service tests can reach it.
-package ringref
+package ringtest
 
 //#cgo CFLAGS: -I../../../../
 //#cgo LDFLAGS: -L../../../../build/lib/controlplane/config -lconfig_cp
@@ -16,19 +10,19 @@ package ringref
 //#include "lib/controlplane/config/cp_object.h"
 //#include "lib/controlplane/config/zone.h"
 //
-//// ringref_config resolves agent's config pointer, the same identity
+//// ringtest_ref_config resolves agent's config pointer, the same identity
 //// cp_config_lock records as the calling thread's holder and every
 //// registry mutation's assert-locked check compares against.
 //static inline struct cp_config *
-//ringref_config(struct agent *agent) {
+//ringtest_ref_config(struct agent *agent) {
 //	return ADDR_OF(&agent->cp_config);
 //}
 //
-//// ringref_lookup_object resolves the currently published cp_object for
+//// ringtest_ref_lookup_object resolves the currently published cp_object for
 //// (object_type, object_name) in agent's live generation, mirroring the
 //// resolution ring_object_exists performs internally.
 //static inline struct cp_object *
-//ringref_lookup_object(
+//ringtest_ref_lookup_object(
 //	struct agent *agent, const char *object_type, const char *object_name
 //) {
 //	struct cp_config *cp_config = ADDR_OF(&agent->cp_config);
@@ -40,13 +34,13 @@ package ringref
 //	return object;
 //}
 //
-//// ringref_locked_upsert runs cp_object_registry_upsert under agent's
+//// ringtest_ref_locked_upsert runs cp_object_registry_upsert under agent's
 //// config lock, the same lock every production registry mutation
 //// (cp_config_gen_install, cp_object_try_destroy) runs under, so this
 //// artificial reference cannot race a concurrent publish or delete that
 //// touches the same object's reference count.
 //static inline int
-//ringref_locked_upsert(
+//ringtest_ref_locked_upsert(
 //	struct agent *agent,
 //	struct cp_object_registry *registry,
 //	const char *object_type,
@@ -63,10 +57,10 @@ package ringref
 //	return rc;
 //}
 //
-//// ringref_locked_fini runs cp_object_registry_fini under agent's config
-//// lock, for the same reason ringref_locked_upsert does.
+//// ringtest_ref_locked_fini runs cp_object_registry_fini under agent's config
+//// lock, for the same reason ringtest_ref_locked_upsert does.
 //static inline void
-//ringref_locked_fini(
+//ringtest_ref_locked_fini(
 //	struct agent *agent, struct cp_object_registry *registry
 //) {
 //	struct cp_config *cp_config = ADDR_OF(&agent->cp_config);
@@ -105,7 +99,7 @@ func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
-	object := C.ringref_lookup_object(cAgent, cType, cName)
+	object := C.ringtest_ref_lookup_object(cAgent, cType, cName)
 	if object == nil {
 		return nil, fmt.Errorf("ring %q is not published", name)
 	}
@@ -120,15 +114,15 @@ func Hold(agent *ffi.Agent, name string) (*Reference, error) {
 	//
 	// A NULL owner would match only a thread holding no lock, tripping
 	// that assertion once this reference takes the agent's lock.
-	cpConfig := C.ringref_config(cAgent)
+	cpConfig := C.ringtest_ref_config(cAgent)
 
 	var cErr *C.yanet_error
 	if rc := C.cp_object_registry_init(&cAgent.memory_context, cpConfig, registry, &cErr); rc != 0 {
 		C.free(unsafe.Pointer(registry))
 		return nil, fmt.Errorf("failed to init reference registry: %w", cerrors.FromC(unsafe.Pointer(cErr)))
 	}
-	if rc := C.ringref_locked_upsert(cAgent, registry, cType, cName, object, &cErr); rc != 0 {
-		C.ringref_locked_fini(cAgent, registry)
+	if rc := C.ringtest_ref_locked_upsert(cAgent, registry, cType, cName, object, &cErr); rc != 0 {
+		C.ringtest_ref_locked_fini(cAgent, registry)
 		C.free(unsafe.Pointer(registry))
 		return nil, fmt.Errorf("failed to hold ring %q: %w", name, cerrors.FromC(unsafe.Pointer(cErr)))
 	}
@@ -142,7 +136,7 @@ func (m *Reference) Release() {
 	if m.registry == nil {
 		return
 	}
-	C.ringref_locked_fini(m.agent, m.registry)
+	C.ringtest_ref_locked_fini(m.agent, m.registry)
 	C.free(unsafe.Pointer(m.registry))
 	m.registry = nil
 }

@@ -15,7 +15,7 @@ import (
 
 // newTestAgent builds a throwaway dataplane_ut harness with the ring object
 // loaded and one attached agent, both torn down at test end.
-func newTestAgent(t *testing.T, workerCount uint64) *ffi.Agent {
+func newTestAgent(t testing.TB, workerCount uint64) *ffi.Agent {
 	t.Helper()
 
 	h, err := dataplaneut.NewHarness(dataplaneut.Config{

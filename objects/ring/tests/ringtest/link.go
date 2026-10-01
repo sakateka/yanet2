@@ -1,10 +1,4 @@
-// Package ringlink links a module config to a named ring object, so service
-// tests can reproduce the refusal to delete a linked ring.
-//
-// Production code never links a module to a ring here: linking belongs to
-// the dataplane module itself. The package sits directly under objects/ring
-// so both the bindings and the service tests can reach it.
-package ringlink
+package ringtest
 
 //#cgo CFLAGS: -I../../../../
 //#cgo LDFLAGS: -L../../../../build/lib/controlplane/config -lconfig_cp

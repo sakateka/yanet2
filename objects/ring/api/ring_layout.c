@@ -2,7 +2,7 @@
 
 #include "ring_layout.h"
 
-#include "objects/ring/dataplane/ring.h"
+#include "common/record_ring.h"
 
 struct ring_worker_layout
 ring_layout_worker(void) {

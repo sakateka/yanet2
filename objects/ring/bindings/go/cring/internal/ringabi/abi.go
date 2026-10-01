@@ -9,7 +9,7 @@ package ringabi
 //#cgo LDFLAGS: -L../../../../../../../build/objects/ring/api -lring_objects
 //
 //#include "objects/ring/api/ring_layout.h"
-//#include "objects/ring/dataplane/ring.h"
+//#include "common/record_ring.h"
 //
 //static inline uint64_t cgo_ring_worker_align(void) {
 //	return _Alignof(struct ring_worker);

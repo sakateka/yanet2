@@ -9,6 +9,7 @@
 #include "common/container_of.h"
 #include "common/memory.h"
 #include "common/memory_block.h"
+#include "common/numutils.h"
 #include "common/strutils.h"
 
 #include "lib/controlplane/agent/agent.h"
@@ -153,7 +154,7 @@ ring_object_align_alloc(
 		errno = EOVERFLOW;
 		return NULL;
 	}
-	uint64_t aligned_stride = (stride + alignment - 1) & ~(alignment - 1);
+	uint64_t aligned_stride = next_divisible_pow2(stride, alignment);
 
 	uint64_t body_size = 0;
 	if (count != 0) {
@@ -177,8 +178,8 @@ ring_object_align_alloc(
 	}
 	memset(block, 0, total_size);
 
-	uintptr_t aligned_addr = ((uintptr_t)block + (alignment - 1)) &
-				 ~(uintptr_t)(alignment - 1);
+	uintptr_t aligned_addr =
+		(uintptr_t)next_divisible_pow2((uintptr_t)block, alignment);
 
 	*raw = block;
 	*raw_size = total_size;

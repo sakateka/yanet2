@@ -2,6 +2,7 @@ package cring_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"strconv"
 	"testing"
@@ -11,7 +12,7 @@ import (
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
-	"github.com/yanet-platform/yanet2/objects/ring/internal/ringwriter"
+	"github.com/yanet-platform/yanet2/objects/ring/tests/ringtest"
 )
 
 // repeatedFrameSizePayload returns n bytes built from repeated
@@ -32,7 +33,7 @@ func repeatedFrameSizePayload(n int) []byte {
 
 // newRingObject creates and publishes a ring object, freeing it at test
 // end.
-func newRingObject(t *testing.T, agent *ffi.Agent, name string, capacity uint32) *cring.Object {
+func newRingObject(t testing.TB, agent *ffi.Agent, name string, capacity uint32) *cring.Object {
 	t.Helper()
 
 	object, err := cring.NewObject(agent, name, capacity)
@@ -44,7 +45,7 @@ func newRingObject(t *testing.T, agent *ffi.Agent, name string, capacity uint32)
 }
 
 // source returns the real record source of one worker's ring.
-func source(t *testing.T, object *cring.Object, workerIdx uint16) cring.RecordSource {
+func source(t testing.TB, object *cring.Object, workerIdx uint16) cring.RecordSource {
 	t.Helper()
 
 	sources, err := object.Sources()
@@ -54,7 +55,7 @@ func source(t *testing.T, object *cring.Object, workerIdx uint16) cring.RecordSo
 }
 
 // openReader opens a fresh reader over one worker's ring.
-func openReader(t *testing.T, object *cring.Object, workerIdx uint16) *cring.Reader {
+func openReader(t testing.TB, object *cring.Object, workerIdx uint16) *cring.Reader {
 	t.Helper()
 
 	readers, err := object.OpenReaders()
@@ -65,10 +66,10 @@ func openReader(t *testing.T, object *cring.Object, workerIdx uint16) *cring.Rea
 
 // newWriter resolves the raw C writer primitives for one worker, to drive
 // records directly as the dataplane would.
-func newWriter(t *testing.T, object *cring.Object, workerIdx uint16) *ringwriter.Writer {
+func newWriter(t testing.TB, object *cring.Object, workerIdx uint16) *ringtest.Writer {
 	t.Helper()
 
-	writer, err := ringwriter.NewWriter(object.AsRawPtr(), workerIdx)
+	writer, err := ringtest.NewWriter(object.AsRawPtr(), workerIdx)
 	require.NoError(t, err)
 	return writer
 }
@@ -634,7 +635,7 @@ func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
 		done := stress.Done()
 		for _, rec := range reader.Read(capacity) {
 			returned++
-			if !ringwriter.StressRecordValid(rec.Seqno, rec.Bytes) {
+			if !ringtest.StressRecordValid(rec.Seqno, rec.Bytes) {
 				torn++
 				if torn <= 10 {
 					t.Logf("torn record: seqno=%d len=%d", rec.Seqno, len(rec.Bytes))
@@ -665,4 +666,123 @@ func envUint(t *testing.T, name string, def uint64) uint64 {
 	val, err := strconv.ParseUint(raw, 10, 64)
 	require.NoError(t, err, name)
 	return val
+}
+
+// benchReadBudget is the byte budget of one benchmarked read: pdump's
+// default read chunk.
+const benchReadBudget = 512 << 10
+
+// benchRingCapacity is the benchmarked ring size: pdump's minimum.
+const benchRingCapacity = 1 << 20
+
+// benchRecordSizes are the benchmarked declared record lengths, frame
+// included.
+var benchRecordSizes = []uint32{64, 1500}
+
+// readerBenchStats accumulates what a benchmarked reader returned.
+type readerBenchStats struct {
+	records uint64
+	bytes   uint64
+}
+
+func (m *readerBenchStats) add(records []cring.Record) {
+	m.records += uint64(len(records))
+	for _, rec := range records {
+		m.bytes += uint64(cring.RecordFrameSize) + uint64(len(rec.Bytes))
+	}
+}
+
+// report publishes the per-record cost and throughput over the timed
+// elapsed time.
+func (m *readerBenchStats) report(b *testing.B) {
+	b.Helper()
+	if m.records == 0 {
+		b.Fatal("the reader returned no records")
+	}
+	secs := b.Elapsed().Seconds()
+	b.ReportMetric(secs*1e9/float64(m.records), "ns/record")
+	b.ReportMetric(float64(m.records)/secs, "records/s")
+	b.ReportMetric(float64(m.bytes)/secs/1e6, "MB/s")
+}
+
+// Benchmark_Reader_Read_Prefilled measures the reader's own cost with no
+// writer running: copying out of the real shared-memory ring, the recheck
+// and parsing, per record and per byte.
+//
+// Every pass refills the ring with the timer stopped and then reads it to
+// empty with production-sized reads.
+func Benchmark_Reader_Read_Prefilled(b *testing.B) {
+	for _, size := range benchRecordSizes {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			agent := newTestAgent(b, 1)
+			object := newRingObject(b, agent, "bench", benchRingCapacity)
+			writer := newWriter(b, object, 0)
+			reader := openReader(b, object, 0)
+
+			payload := make([]byte, size-cring.RecordFrameSize)
+			perPass := benchRingCapacity / ((size + 3) &^ 3)
+
+			var stats readerBenchStats
+			b.ResetTimer()
+			for range b.N {
+				b.StopTimer()
+				for range perPass {
+					if _, err := writer.WriteRecord(payload); err != nil {
+						b.Fatal(err)
+					}
+				}
+				b.StartTimer()
+
+				for reader.HasMore() {
+					stats.add(reader.Read(benchReadBudget))
+				}
+			}
+			b.StopTimer()
+			if want := uint64(b.N) * uint64(perPass); stats.records != want {
+				b.Fatalf("read %d records, want %d", stats.records, want)
+			}
+			stats.report(b)
+		})
+	}
+}
+
+// Benchmark_Reader_Read_ConcurrentWriter measures the reader against the C
+// writer committing records at full speed on its own thread, the
+// overwriting steady state of a live capture.
+//
+// The writer commits the benchmark's iteration count of records; the reader
+// reads until the writer finishes and the ring is drained. The metrics are
+// the reader's returned records over the whole run, and lost is the share
+// of committed records overwritten before the reader reached them.
+func Benchmark_Reader_Read_ConcurrentWriter(b *testing.B) {
+	for _, size := range benchRecordSizes {
+		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
+			agent := newTestAgent(b, 1)
+			object := newRingObject(b, agent, "bench", benchRingCapacity)
+			writer := newWriter(b, object, 0)
+			reader := openReader(b, object, 0)
+
+			var stats readerBenchStats
+			b.ResetTimer()
+			stress, err := writer.StartStressFixed(uint64(b.N), size-cring.RecordFrameSize)
+			if err != nil {
+				b.Fatal(err)
+			}
+			for {
+				done := stress.Done()
+				stats.add(reader.Read(benchReadBudget))
+				if done && !reader.HasMore() {
+					break
+				}
+			}
+			b.StopTimer()
+			written := stress.Written()
+			stress.Wait()
+			if written != uint64(b.N) {
+				b.Fatalf("the writer committed %d of %d records", written, b.N)
+			}
+			stats.report(b)
+			b.ReportMetric(100*(1-float64(stats.records)/float64(written)), "lost%")
+		})
+	}
 }

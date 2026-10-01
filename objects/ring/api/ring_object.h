@@ -8,7 +8,7 @@
 
 #include "lib/errors/errors.h"
 
-#include "objects/ring/dataplane/ring.h"
+#include "common/record_ring.h"
 
 #define RING_OBJECT_TYPE "ring"
 

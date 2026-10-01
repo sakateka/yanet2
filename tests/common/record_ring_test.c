@@ -9,7 +9,7 @@
 
 #include "common/test_assert.h"
 
-#include "objects/ring/dataplane/ring.h"
+#include "common/record_ring.h"
 
 #include "lib/logging/log.h"
 
