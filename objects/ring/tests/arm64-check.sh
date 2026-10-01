@@ -5,8 +5,9 @@
 # that an eviction is one release store plus a fence (which the test-only
 # knob removes) and that the Go reader uses acquire/release atomics,
 # stress-tests the Go reader against a full-speed C writer with and without
-# the fence, and benchmarks both writers, alone and with a concurrent reader
-# per worker, and the Go reader. Everything is logged to
+# the fence, and benchmarks both writers alone, with a full or index-only
+# concurrent reader per worker, unpaced and paced to fixed record rates, and
+# the Go reader. Everything is logged to
 # arm64-check-<host>-<date>.txt in the repository root. See ARM64_CHECK.md.
 
 set -euo pipefail
@@ -127,7 +128,7 @@ summary() {
 	fi
 	if [[ -s "$WORK/bench-summary.txt" ]]; then
 		echo
-		echo "Benchmark medians, ns/record (lower is better):"
+		echo "Benchmark medians:"
 		cat "$WORK/bench-summary.txt"
 	fi
 	if [[ -s "$WORK/gobench-summary.txt" ]]; then
@@ -657,30 +658,22 @@ print(",".join(map(str, pick)))
 fi
 echo "ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, builds alternate"
 
+# Each run appends its cells' values as tab-separated rows: ring, size,
+# workers, rate, reader, side, writer ns/record, writer Mrec/s, reader
+# Mrec/s, lost %, backlog records, bad records.
 BENCH_TSV="$WORK/bench.tsv"
-READER_TSV="$WORK/bench-reader.tsv"
 : >"$BENCH_TSV"
-: >"$READER_TSV"
 bench_fail=()
 for ((rep = 1; rep <= BENCH_REPS; rep++)); do
 	if ((rep % 2)); then order=(fence nofence); else order=(nofence fence); fi
 	for variant in "${order[@]}"; do
 		out="$WORK/bench-$variant-$rep.txt"
+		tsv="$WORK/bench-$variant-$rep.tsv"
 		log "ring_bench $variant run $rep"
-		if RING_BENCH_REPS=1 taskset -c "$BENCH_CPUS" \
-			"$WORK/ring_bench-$variant" "$BENCH_CPUS" >"$out" 2>&1; then
+		if RING_BENCH_REPS=1 RING_BENCH_QUICK=$QUICK RING_BENCH_TSV="$tsv" \
+			taskset -c "$BENCH_CPUS" "$WORK/ring_bench-$variant" "$BENCH_CPUS" >"$out" 2>&1; then
 			cat "$out"
-			# Writer-only rows have 5 fields, reader rows 12; both start
-			# with the record size.
-			awk -v v="$variant" -v r="$rep" -v w="$BENCH_TSV" -v rd="$READER_TSV" '
-				$1 !~ /^[0-9]+$/ { next }
-				NF == 5 { print v "\t" r "\t" $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 >> w }
-				NF == 12 {
-					line = v "\t" r
-					for (i = 1; i <= NF; i++) line = line "\t" $i
-					print line >> rd
-				}
-			' "$out"
+			awk -v v="$variant" -v r="$rep" '{ print v "\t" r "\t" $0 }' "$tsv" >>"$BENCH_TSV"
 		else
 			cat "$out"
 			bench_fail+=("$variant run $rep")
@@ -688,86 +681,123 @@ for ((rep = 1; rep <= BENCH_REPS; rep++)); do
 	done
 done
 
-python3 - "$BENCH_TSV" "$READER_TSV" >"$WORK/bench-summary.txt" <<'EOF'
+python3 - "$BENCH_TSV" >"$WORK/bench-summary.txt" <<'EOF'
 import statistics, sys
 from collections import defaultdict
+
+METRICS = ["writer_ns", "writer_mrps", "reader_mrps", "lost", "backlog", "bad"]
+MODES = ["none", "full", "index-only"]
+PACED_RATE_MET = 0.95
+
+vals = defaultdict(list)
+for line in open(sys.argv[1]):
+    f = line.rstrip("\n").split("\t")
+    variant, ring, size, workers, rate, reader, side = (
+        f[0], f[2], int(f[3]), int(f[4]), float(f[5]), f[6], f[7])
+    for name, val in zip(METRICS, f[8:]):
+        vals[(ring, size, workers, rate, reader, side, variant, name)].append(float(val))
+
+def keys(pred):
+    seen = []
+    for k in vals:
+        cell = k[:5]
+        if pred(*cell) and cell not in seen:
+            seen.append(cell)
+    return seen
+
+def med(cell, side, variant, name):
+    xs = vals.get(cell + (side, variant, name))
+    return statistics.median(xs) if xs else float("nan")
+
+def total(cell, side, variant, name):
+    return int(sum(vals.get(cell + (side, variant, name), [])))
 
 def pct(a, b):
     return (a - b) / b * 100 if b else float("nan")
 
-vals = defaultdict(list)
-keys = []
-for line in open(sys.argv[1]):
-    variant, _, size, scen, workers, old, new = line.rstrip("\n").split("\t")
-    key = (int(size), scen, int(workers))
-    if key not in keys:
-        keys.append(key)
-    vals[key + (variant, "old")].append(float(old))
-    vals[key + (variant, "new")].append(float(new))
+def cost(cell, side, variant="fence"):
+    ns = med(cell, side, variant, "writer_ns")
+    if ns != ns:
+        return f"{'-':>10} "
+    rate = cell[3]
+    missed = rate > 0 and med(cell, side, variant, "writer_mrps") < rate * PACED_RATE_MET
+    return f"{ns:10.1f}{'*' if missed else ' '}"
 
-def med(key, variant, side):
-    xs = vals.get(key + (variant, side))
-    return statistics.median(xs) if xs else float("nan")
+print("Writer cost, ns/record (lower is better) - unpaced, no reader")
+print(f"{'':<29}|{'old writer, ns/rec':^19}|{'new writer, ns/rec':^19}|{'change, %':^26}")
+print(f"{'size, B':>7}  {'ring':<11}  {'workers':>7}|{'fence':>9}{'no-fence':>9} |"
+      f"{'fence':>9}{'no-fence':>9} |{'fence':>8}{'new vs old':>11}{'noise':>7}")
+for cell in keys(lambda ring, size, w, rate, reader: rate == 0 and reader == "none"):
+    of, onf = med(cell, "old", "fence", "writer_ns"), med(cell, "old", "nofence", "writer_ns")
+    nf_, nnf = med(cell, "new", "fence", "writer_ns"), med(cell, "new", "nofence", "writer_ns")
+    print(f"{cell[1]:>7}  {cell[0]:<11}  {cell[2]:>7}|{of:9.2f}{onf:9.2f} |{nf_:9.2f}{nnf:9.2f} |"
+          f"{pct(nf_, nnf):+8.1f}{pct(nf_, of):+11.1f}{pct(of, onf):+7.1f}")
+print("fence = the new writer's fence build against its no-fence build; new vs old =")
+print("new against old, fence build; noise = old against old across builds, the same")
+print("code, so a fence change smaller than it is not measurable. ring: no-overflow =")
+print("indices reset before the ring fills; overflow = 64 KiB ring evicting on every")
+print("write; 1m-ring = 1 MiB ring evicting once full, the ring of the rows below.")
 
-print("Writer alone. old = pdump writer, new = ring writer; f = fence build, nf = no-fence build")
-print("fence% = new(f) vs new(nf); new/old% = new(f) vs old(f);")
-print("noise% = old(f) vs old(nf), the same code in both builds")
-print(f"{'size':>5} {'scenario':<11} {'wrk':>3} {'old(f)':>8} {'old(nf)':>8} "
-      f"{'new(f)':>8} {'new(nf)':>8} {'fence%':>7} {'new/old%':>8} {'noise%':>7}")
-for key in keys:
-    of, onf = med(key, "fence", "old"), med(key, "nofence", "old")
-    nf_, nnf = med(key, "fence", "new"), med(key, "nofence", "new")
-    print(f"{key[0]:>5} {key[1]:<11} {key[2]:>3} {of:8.2f} {onf:8.2f} "
-          f"{nf_:8.2f} {nnf:8.2f} {pct(nf_, nnf):+7.1f} {pct(nf_, of):+8.1f} "
-          f"{pct(of, onf):+7.1f}")
-
-# Reader rows: size workers old_w old_wr new_w new_wr old_Mrps new_Mrps
-# old_l% new_l% o_bad n_bad.
-cols = ["old_w", "old_wr", "new_w", "new_wr", "old_Mrps", "new_Mrps",
-        "old_l", "new_l", "o_bad", "n_bad"]
-rvals = defaultdict(list)
-rkeys = []
-for line in open(sys.argv[2]):
-    f = line.rstrip("\n").split("\t")
-    variant, size, workers = f[0], int(f[2]), int(f[3])
-    key = (size, workers)
-    if key not in rkeys:
-        rkeys.append(key)
-    for name, val in zip(cols, f[4:]):
-        rvals[key + (variant, name)].append(float(val))
-
-def rmed(key, variant, name):
-    xs = rvals.get(key + (variant, name))
-    return statistics.median(xs) if xs else float("nan")
-
-def rsum(key, variant, name):
-    return int(sum(rvals.get(key + (variant, name), [])))
-
-if rkeys:
+def by_reader(title, key_header, cells, row_key):
     print()
-    print("Writer with one concurrent reader per worker (1 MiB ring): writer ns/record")
-    print("alone (w) and with the reader (wr); rd% = new wr(f) vs new w(f);")
-    print("fence% = new wr(f) vs new wr(nf); reader Mrecords/s and % of records")
-    print("lost to overwrite for the new ring; bad = returned records with a wrong")
-    print("length or seqno order, summed over runs (must be 0 in the fence build);")
-    print("old_bad = the same for the old pdump writer and reader, both builds")
-    print(f"{'size':>5} {'wrk':>3} {'old_wr(f)':>9} {'new_w(f)':>8} {'new_wr(f)':>9} "
-          f"{'new_wr(nf)':>10} {'rd%':>7} {'fence%':>7} {'Mrps(f)':>7} {'Mrps(nf)':>8} "
-          f"{'lost%(f)':>8} {'lost%(nf)':>9} {'bad(f)':>6} {'bad(nf)':>7} {'old_bad':>7}")
-    for key in rkeys:
-        nw = rmed(key, "fence", "new_w")
-        nwr = rmed(key, "fence", "new_wr")
-        nwr_nf = rmed(key, "nofence", "new_wr")
-        print(f"{key[0]:>5} {key[1]:>3} {rmed(key, 'fence', 'old_wr'):9.2f} {nw:8.2f} "
-              f"{nwr:9.2f} {nwr_nf:10.2f} {pct(nwr, nw):+7.1f} {pct(nwr, nwr_nf):+7.1f} "
-              f"{rmed(key, 'fence', 'new_Mrps'):7.2f} {rmed(key, 'nofence', 'new_Mrps'):8.2f} "
-              f"{rmed(key, 'fence', 'new_l'):8.1f} {rmed(key, 'nofence', 'new_l'):9.1f} "
-              f"{rsum(key, 'fence', 'n_bad'):6d} {rsum(key, 'nofence', 'n_bad'):7d} "
-              f"{rsum(key, 'fence', 'o_bad') + rsum(key, 'nofence', 'o_bad'):7d}")
+    print(title)
+    print(f"{'':<21}|{'old writer, ns/record':^36}|{'new writer, ns/record':^36}|{'new + full reader':^23}")
+    print(f"{key_header:<21}|{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
+          f"{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
+          f"{'no-fence, ns':>13}{'fence, %':>10}")
+    for base in cells:
+        line = row_key(base) + "|"
+        for side in ("old", "new"):
+            for mode, width in zip(MODES, (11, 13, 12)):
+                line += f"{cost(base[:4] + (mode,), side):>{width}}"
+            line += "|"
+        full = base[:4] + ("full",)
+        f_, nf = med(full, "new", "fence", "writer_ns"), med(full, "new", "nofence", "writer_ns")
+        line += f"{cost(full, 'new', 'nofence'):>13}{pct(f_, nf):+10.1f}"
+        print(line)
+
+unpaced = keys(lambda ring, size, w, rate, reader: ring == "1m-ring" and rate == 0 and reader == "full")
+if unpaced:
+    by_reader("Writer cost, ns/record (lower is better) - unpaced, 1 MiB ring, by reader per writer, fence build",
+              "size, B   workers", unpaced, lambda c: f"{c[1]:>7}   {c[2]:>7}    ")
+    print("full reader = copy-then-recheck reader copying and parsing every record; index-only =")
+    print("the same index loads and cursor atomics, never touching the data area; fence, % =")
+    print("new writer with a full reader, fence build against no-fence build.")
+
+paced = keys(lambda ring, size, w, rate, reader: rate > 0 and reader == "none")
+if paced:
+    by_reader("Writer cost, ns/record (lower is better) - paced, 1 MiB ring, 1 worker, fence build",
+              "size, B  rate, Mrec/s", paced, lambda c: f"{c[1]:>7}  {c[3]:>12g}")
+    print("rate = target records/s per writer, in millions; cost = time inside one record's")
+    print("prepare, write and commit, timer overhead subtracted, pacing wait excluded;")
+    print(f"* = the writer reached below {PACED_RATE_MET:.0%} of the target rate (records ran back to back).")
+
+readers = keys(lambda ring, size, w, rate, reader: reader == "full")
+readers.sort(key=lambda c: (c[3] > 0, c[1], c[3], c[2]))
+if readers:
+    print()
+    print("Reader throughput, Mrec/s, and loss, % - full reader, 1 MiB ring")
+    print(f"{'':<25}|{'writer, Mrec/s':^14}|{'reader, Mrec/s':^21}|{'lost, %':^21}|{'bad records':^20}")
+    print(f"{'size, B':>7}  {'workers':>7}  {'rate':<7}|{'old':>7}{'new':>7}|{'old':>7}{'new':>7}{'new nf':>7}|"
+          f"{'old':>7}{'new':>7}{'new nf':>7}|{'old':>6}{'new':>6}{'new nf':>8}")
+    for c in readers:
+        rate = "unpaced" if c[3] == 0 else f"{c[3]:g}"
+        print(f"{c[1]:>7}  {c[2]:>7}  {rate:<7}|"
+              f"{med(c, 'old', 'fence', 'writer_mrps'):7.2f}{med(c, 'new', 'fence', 'writer_mrps'):7.2f}|"
+              f"{med(c, 'old', 'fence', 'reader_mrps'):7.2f}{med(c, 'new', 'fence', 'reader_mrps'):7.2f}"
+              f"{med(c, 'new', 'nofence', 'reader_mrps'):7.2f}|"
+              f"{med(c, 'old', 'fence', 'lost'):7.1f}{med(c, 'new', 'fence', 'lost'):7.1f}"
+              f"{med(c, 'new', 'nofence', 'lost'):7.1f}|"
+              f"{total(c, 'old', 'fence', 'bad') + total(c, 'old', 'nofence', 'bad'):6d}"
+              f"{total(c, 'new', 'fence', 'bad'):6d}{total(c, 'new', 'nofence', 'bad'):8d}")
+    print("Fence build unless marked nf (no-fence build). rate = target writer rate, Mrec/s;")
+    print("writer = rate achieved; lost = committed records the reader never returned;")
+    print("bad = returned records with a wrong length, magic or sequence order, summed over")
+    print("runs: must be 0 for new in the fence build; old sums both builds (no fence in either).")
 EOF
 cat "$WORK/bench-summary.txt"
 
-FENCE_BAD=$(awk -F'\t' '$1 == "fence" { b += $14 } END { print b + 0 }' "$READER_TSV")
+FENCE_BAD=$(awk -F'\t' '$1 == "fence" && $8 == "new" { b += $14 } END { print b + 0 }' "$BENCH_TSV")
 if ((FENCE_BAD > 0)); then
 	bench_fail+=("the fence build's reader returned $FENCE_BAD bad records")
 fi

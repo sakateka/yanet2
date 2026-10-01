@@ -90,7 +90,7 @@ it.
 | correctness | `meson test ring ring_object pdump_ring` and `go test ./objects/ring/...`. |
 | codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and disassembles the writer and the Go reader. On aarch64 the writer must publish each eviction with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).Read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
 | stress | A C writer thread overwrites a small ring at full speed while the production Go reader checks every record it returns. Runs cover both builds, several ring capacities and repetitions. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
-| performance | Runs `ring_bench` for both builds with every writer and reader thread pinned to its own CPU, and prints median ns/record of both writers alone and with one concurrent reader per worker (the production read protocol transcribed to C), with the reader's rate and loss. Then runs the Go reader benchmarks from both cring test binaries: a prefilled ring with no writer, and a full-speed C writer. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
+| performance | Runs `ring_bench` for both builds with every writer and reader thread pinned to its own CPU, and prints median ns/record of both writers alone and with one concurrent reader per worker, unpaced and paced to fixed record rates (`--quick` runs a smaller size and rate matrix). The full reader is the production read protocol transcribed to C; the index-only reader issues the same index loads and cursor atomics without touching the data area. The reader table gives each reader's rate, loss and bad records. Then runs the Go reader benchmarks from both cring test binaries: a prefilled ring with no writer, and a full-speed C writer. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
 
 The script exits non-zero only when there is a real failure (build, tests,
 codegen on aarch64, or a torn record in the fence build).
@@ -113,18 +113,26 @@ by the tables:
   expect `lock_xadd=1` and zeros elsewhere.
 - Stress: `torn` is 0 for every `fence` row. `runs_torn` for the `nofence`
   rows counts the runs that reproduced the bug.
-- Benchmark, writer alone: `fence%` is the cost of the fence, new(f)
-  against new(nf). `new/old%` compares the new ring writer with the old
-  pdump writer. `noise%` compares the old writer between the two builds.
-  That code is identical in both builds, so this column shows run-to-run
-  noise. Read a `fence%` smaller than the noise as "no measurable cost".
-- Benchmark, writer with a reader: `rd%` is what a concurrent reader costs
-  the new writer, and `fence%` the fence's cost with a reader attached.
-  `lost%` is the share of records overwritten before the reader reached
-  them, and `bad` counts returned records with a wrong length or
-  out-of-order sequence number: it must be 0 in the fence build. `old_bad`
-  is the same count for the old pdump writer and reader, which have no
-  fence in either build.
+- Benchmark, writer alone: the `fence` change is the cost of the fence,
+  new against new across the two builds. `new vs old` compares the new
+  ring writer with the old pdump writer. `noise` compares the old writer
+  between the two builds. That code is identical in both builds, so this
+  column shows run-to-run noise. Read a fence change smaller than the
+  noise as "no measurable cost".
+- Benchmark, writer by reader: the writer's cost with no reader, a full
+  reader and an index-only reader, unpaced and paced. When the index-only
+  column is close to the full-reader one, the cost comes from sharing the
+  index cache line with the reader, not the data lines. A paced writer
+  starts one record per period of the target rate and is timed inside the
+  write only, so both writers are compared while their readers keep up;
+  `*` marks a writer that could not reach the rate. The last columns give
+  the new writer with a full reader in the no-fence build and the fence's
+  cost against it.
+- Benchmark, reader: `lost` is the share of records overwritten before
+  the reader reached them, and `bad` counts returned records with a wrong
+  length, magic or out-of-order sequence number: it must be 0 for the new
+  ring in the fence build. The old column sums both builds; the old pdump
+  writer and reader have no fence in either.
 - Go reader: ns/record, Mrecords/s and MB/s of the production reader over
   the real shared-memory ring, for each build; `lost%` only for the
   concurrent-writer case.
