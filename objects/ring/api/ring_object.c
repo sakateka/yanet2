@@ -68,7 +68,8 @@ ring_object_fini(struct ring_object *self) {
 		if (workers != NULL) {
 			for (uint16_t idx = 0; idx < self->worker_count;
 			     ++idx) {
-				uint8_t *data = ADDR_OF(&workers[idx].data);
+				uint8_t *data =
+					ADDR_OF(&workers[idx].local.data);
 				memory_bfree(ctx, data, self->capacity);
 			}
 			void *raw = ADDR_OF(&self->workers_raw);
@@ -281,7 +282,7 @@ ring_object_create(
 		if (data == NULL) {
 			for (uint16_t prev = 0; prev < idx; ++prev) {
 				uint8_t *prior_data =
-					ADDR_OF(&workers[prev].data);
+					ADDR_OF(&workers[prev].local.data);
 				memory_bfree(ctx, prior_data, capacity);
 			}
 			memory_bfree(ctx, raw, raw_size);
@@ -297,9 +298,9 @@ ring_object_create(
 		}
 		memset(data, 0, capacity);
 
-		workers[idx].size = capacity;
-		workers[idx].mask = capacity - 1;
-		SET_OFFSET_OF(&workers[idx].data, data);
+		workers[idx].local.size = capacity;
+		workers[idx].local.mask = capacity - 1;
+		SET_OFFSET_OF(&workers[idx].local.data, data);
 	}
 
 	self->worker_count = worker_count;
@@ -341,7 +342,7 @@ ring_object_worker_data(
 		return NULL;
 	}
 
-	return ADDR_OF(&worker->data);
+	return ADDR_OF(&worker->local.data);
 }
 
 bool

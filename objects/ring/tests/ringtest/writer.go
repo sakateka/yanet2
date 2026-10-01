@@ -29,7 +29,6 @@ import "C"
 import (
 	"encoding/binary"
 	"fmt"
-	"sync/atomic"
 	"unsafe"
 
 	"github.com/yanet-platform/yanet2/controlplane/ffi"
@@ -83,7 +82,7 @@ func (m *Writer) Object() unsafe.Pointer {
 
 // Capacity reports the worker's data area size in bytes.
 func (m *Writer) Capacity() uint32 {
-	return uint32(m.worker.size)
+	return uint32(m.worker.local.size)
 }
 
 // Source returns the production record source for this writer's worker, so
@@ -99,17 +98,17 @@ func (m *Writer) Source() (cring.RecordSource, error) {
 	return sources[m.workerIdx], nil
 }
 
-// SetIndices forces the shared write and readable positions, letting a test
-// set up a physical wrap or backlog without writing records to reach it.
+// SetIndices forces the write and readable positions, the writer's own and
+// the published ones alike, letting a test set up a physical wrap or
+// backlog without writing records to reach it.
 func (m *Writer) SetIndices(write, readable uint64) {
-	atomic.StoreUint64((*uint64)(unsafe.Pointer(&m.worker.write_idx)), write)
-	atomic.StoreUint64((*uint64)(unsafe.Pointer(&m.worker.readable_idx)), readable)
+	C.ring_worker_set_positions(m.worker, C.uint64_t(write), C.uint64_t(readable))
 }
 
-// WriteIdx returns the current shared write position: the logical offset
-// the next committed record will start at.
+// WriteIdx returns the writer's own write position: the logical offset the
+// next committed record will start at.
 func (m *Writer) WriteIdx() uint64 {
-	return atomic.LoadUint64((*uint64)(unsafe.Pointer(&m.worker.write_idx)))
+	return uint64(m.worker.local.write_idx)
 }
 
 // CorruptTotalLen overwrites the length of the frame at a logical offset,
@@ -118,8 +117,8 @@ func (m *Writer) CorruptTotalLen(logicalOffset uint64, totalLen uint32) {
 	var frame [4]byte
 	binary.LittleEndian.PutUint32(frame[:], totalLen)
 
-	mask := uint64(m.worker.mask)
-	data := unsafe.Slice((*byte)(unsafe.Pointer(m.data)), uint32(m.worker.size))
+	mask := uint64(m.worker.local.mask)
+	data := unsafe.Slice((*byte)(unsafe.Pointer(m.data)), uint32(m.worker.local.size))
 	for idx, b := range frame {
 		data[(logicalOffset+uint64(idx))&mask] = b
 	}

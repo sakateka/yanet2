@@ -82,32 +82,54 @@ its own.
   capacity is rejected outright: nothing is written, no index moves, and
   no seqno is consumed.
 
+## Metadata layout
+
+Each worker's metadata (`struct ring_worker`) spans four cache lines of
+`YANET_CACHE_LINE_SIZE` (L) bytes, so a reader polling the indices never
+contends with the writer's per-record bookkeeping:
+
+| Line (offset) | Fields (offset within the line, bytes) | Written by | Read by |
+|---|---|---|---|
+| Writer-private `local` (0) | `write_idx` (0), `readable_idx` (8), `data` (16), `next_seqno` (24), `size` (28), `mask` (32) | writer, every record | writer; readers load `size`, `mask`, `data` once at attach |
+| Guard (L) | unused | — | — |
+| Published `published` (2L) | `write_idx` (0), `readable_idx` (8) | writer, release stores only | readers |
+| Guard (3L) | unused | — | — |
+
+The writer keeps its authoritative positions in the private line and
+never loads the published one; the published positions are copies it
+release-stores after updating its own. The guard lines stop a CPU that
+prefetches lines in adjacent pairs from pulling a line a reader polls
+together with one the writer stores to, of the same worker or the next
+one in the array.
+
 ## Ordering contract
 
 The writer (`common/ring.h`) is the sole mutator of both indices and
 uses no lock and no read-modify-write:
 
-1. Read its own `write_idx` and `readable_idx` with relaxed loads.
+1. Read its private `write_idx` and `readable_idx` with plain loads.
 2. If the record does not fit, walk whole oldest records locally (to
-   `write_idx` on a corrupt length) and publish the final boundary with
-   one release store of `readable_idx`.
+   `write_idx` on a corrupt length), update the private `readable_idx`
+   and publish the final boundary with one release store of the
+   published `readable_idx`.
 3. Issue a release fence before touching any evicted byte. Steps 2 and 3
    run only when something was evicted.
 4. `memcpy` the frame and payload.
-5. Publish the record with a release store of `write_idx`.
+5. Advance the private `write_idx` and publish the record with a release
+   store of the published `write_idx`.
 
 `readable_idx` moves once per eviction, not once per evicted record: it
 is not an eviction counter.
 
 The reader (`objects/ring/bindings/go/cring`) acquire-loads both
-indices, copies into a private buffer, advances its cursor with
+published indices, copies into a private buffer, advances its cursor with
 `atomic.Add`, acquire-reloads `readable_idx` and drops the prefix that
 the recheck shows was invalidated before parsing. The add and the reload
 must stay atomic and in this order.
 
 **Why it is correct.** If the reader copied any overwritten byte, its
 recheck must see the eviction that covers it. arm64: the writer's fence
-orders the `readable_idx` store before the data stores; on the reader
+orders the published `readable_idx` store before the data stores; on the reader
 side the release half of the add followed by the acquire reload keeps
 the copy's loads before the recheck (release→acquire is never
 reordered). x86-64: TSO keeps stores after earlier stores and loads
@@ -115,10 +137,10 @@ after earlier loads, so no fence instruction is needed.
 
 | Writer | Reader | x86-64 | arm64 |
 |---|---|---|---|
-| Release store of `readable_idx` | Acquire recheck | `mov` / `mov` | `stlr` / `ldar` |
+| Release store of published `readable_idx` | Acquire recheck | `mov` / `mov` | `stlr` / `ldar` |
 | Release fence | Release half of cursor add | none / `lock xadd` | `dmb ish` (or `dmb ishld` + `dmb ishst`) / `ldaddal` or `ldaxr`+`stlxr` |
 | `memcpy` | `copy` | plain | plain |
-| Release store of `write_idx` | Acquire snapshot | `mov` / `mov` | `stlr` / `ldar` |
+| Release store of published `write_idx` | Acquire snapshot | `mov` / `mov` | `stlr` / `ldar` |
 
 **Compiler dependency.** GCC and clang treat `atomic_thread_fence` as a
 full compiler barrier, so the `memcpy` stores are not hoisted above it

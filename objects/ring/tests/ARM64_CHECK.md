@@ -122,12 +122,15 @@ by the tables:
 - Benchmark, writer by reader: the writer's cost with no reader, a full
   reader and an index-only reader, unpaced and paced. When the index-only
   column is close to the full-reader one, the cost comes from sharing the
-  index cache line with the reader, not the data lines. A paced writer
-  starts one record per period of the target rate and is timed inside the
-  write only, so both writers are compared while their readers keep up;
-  `*` marks a writer that could not reach the rate. The last columns give
-  the new writer with a full reader in the no-fence build and the fence's
-  cost against it.
+  published index cache line with the reader, not the data lines. A paced
+  writer writes bursts of records spaced at the target rate and times each
+  burst with one pair of timer reads, so both writers are compared while
+  their readers keep up; the burst spans at least ~100 ticks of the coarse
+  arm64 counter (~42 ns per tick), and the table header gives the tick.
+  `<x` marks a cost at or below one tick per burst, `*` a writer that
+  could not reach the rate. The last columns give the new writer with a
+  full reader in the no-fence build and the fence's cost against it, `n/r`
+  when that base is too close to the timer's resolution.
 - Benchmark, reader: `lost` is the share of records overwritten before
   the reader reached them, and `bad` counts returned records with a wrong
   length, magic or out-of-order sequence number: it must be 0 for the new

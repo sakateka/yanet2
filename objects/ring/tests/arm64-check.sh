@@ -660,7 +660,8 @@ echo "ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, 
 
 # Each run appends its cells' values as tab-separated rows: ring, size,
 # workers, rate, reader, side, writer ns/record, writer Mrec/s, reader
-# Mrec/s, lost %, backlog records, bad records.
+# Mrec/s, lost %, backlog records, bad records, paced records per burst and
+# paced cost resolution in ns (1 and 0 unpaced).
 BENCH_TSV="$WORK/bench.tsv"
 : >"$BENCH_TSV"
 bench_fail=()
@@ -688,14 +689,22 @@ from collections import defaultdict
 METRICS = ["writer_ns", "writer_mrps", "reader_mrps", "lost", "backlog", "bad"]
 MODES = ["none", "full", "index-only"]
 PACED_RATE_MET = 0.95
+# A paced fence change is reported only over a base of at least this many
+# resolution steps (one timer tick over the burst size).
+FENCE_MIN_STEPS = 4
 
 vals = defaultdict(list)
+burst = {}
+resolution = {}
 for line in open(sys.argv[1]):
     f = line.rstrip("\n").split("\t")
     variant, ring, size, workers, rate, reader, side = (
         f[0], f[2], int(f[3]), int(f[4]), float(f[5]), f[6], f[7])
     for name, val in zip(METRICS, f[8:]):
         vals[(ring, size, workers, rate, reader, side, variant, name)].append(float(val))
+    cell = (ring, size, workers, rate, reader)
+    burst[cell] = int(f[14])
+    resolution[cell] = max(resolution.get(cell, 0.0), float(f[15]))
 
 def keys(pred):
     seen = []
@@ -721,7 +730,16 @@ def cost(cell, side, variant="fence"):
         return f"{'-':>10} "
     rate = cell[3]
     missed = rate > 0 and med(cell, side, variant, "writer_mrps") < rate * PACED_RATE_MET
-    return f"{ns:10.1f}{'*' if missed else ' '}"
+    res = resolution.get(cell, 0.0)
+    val = f"<{res:.1f}" if rate > 0 and ns <= res else f"{ns:.1f}"
+    return f"{val:>10}{'*' if missed else ' '}"
+
+def fence_pct(cell):
+    f_, nf = med(cell, "new", "fence", "writer_ns"), med(cell, "new", "nofence", "writer_ns")
+    res = resolution.get(cell, 0.0)
+    if cell[3] > 0 and not nf >= FENCE_MIN_STEPS * res:
+        return f"{'n/r':>10}"
+    return f"{pct(f_, nf):+10.1f}"
 
 print("Writer cost, ns/record (lower is better) - unpaced, no reader")
 print(f"{'':<29}|{'old writer, ns/rec':^19}|{'new writer, ns/rec':^19}|{'change, %':^26}")
@@ -741,8 +759,8 @@ print("write; 1m-ring = 1 MiB ring evicting once full, the ring of the rows belo
 def by_reader(title, key_header, cells, row_key):
     print()
     print(title)
-    print(f"{'':<21}|{'old writer, ns/record':^36}|{'new writer, ns/record':^36}|{'new + full reader':^23}")
-    print(f"{key_header:<21}|{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
+    print(f"{'':<{len(key_header)}}|{'old writer, ns/record':^36}|{'new writer, ns/record':^36}|{'new + full reader':^23}")
+    print(f"{key_header}|{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
           f"{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
           f"{'no-fence, ns':>13}{'fence, %':>10}")
     for base in cells:
@@ -752,25 +770,30 @@ def by_reader(title, key_header, cells, row_key):
                 line += f"{cost(base[:4] + (mode,), side):>{width}}"
             line += "|"
         full = base[:4] + ("full",)
-        f_, nf = med(full, "new", "fence", "writer_ns"), med(full, "new", "nofence", "writer_ns")
-        line += f"{cost(full, 'new', 'nofence'):>13}{pct(f_, nf):+10.1f}"
+        line += f"{cost(full, 'new', 'nofence'):>13}{fence_pct(full)}"
         print(line)
 
 unpaced = keys(lambda ring, size, w, rate, reader: ring == "1m-ring" and rate == 0 and reader == "full")
 if unpaced:
     by_reader("Writer cost, ns/record (lower is better) - unpaced, 1 MiB ring, by reader per writer, fence build",
-              "size, B   workers", unpaced, lambda c: f"{c[1]:>7}   {c[2]:>7}    ")
+              f"{'size, B   workers':<21}", unpaced, lambda c: f"{c[1]:>7}   {c[2]:>7}    ")
     print("full reader = copy-then-recheck reader copying and parsing every record; index-only =")
     print("the same index loads and cursor atomics, never touching the data area; fence, % =")
     print("new writer with a full reader, fence build against no-fence build.")
 
 paced = keys(lambda ring, size, w, rate, reader: rate > 0 and reader == "none")
 if paced:
-    by_reader("Writer cost, ns/record (lower is better) - paced, 1 MiB ring, 1 worker, fence build",
-              "size, B  rate, Mrec/s", paced, lambda c: f"{c[1]:>7}  {c[3]:>12g}")
-    print("rate = target records/s per writer, in millions; cost = time inside one record's")
-    print("prepare, write and commit, timer overhead subtracted, pacing wait excluded;")
-    print(f"* = the writer reached below {PACED_RATE_MET:.0%} of the target rate (records ran back to back).")
+    tick = resolution[paced[0]] * burst[paced[0]]
+    by_reader("Writer cost, ns/record (lower is better) - paced, 1 MiB ring, 1 worker, fence build; "
+              f"timer {tick:.3f} ns/tick",
+              "size, B  rate, Mrec/s  burst, rec", paced,
+              lambda c: f"{c[1]:>7}  {c[3]:>12g}  {burst[c]:>10}")
+    print("rate = target records/s per writer, in millions; burst = records written back to back")
+    print("and timed together, bursts spaced at the target rate; cost = time inside a burst over")
+    print("its records, timer overhead subtracted, pacing wait excluded; <x = at or below the")
+    print("timer's resolution of one tick per burst; * = the writer reached below "
+          f"{PACED_RATE_MET:.0%} of the")
+    print(f"target rate (bursts ran back to back); fence, % = n/r below {FENCE_MIN_STEPS} resolution steps.")
 
 readers = keys(lambda ring, size, w, rate, reader: reader == "full")
 readers.sort(key=lambda c: (c[3] > 0, c[1], c[3], c[2]))

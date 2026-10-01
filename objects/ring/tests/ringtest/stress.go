@@ -53,7 +53,7 @@ package ringtest
 //			atomic_store_explicit(&s->written, idx + 1, memory_order_relaxed);
 //			continue;
 //		}
-//		uint32_t seqno = s->worker->next_seqno;
+//		uint32_t seqno = s->worker->local.next_seqno;
 //		uint32_t len = ring_stress_len(seqno);
 //		for (uint32_t k = 0; k < len / 4; k++) {
 //			buf[k] = ring_stress_word(seqno, k);

@@ -14,6 +14,7 @@
 #include "lib/logging/log.h"
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,9 +25,41 @@ static struct ring_worker
 init_test_ring(uint32_t size, uint8_t **data) {
 	struct ring_worker ring = {0};
 	*data = calloc(1, size);
-	ring.size = size;
-	ring.mask = size - 1;
+	ring.local.size = size;
+	ring.local.mask = size - 1;
 	return ring;
+}
+
+// Reader-visible readable position, after checking that the writer
+// published exactly its own copy.
+static long
+published_readable(struct ring_worker *ring) {
+	uint64_t published = atomic_load(&ring->published.readable_idx);
+	if (published != ring->local.readable_idx) {
+		LOG(ERROR,
+		    "published readable position %lu differs from the "
+		    "writer's %lu",
+		    (unsigned long)published,
+		    (unsigned long)ring->local.readable_idx);
+		abort();
+	}
+	return (long)published;
+}
+
+// Reader-visible write position, after checking that the writer published
+// exactly its own copy.
+static long
+published_write(struct ring_worker *ring) {
+	uint64_t published = atomic_load(&ring->published.write_idx);
+	if (published != ring->local.write_idx) {
+		LOG(ERROR,
+		    "published write position %lu differs from the writer's "
+		    "%lu",
+		    (unsigned long)published,
+		    (unsigned long)ring->local.write_idx);
+		abort();
+	}
+	return (long)published;
 }
 
 // A record straddling the ring's physical boundary round-trips its opaque
@@ -40,8 +73,7 @@ run_ring_wrap_roundtrip_test() {
 
 	// A write position 12 bytes before the end keeps the 8-byte frame
 	// inside the boundary and wraps the payload: [28,32) then [0,4).
-	ring.write_idx = ring_size - 12;
-	ring.readable_idx = ring.write_idx;
+	ring_worker_set_positions(&ring, ring_size - 12, ring_size - 12);
 
 	const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 	uint32_t total_len = RING_RECORD_FRAME_SIZE + sizeof(payload);
@@ -59,7 +91,7 @@ run_ring_wrap_roundtrip_test() {
 	uint8_t roundtrip[8];
 	for (size_t i = 0; i < sizeof(payload); ++i) {
 		uint64_t pos = (ring_size - 12 + RING_RECORD_FRAME_SIZE + i) &
-			       ring.mask;
+			       ring.local.mask;
 		roundtrip[i] = data[pos];
 	}
 	TEST_ASSERT_EQUAL(
@@ -113,13 +145,13 @@ run_ring_overwrite_evicts_whole_records_test() {
 	write_fixed_record(&ring, data, 0xA2, record_len);
 	write_fixed_record(&ring, data, 0xA3, record_len);
 	TEST_ASSERT_EQUAL(
-		(long)ring.readable_idx, 0L, "a full ring must not evict yet"
+		published_readable(&ring), 0L, "a full ring must not evict yet"
 	);
 
 	// A fifth record forces exactly one eviction to make room.
 	write_fixed_record(&ring, data, 0xA4, record_len);
 	TEST_ASSERT_EQUAL(
-		(long)ring.readable_idx,
+		published_readable(&ring),
 		(long)record_len,
 		"eviction must land on a record boundary"
 	);
@@ -180,12 +212,12 @@ run_ring_eviction_spans_multiple_records_test() {
 		"prepare must succeed by evicting"
 	);
 	TEST_ASSERT_EQUAL(
-		(long)ring.readable_idx,
+		published_readable(&ring),
 		48L,
 		"eviction must stop on the first boundary that fits the record"
 	);
 	TEST_ASSERT_EQUAL(
-		(long)ring.write_idx, 64L, "prepare must not move write_idx"
+		published_write(&ring), 64L, "prepare must not move write_idx"
 	);
 
 	free(data);
@@ -235,7 +267,7 @@ run_ring_eviction_corrupt_length_catches_up_test() {
 	memcpy(data + sizeof(uint32_t), &planted_len, sizeof(planted_len));
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
 		// Rewind to the full ring and corrupt the oldest frame.
-		ring.readable_idx = 0;
+		ring_worker_set_positions(&ring, ring.local.write_idx, 0);
 		memcpy(data, &cases[i].total_len, sizeof(cases[i].total_len));
 
 		TEST_ASSERT_EQUAL(
@@ -247,8 +279,8 @@ run_ring_eviction_corrupt_length_catches_up_test() {
 			cases[i].name
 		);
 		TEST_ASSERT_EQUAL(
-			(long)ring.readable_idx,
-			(long)ring.write_idx,
+			published_readable(&ring),
+			published_write(&ring),
 			"%s: readable_idx must catch up to write_idx",
 			cases[i].name
 		);
@@ -273,12 +305,12 @@ run_ring_prepare_rejects_undersize_test() {
 		errno, EINVAL, "below the frame size must set EINVAL"
 	);
 	TEST_ASSERT_EQUAL(
-		(long)ring.write_idx,
+		published_write(&ring),
 		0L,
 		"a rejected prepare must not move write_idx"
 	);
 	TEST_ASSERT_EQUAL(
-		(long)ring.readable_idx,
+		published_readable(&ring),
 		0L,
 		"a rejected prepare must not move readable_idx"
 	);
@@ -316,19 +348,19 @@ run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 			errno, E2BIG, "total_len %u must set E2BIG", total_len
 		);
 		TEST_ASSERT_EQUAL(
-			(long)ring.write_idx,
+			published_write(&ring),
 			0L,
 			"total_len %u must not move write_idx",
 			total_len
 		);
 		TEST_ASSERT_EQUAL(
-			(long)ring.readable_idx,
+			published_readable(&ring),
 			0L,
 			"total_len %u must not move readable_idx",
 			total_len
 		);
 		TEST_ASSERT_EQUAL(
-			(long)ring.next_seqno,
+			(long)ring.local.next_seqno,
 			0L,
 			"total_len %u must not touch next_seqno",
 			total_len
@@ -357,7 +389,7 @@ run_ring_seqno_wrap_test() {
 		(long)second, (long)first + 1, "commits must be contiguous"
 	);
 
-	ring.next_seqno = UINT32_MAX;
+	ring.local.next_seqno = UINT32_MAX;
 
 	uint32_t seqno =
 		ring_worker_commit(&ring, data, RING_RECORD_FRAME_SIZE);

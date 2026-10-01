@@ -153,10 +153,10 @@ func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 		}
 
 		sources = append(sources, &shmSource{
-			writeIdx:    (*uint64)(unsafe.Pointer(&worker.write_idx)),
-			readableIdx: (*uint64)(unsafe.Pointer(&worker.readable_idx)),
-			data:        unsafe.Slice((*byte)(unsafe.Pointer(data)), uint32(worker.size)),
-			mask:        uint64(worker.mask),
+			writeIdx:    (*uint64)(unsafe.Pointer(&worker.published.write_idx)),
+			readableIdx: (*uint64)(unsafe.Pointer(&worker.published.readable_idx)),
+			data:        unsafe.Slice((*byte)(unsafe.Pointer(data)), uint32(worker.local.size)),
+			mask:        uint64(worker.local.mask),
 		})
 	}
 	if len(sources) == 0 {

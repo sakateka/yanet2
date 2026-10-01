@@ -21,10 +21,13 @@
  * pdump captures into this ring.
  *
  * Unpaced phases write back to back and divide the phase time by the record
- * count. A paced phase starts one record per period of the target rate and
- * times each record's write alone, with the timer's own overhead subtracted
- * and the wait between records excluded, so the reader keeps up with both
- * writers and their costs compare in the same regime.
+ * count. A paced phase writes short bursts of records at the target rate's
+ * average spacing and times each burst with one pair of timer reads, its
+ * overhead subtracted and the wait between bursts excluded, so the reader
+ * keeps up with both writers and their costs compare in the same regime.
+ * A burst spans enough timer ticks that a coarse timer (arm64's generic
+ * counter ticks every ~42 ns) still resolves a record's cost; the burst size
+ * depends only on the timer and the record size, the same for both writers.
  *
  * Environment: RING_BENCH_CPUS (or argv[1]) as "w0,r0[,w1,r1]", the writer
  * and reader CPU of worker 0, then of worker 1, by default the first allowed
@@ -81,6 +84,15 @@
 // A paced writer reaching less than this share of its target rate is
 // flagged in the tables: its records ran back to back.
 #define PACED_RATE_MET 0.95
+// Timer ticks a paced burst spans at the least, so the tick and the error of
+// the subtracted read overhead stay near 1% of every timed sample.
+#define PACED_SAMPLE_TICKS 100
+// Record cost a paced burst is sized by: below the cheapest record any
+// target writes, so a burst never spans fewer ticks than intended.
+#define PACED_FLOOR_NS 10.0
+// Largest share of the ring one paced burst may fill, as a divisor, so a
+// reader keeping up with the target rate never loses a burst.
+#define PACED_BURST_RING_SHARE 8
 
 static uint64_t
 now_ns(void) {
@@ -181,9 +193,9 @@ xorshift32(uint32_t *state) {
 	return x;
 }
 
-// Start timing a record that the pacing wait released at the given tick.
+// Start timing a burst that the pacing wait released at the given tick.
 //
-// A wait exits just after a timer tick, so with a coarse timer every record
+// A wait exits just after a timer tick, so with a coarse timer every burst
 // would start at the same sub-tick phase and the tick count would round its
 // cost down. A random spin of up to one tick spreads the start phase evenly,
 // which makes the mean tick count unbiased.
@@ -310,15 +322,19 @@ struct writer_ctx {
 	// Records written per pass before the indices reset to keep this
 	// scenario overflow-free; 0 lets the ring evict naturally instead.
 	uint64_t reset_after_records;
-	// Ticks between paced record starts; 0 writes back to back.
+	// Ticks between paced burst starts; 0 writes back to back.
 	uint64_t period_ticks;
+	// Records per paced burst, timed together.
+	uint32_t burst;
 	pthread_barrier_t *start_barrier;
 	uint64_t run_ns;
 	int cpu;
 	uint64_t elapsed_ns; // out
 	uint64_t iterations; // out
-	// Ticks spent inside paced records' writes, timer overhead included.
+	// Ticks spent inside paced bursts, timer overhead included, and the
+	// count of those bursts.
 	uint64_t busy_ticks; // out
+	uint64_t bursts;     // out
 } __attribute__((aligned(BENCH_PRIVATE_ALIGN)));
 
 static inline __attribute__((always_inline)) void
@@ -327,8 +343,7 @@ writer_reset(struct writer_ctx *ctx, enum bench_side side) {
 		ctx->old_ring->write_idx = 0;
 		ctx->old_ring->readable_idx = 0;
 	} else {
-		ctx->new_ring->write_idx = 0;
-		ctx->new_ring->readable_idx = 0;
+		ring_worker_set_positions(ctx->new_ring, 0, 0);
 	}
 }
 
@@ -371,14 +386,15 @@ writer_run_unpaced(struct writer_ctx *ctx, enum bench_side side) {
 	ctx->iterations = iterations;
 }
 
-// Start one record per period and time each record's write alone.
+// Start one burst of records per period and time each burst alone.
 //
 // A writer that falls more than a period behind drops the debt instead of
-// catching up in a burst; one that cannot reach the rate at all ends up
-// writing back to back, which its achieved rate shows.
+// catching up with extra bursts; one that cannot reach the rate at all ends
+// up writing back to back, which its achieved rate shows.
 static inline __attribute__((always_inline)) void
 writer_run_paced(struct writer_ctx *ctx, enum bench_side side) {
 	uint64_t period = ctx->period_ticks;
+	uint32_t burst = ctx->burst;
 	uint64_t run_ticks =
 		(uint64_t)((double)ctx->run_ns / bench_timer.ns_per_tick);
 	uint32_t rng = 0x2545f491u ^ (uint32_t)ctx->cpu;
@@ -386,6 +402,7 @@ writer_run_paced(struct writer_ctx *ctx, enum bench_side side) {
 	uint64_t end = start + run_ticks;
 	uint64_t next = start;
 	uint64_t busy = 0;
+	uint64_t bursts = 0;
 	uint64_t iterations = 0;
 	uint64_t released;
 	for (;;) {
@@ -396,10 +413,13 @@ writer_run_paced(struct writer_ctx *ctx, enum bench_side side) {
 			break;
 		}
 		uint64_t t0 = timed_start(released, &rng);
-		writer_write(ctx, side);
+		for (uint32_t k = 0; k < burst; ++k) {
+			writer_write(ctx, side);
+		}
 		uint64_t t1 = tick_now();
 		busy += t1 - t0;
-		++iterations;
+		++bursts;
+		iterations += burst;
 		next += period;
 		if (t1 > next + period) {
 			next = t1;
@@ -409,6 +429,7 @@ writer_run_paced(struct writer_ctx *ctx, enum bench_side side) {
 				     bench_timer.ns_per_tick);
 	ctx->iterations = iterations;
 	ctx->busy_ticks = busy;
+	ctx->bursts = bursts;
 }
 
 static void *
@@ -763,8 +784,11 @@ reader_free(struct reader_ctx *ctx) {
 // Outcome of one timed phase across its workers.
 struct bench_sample {
 	// Average writer cost per committed record: phase time over records
-	// unpaced, time inside the writes paced.
+	// unpaced, time inside the bursts paced.
 	double writer_ns;
+	// Smallest paced cost the timer resolves, one tick over the burst
+	// size; a paced cost below it is clamped up to it. Zero unpaced.
+	double resolution_ns;
 	// Records per second each writer committed, averaged over workers.
 	double writer_mrps;
 	// Reader-only metrics, zero when the phase ran no reader. Rate is per
@@ -852,8 +876,8 @@ new_alloc_workers(int count, uint32_t ring_size, uint8_t *data[2]) {
 
 	for (int i = 0; i < count; ++i) {
 		data[i] = alloc_touched(ring_size);
-		workers[i].size = ring_size;
-		workers[i].mask = ring_size - 1;
+		workers[i].local.size = ring_size;
+		workers[i].local.mask = ring_size - 1;
 	}
 	return workers;
 }
@@ -908,6 +932,22 @@ case_ring(const struct bench_case *bc, uint32_t *ring_size, uint64_t *reset) {
 		*ring_size = READER_RING_SIZE;
 		break;
 	}
+}
+
+// Records per paced burst for a record length: enough to span the minimum
+// sample ticks at the floor cost, capped so a burst fills at most its share
+// of the reader ring.
+static uint32_t
+paced_burst(uint32_t record_len) {
+	uint32_t burst = (uint32_t)(PACED_SAMPLE_TICKS *
+				    bench_timer.ns_per_tick / PACED_FLOOR_NS) +
+			 1;
+	uint32_t cap = READER_RING_SIZE / PACED_BURST_RING_SHARE /
+		       ring_align4(record_len);
+	if (burst > cap) {
+		burst = cap;
+	}
+	return burst == 0 ? 1 : burst;
 }
 
 // Run one side's adjacent writers through a discarded warm-up and a timed
@@ -969,19 +1009,23 @@ run_phase(const struct bench_case *bc, enum bench_side side) {
 		pthread_join(threads[i], NULL);
 	}
 	uint64_t period = 0;
+	uint32_t burst = 1;
 	if (bc->rate_mrps > 0) {
-		period = (uint64_t)(1e3 / bc->rate_mrps /
-				    bench_timer.ns_per_tick);
+		burst = paced_burst(record_len);
+		period = (uint64_t)(1e3 * burst / bc->rate_mrps /
+					    bench_timer.ns_per_tick +
+				    0.5);
 		period = period == 0 ? 1 : period;
 	}
 	for (int i = 0; i < bc->count; ++i) {
 		writer_reset(&ctx[i], side);
 		if (side == SIDE_NEW) {
-			new_workers[i].next_seqno = 0;
+			new_workers[i].local.next_seqno = 0;
 		}
 		ctx[i].run_ns = BENCH_PHASE_NS;
 		ctx[i].start_barrier = &barrier;
 		ctx[i].period_ticks = period;
+		ctx[i].burst = burst;
 	}
 
 	struct bench_stop stop = {.flag = false};
@@ -990,11 +1034,14 @@ run_phase(const struct bench_case *bc, enum bench_side side) {
 	if (with_reader) {
 		for (int i = 0; i < bc->count; ++i) {
 			_Atomic uint64_t *write_idx =
-				side == SIDE_OLD ? &old_workers[i].write_idx
-						 : &new_workers[i].write_idx;
+				side == SIDE_OLD
+					? &old_workers[i].write_idx
+					: &new_workers[i].published.write_idx;
 			_Atomic uint64_t *readable_idx =
-				side == SIDE_OLD ? &old_workers[i].readable_idx
-						 : &new_workers[i].readable_idx;
+				side == SIDE_OLD
+					? &old_workers[i].readable_idx
+					: &new_workers[i]
+						   .published.readable_idx;
 			reader_init(
 				&readers[i],
 				side == SIDE_OLD ? READER_FORMAT_OLD
@@ -1024,11 +1071,13 @@ run_phase(const struct bench_case *bc, enum bench_side side) {
 	uint64_t total_ns = 0;
 	uint64_t total_iterations = 0;
 	uint64_t total_busy = 0;
+	uint64_t total_bursts = 0;
 	for (int i = 0; i < bc->count; ++i) {
 		pthread_join(threads[i], NULL);
 		total_ns += ctx[i].elapsed_ns;
 		total_iterations += ctx[i].iterations;
 		total_busy += ctx[i].busy_ticks;
+		total_bursts += ctx[i].bursts;
 	}
 
 	struct bench_sample sample = {
@@ -1038,9 +1087,13 @@ run_phase(const struct bench_case *bc, enum bench_side side) {
 	if (period == 0) {
 		sample.writer_ns = (double)total_ns / (double)total_iterations;
 	} else {
-		double ticks = (double)total_busy / (double)total_iterations -
+		double ticks = (double)total_busy / (double)total_bursts -
 			       bench_timer.overhead_ticks;
-		sample.writer_ns = ticks * bench_timer.ns_per_tick;
+		sample.resolution_ns = bench_timer.ns_per_tick / burst;
+		sample.writer_ns = ticks * bench_timer.ns_per_tick / burst;
+		if (sample.writer_ns < sample.resolution_ns) {
+			sample.writer_ns = sample.resolution_ns;
+		}
 	}
 	if (with_reader) {
 		reader_collect(
@@ -1181,6 +1234,8 @@ struct bench_cell {
 struct cell_stats {
 	bool present;
 	double writer_ns[SIDE_COUNT];
+	// Paced cost resolution, the same for every run of a cell.
+	double resolution_ns;
 	double writer_mrps[SIDE_COUNT];
 	double reader_mrps[SIDE_COUNT];
 	double lost_pct[SIDE_COUNT];
@@ -1247,6 +1302,7 @@ cell_stats(
 			st.bad[side] += (unsigned long)s->bad;
 		}
 		st.writer_ns[side] = median(ns, reps);
+		st.resolution_ns = cell->samples[side][0].resolution_ns;
 		st.writer_mrps[side] = median(wrate, reps);
 		st.reader_mrps[side] = median(rate, reps);
 		st.lost_pct[side] = 100 * median(lost, reps);
@@ -1257,7 +1313,8 @@ cell_stats(
 
 // Append every cell's medians, one row per side, for scripts that compare
 // builds: ring, size, workers, rate, reader, side, writer ns/record, writer
-// Mrecords/s, reader Mrecords/s, lost %, backlog records, bad records.
+// Mrecords/s, reader Mrecords/s, lost %, backlog records, bad records, paced
+// records per burst and paced cost resolution in ns (1 and 0 unpaced).
 static void
 write_tsv(const struct bench_plan *plan, const char *path) {
 	FILE *f = fopen(path, "a");
@@ -1277,7 +1334,7 @@ write_tsv(const struct bench_plan *plan, const char *path) {
 		for (int side = 0; side < SIDE_COUNT; ++side) {
 			fprintf(f,
 				"%s\t%u\t%d\t%g\t%s\t%s\t%.3f\t%.4f\t%.4f\t%."
-				"3f\t%.2f\t%lu\n",
+				"3f\t%.2f\t%lu\t%u\t%.4f\n",
 				ring_names[bc->ring],
 				bc->size,
 				bc->count,
@@ -1289,7 +1346,9 @@ write_tsv(const struct bench_plan *plan, const char *path) {
 				st.reader_mrps[side],
 				st.lost_pct[side],
 				st.backlog[side],
-				st.bad[side]);
+				st.bad[side],
+				bc->rate_mrps > 0 ? paced_burst(bc->size) : 1,
+				st.resolution_ns);
 		}
 	}
 	fclose(f);
@@ -1300,7 +1359,8 @@ pct_change(double val, double base) {
 	return base == 0 ? 0 : (val - base) / base * 100;
 }
 
-// Print a writer cost, marking a paced writer that missed its target rate.
+// Print a writer cost, marking a paced writer that missed its target rate
+// and, with a leading "<", a paced cost at or below the timer's resolution.
 static void
 print_cost(const struct cell_stats *st, int side, double rate_mrps) {
 	if (!st->present) {
@@ -1309,7 +1369,13 @@ print_cost(const struct cell_stats *st, int side, double rate_mrps) {
 	}
 	bool missed = rate_mrps > 0 &&
 		      st->writer_mrps[side] < rate_mrps * PACED_RATE_MET;
-	printf(" %10.1f%s", st->writer_ns[side], missed ? "*" : " ");
+	char val[32];
+	if (rate_mrps > 0 && st->writer_ns[side] <= st->resolution_ns) {
+		snprintf(val, sizeof(val), "<%.1f", st->resolution_ns);
+	} else {
+		snprintf(val, sizeof(val), "%.1f", st->writer_ns[side]);
+	}
+	printf(" %10s%s", val, missed ? "*" : " ");
 }
 
 struct bench_matrix {
@@ -1387,11 +1453,12 @@ print_reader_mode_row(
 
 static void
 print_reader_mode_header(const char *key) {
-	printf("%-21s |%s|%s\n",
+	printf("%-*s |%s|%s\n",
+	       (int)strlen(key),
 	       "",
 	       "        old writer, ns/record        ",
 	       "        new writer, ns/record");
-	printf("%-21s |%s|%s\n",
+	printf("%s |%s|%s\n",
 	       key,
 	       "  no reader  full reader  index-only ",
 	       "  no reader  full reader  index-only");
@@ -1405,7 +1472,7 @@ print_writer_by_reader(
 ) {
 	printf("\nWriter cost, ns/record (lower is better) - unpaced, 1 MiB "
 	       "ring, by reader per writer\n");
-	print_reader_mode_header("size, B   workers");
+	print_reader_mode_header("size, B   workers    ");
 	for (int si = 0; si < m->sizes_count; ++si) {
 		for (int count = 1; count <= reader_workers; ++count) {
 			printf("%7u   %7d    ", m->sizes[si], count);
@@ -1422,20 +1489,28 @@ print_writer_paced(
 	const struct bench_plan *plan, const struct bench_matrix *m
 ) {
 	printf("\nWriter cost, ns/record (lower is better) - paced, 1 MiB "
-	       "ring, 1 worker\n");
-	print_reader_mode_header("size, B  rate, Mrec/s");
+	       "ring, 1 worker; timer %s, %.3f ns/tick\n",
+	       bench_timer.name,
+	       bench_timer.ns_per_tick);
+	print_reader_mode_header("size, B  rate, Mrec/s  burst, rec");
 	for (int si = 0; si < m->paced_sizes_count; ++si) {
 		for (int ri = 0; ri < m->rates_count; ++ri) {
-			printf("%7u  %12g", m->paced_sizes[si], m->rates[ri]);
+			printf("%7u  %12g  %10u",
+			       m->paced_sizes[si],
+			       m->rates[ri],
+			       paced_burst(m->paced_sizes[si]));
 			print_reader_mode_row(
 				plan, m->paced_sizes[si], 1, m->rates[ri]
 			);
 		}
 	}
-	printf("rate = target records/s per writer, in millions; cost = time "
-	       "inside one record's\nprepare, write and commit, timer overhead "
-	       "subtracted, pacing wait excluded;\n* = the writer reached "
-	       "below %.0f%% of the target rate (records ran back to back).\n",
+	printf("rate = target records/s per writer, in millions; burst = "
+	       "records written back to back\nand timed together, bursts "
+	       "spaced at the target rate; cost = time inside a burst\nover "
+	       "its records, timer overhead subtracted, pacing wait excluded; "
+	       "<x = at or below\nthe timer's resolution of one tick per "
+	       "burst; * = the writer reached below %.0f%%\nof the target rate "
+	       "(bursts ran back to back).\n",
 	       PACED_RATE_MET * 100);
 }
 
@@ -1583,7 +1658,7 @@ main(int argc, char **argv) {
 	       reps,
 	       quick ? "quick" : "full");
 	printf("# paced timer: %s, %.3f ns/tick, read overhead %.1f ns "
-	       "subtracted%s\n",
+	       "subtracted per burst%s\n",
 	       bench_timer.name,
 	       bench_timer.ns_per_tick,
 	       bench_timer.overhead_ticks * bench_timer.ns_per_tick,
