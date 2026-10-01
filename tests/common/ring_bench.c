@@ -27,7 +27,7 @@
 #endif
 
 #include "common/numutils.h"
-#include "common/record_ring.h"
+#include "common/ring.h"
 #include "modules/pdump/dataplane/ring.h"
 
 #include <pthread.h>
@@ -70,7 +70,7 @@ now_ns(void) {
 // run that is not measuring what it claims.
 static void
 bench_die(const char *what) {
-	fprintf(stderr, "record_ring_bench: %s\n", what);
+	fprintf(stderr, "ring_bench: %s\n", what);
 	abort();
 }
 

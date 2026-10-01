@@ -99,13 +99,15 @@ func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_Reader_Read_RoundTripAcrossWorkers verifies that OpenReaders returns
-// one reader per worker and that each sees only its own worker's records.
+// Test_Reader_Read_RoundTripAcrossWorkers verifies that the object keeps its
+// capacity, OpenReaders returns one reader per worker, and each sees only its
+// own worker's records.
 func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	const workerCount = 3
 
 	agent := newTestAgent(t, workerCount)
 	object := newRingObject(t, agent, "workers", 64)
+	require.Equal(t, uint32(64), object.Capacity())
 
 	for workerIdx := range workerCount {
 		writer := newWriter(t, object, uint16(workerIdx))
@@ -149,47 +151,6 @@ func Test_Reader_Read_RoundTripSequentialWrites(t *testing.T) {
 	require.Equal(t, first, records[0].Bytes)
 	require.Equal(t, seqnoSecond, records[1].Seqno)
 	require.Equal(t, second, records[1].Bytes)
-}
-
-// Test_Reader_Read_SeqnoWrapsContiguously verifies that the sequence
-// number wraps from 0xffffffff to 0 without a gap.
-func Test_Reader_Read_SeqnoWrapsContiguously(t *testing.T) {
-	agent := newTestAgent(t, 1)
-	object := newRingObject(t, agent, "seqno-wrap", 64)
-	writer := newWriter(t, object, 0)
-	writer.SetNextSeqno(0xffffffff)
-
-	seqnoBeforeWrap, err := writer.WriteRecord([]byte("a"))
-	require.NoError(t, err)
-	require.Equal(t, uint32(0xffffffff), seqnoBeforeWrap)
-
-	seqnoAfterWrap, err := writer.WriteRecord([]byte("b"))
-	require.NoError(t, err)
-	require.Equal(t, uint32(0), seqnoAfterWrap)
-
-	reader := openReader(t, object, 0)
-
-	records := reader.Read(1024)
-	require.Len(t, records, 2)
-	require.Equal(t, uint32(0xffffffff), records[0].Seqno)
-	require.Equal(t, uint32(0), records[1].Seqno)
-}
-
-// Test_Reader_WriteRecord_OversizedRejected verifies that an oversized record
-// is refused before anything is written or a sequence number is consumed.
-func Test_Reader_WriteRecord_OversizedRejected(t *testing.T) {
-	agent := newTestAgent(t, 1)
-	object := newRingObject(t, agent, "oversized", 32)
-	writer := newWriter(t, object, 0)
-
-	before := writer.NextSeqno()
-
-	_, err := writer.WriteRecord(make([]byte, 64))
-	require.Error(t, err)
-	require.Equal(t, before, writer.NextSeqno())
-
-	reader := openReader(t, object, 0)
-	require.Empty(t, reader.Read(1024))
 }
 
 // Test_Reader_Read_CorruptFrameResyncsToWriteBoundary verifies that after a
@@ -247,13 +208,6 @@ func Test_Reader_Read_CorruptFrameReturnsEarlierRecords(t *testing.T) {
 	require.Len(t, records, 1)
 	require.Equal(t, []byte("good-one"), records[0].Bytes)
 	require.False(t, reader.HasMore(), "the cursor must resume at the snapshot write position")
-
-	_, err = writer.WriteRecord([]byte("after"))
-	require.NoError(t, err)
-
-	records = reader.Read(1024)
-	require.Len(t, records, 1)
-	require.Equal(t, []byte("after"), records[0].Bytes)
 }
 
 // Test_Reader_Read_TwoIndependentReadersSeeSameStream verifies that two

@@ -99,18 +99,6 @@ func (m *Writer) Source() (cring.RecordSource, error) {
 	return sources[m.workerIdx], nil
 }
 
-// NextSeqno peeks the sequence number the next commit would stamp, without
-// consuming it.
-func (m *Writer) NextSeqno() uint32 {
-	return uint32(m.worker.next_seqno)
-}
-
-// SetNextSeqno overwrites the sequence counter, letting a test position it
-// at the wrap boundary without first writing billions of records.
-func (m *Writer) SetNextSeqno(seqno uint32) {
-	m.worker.next_seqno = C.uint32_t(seqno)
-}
-
 // SetIndices forces the shared write and readable positions, letting a test
 // set up a physical wrap or backlog without writing records to reach it.
 func (m *Writer) SetIndices(write, readable uint64) {

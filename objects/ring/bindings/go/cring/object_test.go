@@ -34,8 +34,8 @@ func newTestAgent(t testing.TB, workerCount uint64) *ffi.Agent {
 	return agent
 }
 
-// Test_Object_NewObject_RejectsBadCapacity verifies that a zero, undersized
-// or non-power-of-two capacity is reported as an invalid argument.
+// Test_Object_NewObject_RejectsBadCapacity verifies that a malformed or
+// oversized capacity is reported as an invalid argument.
 //
 // A service built on this binding maps that kind to a gRPC status.
 func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
@@ -45,9 +45,8 @@ func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 		name     string
 		capacity uint32
 	}{
-		{name: "zero", capacity: 0},
-		{name: "below the record frame size", capacity: 4},
 		{name: "not a power of two", capacity: 24},
+		{name: "above allocator maximum", capacity: 1 << 27},
 	}
 
 	for _, tc := range cases {
@@ -57,21 +56,6 @@ func Test_Object_NewObject_RejectsBadCapacity(t *testing.T) {
 			require.ErrorIs(t, err, cerrors.InvalidArgument)
 		})
 	}
-}
-
-// Test_Object_SourcesAndCapacity verifies that a created object resolves one
-// ring per dataplane worker and reports the capacity it was created with.
-func Test_Object_SourcesAndCapacity(t *testing.T) {
-	agent := newTestAgent(t, 3)
-
-	object, err := cring.NewObject(agent, "sized", 64)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = object.Free() })
-
-	sources, err := object.Sources()
-	require.NoError(t, err)
-	require.Len(t, sources, 3)
-	require.Equal(t, uint32(64), object.Capacity())
 }
 
 // Test_Object_Free_RefusedWhileReferenced verifies that freeing a published

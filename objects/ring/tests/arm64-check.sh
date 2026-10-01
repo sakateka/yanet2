@@ -274,7 +274,7 @@ export CGO_CPPFLAGS="${CGO_CPPFLAGS:+$CGO_CPPFLAGS }-DYANET_CACHE_LINE_SIZE=$CAC
 # cgo does not track headers outside a package directory, so the Go build
 # cache can serve a writer compiled from an older ring header. Keying the
 # flags on the headers' content recompiles the cgo packages when they change.
-RING_HEADERS_SUM=$(cat common/record_ring.h objects/ring/api/*.h | sha256sum | cut -c1-16)
+RING_HEADERS_SUM=$(cat common/ring.h objects/ring/api/*.h | sha256sum | cut -c1-16)
 export CGO_CPPFLAGS="$CGO_CPPFLAGS -DRING_CHECK_HEADERS=$RING_HEADERS_SUM"
 echo "CGO_CPPFLAGS=$CGO_CPPFLAGS"
 rm -rf "$WORK"
@@ -286,14 +286,14 @@ header "CORRECTNESS"
 
 unset RING_STRESS_RECORDS RING_STRESS_CAPACITY
 correct_fail=()
-log "meson test record_ring ring_object pdump_ring"
-meson test -C "$BUILD_DIR" --print-errorlogs record_ring ring_object pdump_ring || correct_fail+=("meson test")
+log "meson test ring ring_object pdump_ring"
+meson test -C "$BUILD_DIR" --print-errorlogs ring ring_object pdump_ring || correct_fail+=("meson test")
 log "go test -count=1 ./objects/ring/..."
 go test -count=1 ./objects/ring/... || correct_fail+=("go test")
 if ((${#correct_fail[@]})); then
 	set_status correctness FAIL "failed: ${correct_fail[*]}"
 else
-	set_status correctness PASS "meson record_ring/ring_object/pdump_ring, go ./objects/ring/..."
+	set_status correctness PASS "meson ring/ring_object/pdump_ring, go ./objects/ring/..."
 fi
 
 # ---------------------------------------------------------------------------
@@ -308,13 +308,13 @@ go test -c -o "$WORK/cring-fence.test" "$CRING_PKG" ||
 CGO_CFLAGS="$GO_CFLAGS_BASE $NOFENCE_DEFINE" go test -c -o "$WORK/cring-nofence.test" "$CRING_PKG" ||
 	die codegen "go test -c (no fence) failed"
 
-# Emit meson's record_ring_bench compile command, minus its object/dependency
+# Emit meson's ring_bench compile command, minus its object/dependency
 # outputs, as NUL-separated words preceded by its working directory.
 bench_command() {
 	python3 - "$BUILD_DIR/compile_commands.json" <<'EOF'
 import json, shlex, shutil, sys
 for entry in json.load(open(sys.argv[1])):
-    if not entry["file"].endswith("tests/common/record_ring_bench.c"):
+    if not entry["file"].endswith("tests/common/ring_bench.c"):
         continue
     args = entry.get("arguments") or shlex.split(entry["command"])
     if args[0] == "ccache" and shutil.which("ccache") is None:
@@ -329,22 +329,22 @@ for entry in json.load(open(sys.argv[1])):
             out.append(arg)
     sys.stdout.write("\0".join([entry["directory"]] + out) + "\0")
     sys.exit(0)
-sys.exit("record_ring_bench.c not found in compile_commands.json")
+sys.exit("ring_bench.c not found in compile_commands.json")
 EOF
 }
 
 mapfile -d '' BENCH_CMD < <(bench_command) || true
 if ((${#BENCH_CMD[@]} < 2)); then
-	die codegen "cannot extract the record_ring_bench compile command"
+	die codegen "cannot extract the ring_bench compile command"
 fi
 BENCH_DIR=${BENCH_CMD[0]}
 BENCH_ARGS=("${BENCH_CMD[@]:1}")
-echo "record_ring_bench flags (from compile_commands.json): ${BENCH_ARGS[*]}"
+echo "ring_bench flags (from compile_commands.json): ${BENCH_ARGS[*]}"
 for variant in fence nofence; do
 	extra=()
 	[[ $variant == nofence ]] && extra=("$NOFENCE_DEFINE")
 	(cd "$BENCH_DIR" && "${BENCH_ARGS[@]}" "${extra[@]}" -Wl,--as-needed -Wl,--no-undefined \
-		-o "$ROOT/$WORK/record_ring_bench-$variant") || die codegen "record_ring_bench ($variant) build failed"
+		-o "$ROOT/$WORK/ring_bench-$variant") || die codegen "ring_bench ($variant) build failed"
 done
 
 IS_ARM64=0
@@ -460,7 +460,7 @@ check_writer() {
 check_writer cring '^(ring_stress_run|ring_worker_prepare)' \
 	"$WORK/cring-fence.test" "$WORK/cring-nofence.test"
 check_writer bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
-	"$WORK/record_ring_bench-fence" "$WORK/record_ring_bench-nofence"
+	"$WORK/ring_bench-fence" "$WORK/ring_bench-nofence"
 
 # The Go reader: the index snapshot and recheck load through the shared
 # memory source, and the cursor add between the copy and the recheck.
@@ -655,7 +655,7 @@ pick = [w0, r0, w1, r1] if r1 is not None else cpus[:2]
 print(",".join(map(str, pick)))
 ')
 fi
-echo "record_ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, builds alternate"
+echo "ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, builds alternate"
 
 BENCH_TSV="$WORK/bench.tsv"
 READER_TSV="$WORK/bench-reader.tsv"
@@ -666,9 +666,9 @@ for ((rep = 1; rep <= BENCH_REPS; rep++)); do
 	if ((rep % 2)); then order=(fence nofence); else order=(nofence fence); fi
 	for variant in "${order[@]}"; do
 		out="$WORK/bench-$variant-$rep.txt"
-		log "record_ring_bench $variant run $rep"
+		log "ring_bench $variant run $rep"
 		if RING_BENCH_REPS=1 taskset -c "$BENCH_CPUS" \
-			"$WORK/record_ring_bench-$variant" "$BENCH_CPUS" >"$out" 2>&1; then
+			"$WORK/ring_bench-$variant" "$BENCH_CPUS" >"$out" 2>&1; then
 			cat "$out"
 			# Writer-only rows have 5 fields, reader rows 12; both start
 			# with the record size.

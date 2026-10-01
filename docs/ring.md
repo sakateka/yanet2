@@ -84,7 +84,7 @@ its own.
 
 ## Ordering contract
 
-The writer (`common/record_ring.h`) is the sole mutator of both indices and
+The writer (`common/ring.h`) is the sole mutator of both indices and
 uses no lock and no read-modify-write:
 
 1. Read its own `write_idx` and `readable_idx` with relaxed loads.

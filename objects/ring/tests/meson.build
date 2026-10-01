@@ -2,10 +2,7 @@ ring_object_test = executable(
   'ring_object_test',
   ['object_test.c'],
   c_args: yanet_c_args,
-  link_args: yanet_link_args + [
-    # Exports the test's stub module constructor to the harness's dlsym.
-    '-Wl,-E',
-  ],
+  link_args: yanet_link_args,
   dependencies: [
     lib_dataplane_ut_dep,
     lib_logging_dep,

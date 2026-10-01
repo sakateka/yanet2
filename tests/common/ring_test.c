@@ -9,7 +9,7 @@
 
 #include "common/test_assert.h"
 
-#include "common/record_ring.h"
+#include "common/ring.h"
 
 #include "lib/logging/log.h"
 
@@ -258,10 +258,10 @@ run_ring_eviction_corrupt_length_catches_up_test() {
 	return TEST_SUCCESS;
 }
 
-// A record whose declared size is below the frame or above the ring's
-// capacity is refused before any index or byte is touched.
+// A record whose declared size is below the frame is refused before any
+// index or byte is touched.
 static int
-run_ring_prepare_rejects_invalid_size_test() {
+run_ring_prepare_rejects_undersize_test() {
 	const uint32_t ring_size = 32;
 	uint8_t *data;
 	struct ring_worker ring = init_test_ring(ring_size, &data);
@@ -283,26 +283,13 @@ run_ring_prepare_rejects_invalid_size_test() {
 		"a rejected prepare must not move readable_idx"
 	);
 
-	rc = ring_worker_prepare(&ring, data, ring_size + 4);
-	TEST_ASSERT_EQUAL(rc, -1, "above capacity must be rejected");
-	TEST_ASSERT_EQUAL(errno, E2BIG, "above capacity must set E2BIG");
-	TEST_ASSERT_EQUAL(
-		(long)ring.write_idx,
-		0L,
-		"a rejected prepare must not move write_idx"
-	);
-	TEST_ASSERT_EQUAL(
-		(long)ring.readable_idx,
-		0L,
-		"a rejected prepare must not move readable_idx"
-	);
-
 	free(data);
 	return TEST_SUCCESS;
 }
 
-// A length whose 4-byte alignment wraps u32 to a small value is still
-// rejected as oversize: the raw value is checked before alignment.
+// A length above the ring's capacity is rejected as oversize, including one
+// whose 4-byte alignment wraps u32 to a small value: the raw value is
+// checked before alignment.
 static int
 run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 	const uint32_t ring_size = 32;
@@ -311,7 +298,7 @@ run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
 
 	uint32_t oversize_values[] = {
-		ring_size + 1, 0xFFFFFFFD, 0xFFFFFFFE, 0xFFFFFFFF
+		ring_size + 1, ring_size + 4, 0xFFFFFFFD, 0xFFFFFFFE, 0xFFFFFFFF
 	};
 	for (size_t i = 0;
 	     i < sizeof(oversize_values) / sizeof(oversize_values[0]);
@@ -352,14 +339,23 @@ run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 	return TEST_SUCCESS;
 }
 
-// The per-worker sequence counter wraps from UINT32_MAX to 0 and keeps
-// numbering contiguous across the wrap.
+// The per-worker sequence counter starts at 0, numbers commits contiguously,
+// and wraps from UINT32_MAX to 0 without a gap.
 static int
 run_ring_seqno_wrap_test() {
 	const uint32_t ring_size = 32;
 	uint8_t *data;
 	struct ring_worker ring = init_test_ring(ring_size, &data);
 	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	uint32_t first =
+		ring_worker_commit(&ring, data, RING_RECORD_FRAME_SIZE);
+	uint32_t second =
+		ring_worker_commit(&ring, data, RING_RECORD_FRAME_SIZE);
+	TEST_ASSERT_EQUAL((long)first, 0L, "first commit must be seqno 0");
+	TEST_ASSERT_EQUAL(
+		(long)second, (long)first + 1, "commits must be contiguous"
+	);
 
 	ring.next_seqno = UINT32_MAX;
 
@@ -422,28 +418,6 @@ run_ring_multi_worker_isolation_test() {
 	return TEST_SUCCESS;
 }
 
-// Two sequential commits on the same worker get contiguous sequence numbers.
-static int
-run_ring_sequential_producers_contiguous_seqno_test() {
-	const uint32_t ring_size = 64;
-	uint8_t *data;
-	struct ring_worker ring = init_test_ring(ring_size, &data);
-	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
-
-	uint32_t first =
-		ring_worker_commit(&ring, data, RING_RECORD_FRAME_SIZE);
-	uint32_t second =
-		ring_worker_commit(&ring, data, RING_RECORD_FRAME_SIZE);
-
-	TEST_ASSERT_EQUAL((long)first, 0L, "first commit must be seqno 0");
-	TEST_ASSERT_EQUAL(
-		(long)second, (long)first + 1, "commits must be contiguous"
-	);
-
-	free(data);
-	return TEST_SUCCESS;
-}
-
 int
 main(void) {
 	log_enable_name("debug");
@@ -461,15 +435,13 @@ main(void) {
 		 run_ring_eviction_spans_multiple_records_test},
 		{"eviction_corrupt_length_catches_up",
 		 run_ring_eviction_corrupt_length_catches_up_test},
-		{"prepare_rejects_invalid_size",
-		 run_ring_prepare_rejects_invalid_size_test},
+		{"prepare_rejects_undersize",
+		 run_ring_prepare_rejects_undersize_test},
 		{"prepare_rejects_oversize_alignment_wraparound",
 		 run_ring_prepare_rejects_oversize_alignment_wraparound_test},
 		{"seqno_wrap", run_ring_seqno_wrap_test},
 		{"multi_worker_isolation", run_ring_multi_worker_isolation_test
 		},
-		{"sequential_producers_contiguous_seqno",
-		 run_ring_sequential_producers_contiguous_seqno_test},
 	};
 
 	int failed = 0;

@@ -1,6 +1,6 @@
 package cring
 
-//#include "common/record_ring.h"
+//#include "common/ring.h"
 import "C"
 
 import (
@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"slices"
 	"sync/atomic"
-
-	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring/internal/ringabi"
 )
 
 // RecordFrameSize is the wire size of the frame preceding every record's
@@ -176,7 +174,7 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 			corrupt = true
 			break
 		}
-		skip := int(ringabi.Align4(totalLen))
+		skip := int(align4(totalLen))
 		if skip > len(m.buf)-parsed {
 			break
 		}
@@ -200,7 +198,7 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 				Bytes:  payloads[:n:n],
 			})
 			payloads = payloads[n:]
-			offset += int(ringabi.Align4(totalLen))
+			offset += int(align4(totalLen))
 		}
 	}
 
@@ -226,4 +224,10 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 // Safe because no returned record aliases the buffer.
 func (m *Reader) dropPrefix(n int) {
 	m.buf = m.buf[:copy(m.buf, m.buf[n:])]
+}
+
+// align4 rounds a record length up to the 4-byte boundary every record
+// starts at, wrapping like the C writer's 32-bit arithmetic.
+func align4(totalLen uint32) uint32 {
+	return (totalLen + 3) &^ 3
 }

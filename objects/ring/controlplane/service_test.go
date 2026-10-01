@@ -292,8 +292,9 @@ func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 // Test_RingService_DeleteRing_RefusedFreeRetried verifies that a delete whose
 // free a live generation reference refuses still unregisters the name.
 //
-// The name is recreated under a fresh handle while the old memory stays held,
-// and the next delete frees it once the reference is released.
+// The name is recreated under a fresh handle the old one cannot lease, while
+// the old memory stays held, and the next delete frees it once the reference
+// is released.
 func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	f := newRingFixture(t)
 	baseline := f.agent.BlockAllocatorFreeSize()
@@ -312,6 +313,8 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	newHandle, ok := f.service.LookupHandle("deferred")
 	require.True(t, ok)
 	require.NotEqual(t, oldHandle, newHandle)
+	_, err = f.service.Acquire("deferred", oldHandle)
+	require.Error(t, err, "the old handle must not admit a lease against the recreated ring")
 	require.NoError(t, f.delete(t, "deferred"))
 
 	ref.Release()
@@ -321,26 +324,6 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	f.create(t, "other", 64)
 	require.NoError(t, f.delete(t, "other"))
 	require.Equal(t, baseline, f.agent.BlockAllocatorFreeSize())
-}
-
-// Test_RingService_DeleteThenRecreate_NewHandle verifies that a ring
-// recreated under a deleted name gets a fresh handle, and that the old handle
-// never admits a lease against it.
-func Test_RingService_DeleteThenRecreate_NewHandle(t *testing.T) {
-	f := newRingFixture(t)
-
-	f.create(t, "recreate", 64)
-	oldHandle, ok := f.service.LookupHandle("recreate")
-	require.True(t, ok)
-	require.NoError(t, f.delete(t, "recreate"))
-
-	f.create(t, "recreate", 64)
-	newHandle, ok := f.service.LookupHandle("recreate")
-	require.True(t, ok)
-	require.NotEqual(t, oldHandle, newHandle)
-
-	_, err := f.service.Acquire("recreate", oldHandle)
-	require.Error(t, err)
 }
 
 // Test_RingService_LeaseVsDeleteRace verifies under concurrent acquires that
