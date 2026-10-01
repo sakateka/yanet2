@@ -18,8 +18,7 @@ service RingService {
   // ListRings returns every registered ring, sorted by name, with the same
   // facts as ShowRing.
   rpc ListRings(ListRingsRequest) returns (ListRingsResponse);
-  // ShowRing returns the name, per-worker capacity and worker count of one
-  // named ring.
+  // ShowRing returns the name and per-worker capacity of one named ring.
   rpc ShowRing(ShowRingRequest) returns (ShowRingResponse);
   // DeleteRing removes a named ring.
   //

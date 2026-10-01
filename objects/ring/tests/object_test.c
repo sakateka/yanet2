@@ -47,7 +47,7 @@ new_module_ring_test_linker(void);
 // Dataplane constructor of the stub linker module, resolved by the harness
 // through dlsym from this binary.
 //
-// The stub only gives cp_module_init a registered module type: the harness
+// The stub only gives module config init a registered module type: the harness
 // never runs packets, so the module needs no packet or commit handler.
 struct module *
 new_module_ring_test_linker(void) {

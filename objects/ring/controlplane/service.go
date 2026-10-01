@@ -179,7 +179,7 @@ func (m *RingService) CreateRing(
 	return &ringpb.CreateRingResponse{}, nil
 }
 
-// ShowRing returns the name, capacity and worker count of one named ring.
+// ShowRing returns the name and per-worker capacity of one named ring.
 func (m *RingService) ShowRing(
 	ctx context.Context,
 	req *ringpb.ShowRingRequest,

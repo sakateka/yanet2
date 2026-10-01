@@ -141,9 +141,9 @@ func requirePdumpCapturesInput(t *testing.T, fw *framework.TestFramework, config
 // Test_RingCLI_LifecycleAndPdumpCapture verifies that the ring CLI drives the
 // ring service hosted by a running pdump module.
 //
-// A created ring is listed and shown with its capacity and the dataplane
-// worker count, bad creates leave the registry unchanged, a deleted name can
-// be reused, and pdump capture works with and without a ring present.
+// A created ring is listed and shown with its capacity, bad creates leave the
+// registry unchanged, a deleted name can be reused, and pdump capture works
+// with and without a ring present.
 func Test_RingCLI_LifecycleAndPdumpCapture(t *testing.T) {
 	t.Parallel()
 	withBootedVM(t, func(fw *framework.TestFramework) {
