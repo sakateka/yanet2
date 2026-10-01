@@ -77,8 +77,3 @@ func CgoWorkerLayout() WorkerLayout {
 func CgoWorkerGoSize() uint64 {
 	return uint64(unsafe.Sizeof(C.struct_ring_worker{}))
 }
-
-// ArchiveAlign4 rounds a length up with the linked C archive's alignment.
-func ArchiveAlign4(val uint32) uint32 {
-	return uint32(C.ring_layout_align4(C.uint32_t(val)))
-}

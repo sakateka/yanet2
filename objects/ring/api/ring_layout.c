@@ -17,8 +17,3 @@ ring_layout_worker(void) {
 		.mask_offset = offsetof(struct ring_worker, mask),
 	};
 }
-
-uint32_t
-ring_layout_align4(uint32_t val) {
-	return ring_align4(val);
-}

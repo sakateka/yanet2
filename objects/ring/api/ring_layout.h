@@ -1,8 +1,8 @@
 #pragma once
 
 /*
- * Layout and framing facts about the ring writer as the C archive was
- * compiled, for bindings that must agree with it.
+ * Layout facts about the ring writer as the C archive was compiled, for
+ * bindings that must agree with it.
  *
  * Kept apart from the object lifecycle so a probe links without the
  * control-plane libraries the lifecycle needs.
@@ -28,7 +28,3 @@ struct ring_worker_layout {
 // Report the archive's per-worker ring metadata layout.
 struct ring_worker_layout
 ring_layout_worker(void);
-
-// Round a length up to the archive's record alignment.
-uint32_t
-ring_layout_align4(uint32_t val);
