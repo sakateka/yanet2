@@ -44,28 +44,28 @@ func newRingObject(t *testing.T, agent *ffi.Agent, name string, capacity uint32)
 }
 
 // source returns the real record source of one worker's ring.
-func source(t *testing.T, object *cring.Object, workerIdx uint64) cring.RecordSource {
+func source(t *testing.T, object *cring.Object, workerIdx uint16) cring.RecordSource {
 	t.Helper()
 
 	sources, err := object.Sources()
 	require.NoError(t, err)
-	require.Less(t, workerIdx, uint64(len(sources)))
+	require.Less(t, int(workerIdx), len(sources))
 	return sources[workerIdx]
 }
 
 // openReader opens a fresh reader over one worker's ring.
-func openReader(t *testing.T, object *cring.Object, workerIdx uint64) *cring.Reader {
+func openReader(t *testing.T, object *cring.Object, workerIdx uint16) *cring.Reader {
 	t.Helper()
 
 	readers, err := object.OpenReaders()
 	require.NoError(t, err)
-	require.Less(t, workerIdx, uint64(len(readers)))
+	require.Less(t, int(workerIdx), len(readers))
 	return readers[workerIdx]
 }
 
 // newWriter resolves the raw C writer primitives for one worker, to drive
 // records directly as the dataplane would.
-func newWriter(t *testing.T, object *cring.Object, workerIdx uint64) *ringwriter.Writer {
+func newWriter(t *testing.T, object *cring.Object, workerIdx uint16) *ringwriter.Writer {
 	t.Helper()
 
 	writer, err := ringwriter.NewWriter(object.AsRawPtr(), workerIdx)
@@ -93,7 +93,7 @@ func Test_Reader_Read_RoundTripAcrossPhysicalWrap(t *testing.T) {
 
 	records := reader.Read(1024)
 	require.Len(t, records, 1)
-	require.Equal(t, uint64(0), records[0].Worker)
+	require.Equal(t, uint16(0), records[0].Worker)
 	require.Equal(t, uint32(0), records[0].Seqno)
 	require.Equal(t, payload, records[0].Bytes)
 }
@@ -107,7 +107,7 @@ func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	object := newRingObject(t, agent, "workers", 64)
 
 	for workerIdx := range workerCount {
-		writer := newWriter(t, object, uint64(workerIdx))
+		writer := newWriter(t, object, uint16(workerIdx))
 		_, err := writer.WriteRecord([]byte{byte(workerIdx), byte(workerIdx)})
 		require.NoError(t, err)
 	}
@@ -119,7 +119,7 @@ func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 	for workerIdx, reader := range readers {
 		records := reader.Read(1024)
 		require.Len(t, records, 1)
-		require.Equal(t, uint64(workerIdx), records[0].Worker)
+		require.Equal(t, uint16(workerIdx), records[0].Worker)
 		require.Equal(t, []byte{byte(workerIdx), byte(workerIdx)}, records[0].Bytes)
 	}
 }

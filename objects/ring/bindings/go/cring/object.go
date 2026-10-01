@@ -139,9 +139,10 @@ func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 	ptr := (*C.struct_cp_object)(objPtr)
 
 	// The C accessor resolves no ring past the last worker, which ends the
-	// walk without exposing the worker count.
+	// walk without exposing the worker count. The count fits 16 bits, so
+	// the walk ends before the index could wrap.
 	var sources []RecordSource
-	for idx := uint64(0); ; idx++ {
+	for idx := uint16(0); ; idx++ {
 		worker := C.ring_object_worker(ptr, C.uint64_t(idx))
 		if worker == nil {
 			break
@@ -179,7 +180,7 @@ func (m *Object) OpenReaders() ([]*Reader, error) {
 	capacity := m.Capacity()
 	readers := make([]*Reader, 0, len(sources))
 	for idx, src := range sources {
-		reader, err := NewReader(uint64(idx), capacity, src)
+		reader, err := NewReader(uint16(idx), capacity, src)
 		if err != nil {
 			return nil, err
 		}

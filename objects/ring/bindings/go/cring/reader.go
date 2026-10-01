@@ -24,7 +24,7 @@ const RecordFrameSize = uint32(C.RING_RECORD_FRAME_SIZE)
 // capacity is capped to its length, so appending always allocates instead
 // of reaching into a neighbouring record.
 type Record struct {
-	Worker uint64
+	Worker uint16
 	Seqno  uint32
 	Bytes  []byte
 }
@@ -78,7 +78,7 @@ func (m *shmSource) CopyRange(dst []byte, start, size uint64) {
 // Read must not run concurrently with itself; HasMore may be polled from
 // another goroutine while Read runs.
 type Reader struct {
-	worker   uint64
+	worker   uint16
 	capacity uint32
 	src      RecordSource
 
@@ -95,7 +95,7 @@ type Reader struct {
 //
 // Fails for a capacity below the frame size: no record fits such a ring,
 // and every declared length would be rejected as corruption.
-func NewReader(worker uint64, capacity uint32, src RecordSource) (*Reader, error) {
+func NewReader(worker uint16, capacity uint32, src RecordSource) (*Reader, error) {
 	if capacity < RecordFrameSize {
 		return nil, fmt.Errorf("ring capacity %d is below the record frame size %d", capacity, RecordFrameSize)
 	}

@@ -24,7 +24,9 @@ struct memory_context;
 struct ring_object {
 	struct cp_object cp_object;
 
-	uint64_t worker_count;
+	// Number of per-worker rings: the dataplane's worker count, refused at
+	// creation above UINT16_MAX.
+	uint16_t worker_count;
 	// Per-worker data area size in bytes: a power of two fixed at
 	// creation, from the frame size up to the allocator's maximum block.
 	uint32_t capacity;
@@ -90,10 +92,11 @@ ring_object_config_free(struct cp_object *cp_object, yanet_error **err);
 // The worker count follows the dataplane's configured worker count. Called
 // once, before the object is published. Returns 0 on success or -1 with errno
 // set: EINVAL for a capacity below the frame size or not a power of two, or for
-// a dataplane reporting zero workers; E2BIG above the allocator's maximum
-// block; EEXIST when the object was already created; ENOMEM when an allocation
-// fails. A failure leaves the object without storage and the agent's arena
-// unchanged.
+// a dataplane reporting zero workers; E2BIG for a capacity above the
+// allocator's maximum block or a dataplane reporting more than UINT16_MAX
+// workers; EEXIST when the object was already created; ENOMEM when an
+// allocation fails. A failure leaves the object without storage and the agent's
+// arena unchanged.
 int
 ring_object_create(
 	struct ring_object *self, uint32_t capacity, yanet_error **err

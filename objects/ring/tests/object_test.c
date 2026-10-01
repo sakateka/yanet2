@@ -276,6 +276,80 @@ run_ring_object_bad_capacity_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
+// A dataplane worker count of zero or above UINT16_MAX is refused before any
+// allocation, so the 16-bit worker count never truncates.
+//
+// The harness runs two workers; the test overrides the published count
+// for each probe and restores it before returning.
+static int
+run_ring_object_bad_worker_count_test(struct yanet_shm *shm) {
+	yanet_error *err = NULL;
+
+	struct agent *agent = agent_attach(
+		shm, 0, "ring-bad-workers", RING_OBJECT_TEST_MEMORY_LIMIT, &err
+	);
+	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
+
+	struct dp_config *dp_config = agent_dp_config(agent);
+	uint64_t saved_worker_count = dp_config->worker_count;
+
+	struct {
+		uint64_t worker_count;
+		int expected_errno;
+	} bad_counts[] = {
+		{0, EINVAL},
+		{(uint64_t)UINT16_MAX + 1, E2BIG},
+	};
+	int res = TEST_SUCCESS;
+	for (size_t i = 0; i < sizeof(bad_counts) / sizeof(bad_counts[0]);
+	     ++i) {
+		uint64_t worker_count = bad_counts[i].worker_count;
+		size_t baseline =
+			block_allocator_free_size(&agent->block_allocator);
+
+		dp_config->worker_count = worker_count;
+		yanet_error *create_err = NULL;
+		struct cp_object *object = ring_object_config_new(
+			agent, "bad-workers", 64, &create_err
+		);
+		int create_errno = errno;
+		dp_config->worker_count = saved_worker_count;
+		yanet_error_free(create_err);
+
+		if (object != NULL) {
+			LOG(ERROR,
+			    "worker count %lu must be refused",
+			    (unsigned long)worker_count);
+			yanet_error *free_err = NULL;
+			ring_object_config_free(object, &free_err);
+			yanet_error_free(free_err);
+			res = TEST_FAILED;
+			break;
+		}
+		if (create_errno != bad_counts[i].expected_errno) {
+			LOG(ERROR,
+			    "worker count %lu: errno %d, expected %d",
+			    (unsigned long)worker_count,
+			    create_errno,
+			    bad_counts[i].expected_errno);
+			res = TEST_FAILED;
+			break;
+		}
+		if (block_allocator_free_size(&agent->block_allocator) !=
+		    baseline) {
+			LOG(ERROR,
+			    "worker count %lu: a refused create must leave "
+			    "the arena unchanged",
+			    (unsigned long)worker_count);
+			res = TEST_FAILED;
+			break;
+		}
+	}
+
+	agent_detach(agent);
+	return res;
+}
+
 // The created object holds one ring per dataplane worker, each with its own
 // metadata and data area, and resolves no ring past the last worker.
 static int
@@ -731,6 +805,7 @@ main(void) {
 		{"worker_layout", run_ring_worker_layout_test},
 		{"align_alloc", run_ring_object_align_alloc_test},
 		{"bad_capacity", run_ring_object_bad_capacity_test},
+		{"bad_worker_count", run_ring_object_bad_worker_count_test},
 		{"worker_rings", run_ring_object_worker_rings_test},
 		{"free_refused_while_referenced",
 		 run_ring_object_free_refused_while_referenced_test},

@@ -46,14 +46,14 @@ import (
 // resolved from a raw object pointer.
 type Writer struct {
 	object    unsafe.Pointer
-	workerIdx uint64
+	workerIdx uint16
 	worker    *C.struct_ring_worker
 	data      *C.uint8_t
 }
 
 // NewWriter resolves the writer primitives for one worker of a raw ring
 // object pointer.
-func NewWriter(objPtr unsafe.Pointer, workerIdx uint64) (*Writer, error) {
+func NewWriter(objPtr unsafe.Pointer, workerIdx uint16) (*Writer, error) {
 	cpObject := (*C.struct_cp_object)(objPtr)
 
 	worker := C.ring_object_worker(cpObject, C.uint64_t(workerIdx))
@@ -70,7 +70,7 @@ func NewWriter(objPtr unsafe.Pointer, workerIdx uint64) (*Writer, error) {
 
 // NewPublishedWriter resolves the writer primitives for one worker of the
 // ring published under a name, as its owner service exposes it.
-func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint64) (*Writer, error) {
+func NewPublishedWriter(agent *ffi.Agent, name string, workerIdx uint16) (*Writer, error) {
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
@@ -99,7 +99,7 @@ func (m *Writer) Source() (cring.RecordSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m.workerIdx >= uint64(len(sources)) {
+	if int(m.workerIdx) >= len(sources) {
 		return nil, fmt.Errorf("worker index %d has no ring source", m.workerIdx)
 	}
 	return sources[m.workerIdx], nil

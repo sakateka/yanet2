@@ -65,7 +65,7 @@ ring_object_fini(struct ring_object *self) {
 		struct memory_context *ctx = &self->cp_object.memory_context;
 		struct ring_worker *workers = ADDR_OF(&self->workers);
 		if (workers != NULL) {
-			for (uint64_t idx = 0; idx < self->worker_count;
+			for (uint16_t idx = 0; idx < self->worker_count;
 			     ++idx) {
 				uint8_t *data = ADDR_OF(&workers[idx].data);
 				memory_bfree(ctx, data, self->capacity);
@@ -226,8 +226,8 @@ ring_object_create(
 
 	struct agent *agent = ADDR_OF(&self->cp_object.agent);
 	struct dp_config *dp_config = ADDR_OF(&agent->dp_config);
-	uint64_t worker_count = dp_config->worker_count;
-	if (worker_count == 0) {
+	uint64_t dp_worker_count = dp_config->worker_count;
+	if (dp_worker_count == 0) {
 		yanet_error_add_kind(
 			err,
 			YANET_ERROR_FAILED_PRECONDITION,
@@ -237,6 +237,19 @@ ring_object_create(
 		errno = EINVAL;
 		return -1;
 	}
+	if (dp_worker_count > UINT16_MAX) {
+		yanet_error_add_kind(
+			err,
+			YANET_ERROR_FAILED_PRECONDITION,
+			"dataplane reports %lu workers; a ring supports at "
+			"most %u",
+			(unsigned long)dp_worker_count,
+			(unsigned)UINT16_MAX
+		);
+		errno = E2BIG;
+		return -1;
+	}
+	uint16_t worker_count = (uint16_t)dp_worker_count;
 
 	struct memory_context *ctx = &self->cp_object.memory_context;
 
@@ -255,17 +268,17 @@ ring_object_create(
 		int saved_errno = errno;
 		yanet_error_add(
 			err,
-			"failed to allocate ring metadata for %lu workers",
-			(unsigned long)worker_count
+			"failed to allocate ring metadata for %u workers",
+			(unsigned)worker_count
 		);
 		errno = saved_errno;
 		return -1;
 	}
 
-	for (uint64_t idx = 0; idx < worker_count; ++idx) {
+	for (uint16_t idx = 0; idx < worker_count; ++idx) {
 		uint8_t *data = memory_balloc(ctx, capacity);
 		if (data == NULL) {
-			for (uint64_t prev = 0; prev < idx; ++prev) {
+			for (uint16_t prev = 0; prev < idx; ++prev) {
 				uint8_t *prior_data =
 					ADDR_OF(&workers[prev].data);
 				memory_bfree(ctx, prior_data, capacity);
@@ -275,8 +288,8 @@ ring_object_create(
 			yanet_error_add(
 				err,
 				"failed to allocate ring data for worker "
-				"%lu",
-				(unsigned long)idx
+				"%u",
+				(unsigned)idx
 			);
 			errno = ENOMEM;
 			return -1;
