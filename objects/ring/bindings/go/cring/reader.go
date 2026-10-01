@@ -156,6 +156,7 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	if latest > readable {
 		diff := latest - readable + uint64(before)
 		if diff > uint64(len(m.buf)) {
+			// Everything buffered was evicted: discard it, resume from latest.
 			m.buf = m.buf[:0]
 			m.readIdx.Store(latest)
 			return nil
