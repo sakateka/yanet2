@@ -298,8 +298,7 @@ ring_object_create(
 		}
 		memset(data, 0, capacity);
 
-		workers[idx].local.size = capacity;
-		workers[idx].local.mask = capacity - 1;
+		ring_worker_init(&workers[idx], capacity);
 		SET_OFFSET_OF(&workers[idx].local.data, data);
 	}
 

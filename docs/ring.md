@@ -55,12 +55,19 @@ its own.
 - Each worker has exactly one writer, and that writer never blocks: a
   full buffer evicts whole oldest records to make room rather than
   stalling or failing the write.
-- Eviction always drops whole records — it never truncates one —
-  advancing past exactly as many as the new record needs, and publishes
-  only the final position. If it ever
-  finds a corrupt length at the record it means to evict next, it does
-  not try to guess how far is safe to advance: it drops every record
-  currently in the buffer in one step instead.
+- Eviction always drops whole records — it never truncates one — and
+  frees space in chunks: once a record does not fit, the writer drops at
+  least a chunk of the oldest records, up to the first record boundary
+  past it, so at least a chunk (or the record's own length, if larger)
+  is free afterwards, and publishes only the final position. The chunk
+  is a sixteenth of the capacity, at most 4 KiB, rounded down to a
+  multiple of 4 bytes, fixed at `create`; the records that fit in the
+  freed space then write without evicting again. The writer walks the
+  oldest records' frames ahead of time, one per write that needs no
+  eviction, up to a chunk past the readable position, so an eviction
+  finds its chunk already walked. If it ever finds a corrupt length at
+  the record it means to evict next, it does not try to guess how far is
+  safe to advance: it drops every published record in one step instead.
 - Readers keep their own independent cursor per worker; a slow reader
   loses the records the writer evicted before it caught up, but never
   affects the writer or other readers.
@@ -78,9 +85,44 @@ its own.
 - `seqno` is a per-worker u32 counter assigned at commit and incremented
   for every accepted record, wrapping from `0xFFFFFFFF` back to `0`
   without a gap.
-- A record whose declared size is below the frame or above the buffer's
-  capacity is rejected outright: nothing is written, no index moves, and
-  no seqno is consumed.
+- A record whose declared size is below the frame or above the batch
+  limit (the capacity minus the eviction chunk) is rejected outright:
+  nothing is written, no index moves, and no seqno is consumed.
+
+## Batch publication
+
+- The writer separates committing a record from publishing it. A commit
+  frames the record, stamps its seqno and advances the writer's private
+  write position; readers see nothing of it yet. A publication makes
+  every record committed since the previous one visible with one store
+  of the published write position, and does nothing when there is none.
+  A producer publishes once at the end of each call or burst.
+- A batch — the records committed between two publications — must total
+  at most the batch limit, the capacity minus the eviction chunk, in
+  aligned record lengths. The writer reports the room left in the
+  current batch; a producer whose next record exceeds it publishes
+  first. Assertions enforce the limit.
+- Within the limit a batch never evicts itself: eviction only drops
+  published records, and evicting all of them always frees the whole
+  chunk. A build without assertions that lets an oversized batch
+  through drops the batch's own oldest records as a last resort; readers
+  never saw them and observe a seqno gap.
+
+## Reader distance
+
+- Everything below the published write position is whole records,
+  complete in memory, so reading right up to it is correct. A reader
+  still keeps a distance from it by default, to leave the cache line the
+  writer fills with its next batch alone: copying that line would pull
+  it away from the writer's CPU and make the writer pay for taking it
+  back.
+- With a nonzero distance D (one cache line by default, configurable,
+  0 to disable), a read stops at the last cache-line boundary at least D
+  bytes before the published write position. Records past that boundary
+  are returned once the writer publishes past them.
+- `Drain` reads right up to the published write position regardless of
+  the distance, for a consumer that knows the writer is idle, for
+  example after a capture stopped.
 
 ## Metadata layout
 
@@ -90,57 +132,76 @@ contends with the writer's per-record bookkeeping:
 
 | Line (offset) | Fields (offset within the line, bytes) | Written by | Read by |
 |---|---|---|---|
-| Writer-private `local` (0) | `write_idx` (0), `readable_idx` (8), `data` (16), `next_seqno` (24), `size` (28), `mask` (32) | writer, every record | writer; readers load `size`, `mask`, `data` once at attach |
+| Writer-private `local` (0) | `write_idx` (0), `readable_idx` (8), `published_write_idx` (16), `evict_idx` (24), `data` (32), `next_seqno` (40), `size` (44), `mask` (48), `evict_chunk` (52) | writer, every record | writer; readers load `size`, `mask`, `data` once at attach |
 | Guard (L) | unused | — | — |
 | Published `published` (2L) | `write_idx` (0), `readable_idx` (8) | writer, release stores only | readers |
 | Guard (3L) | unused | — | — |
 
 The writer keeps its authoritative positions in the private line and
 never loads the published one; the published positions are copies it
-release-stores after updating its own. The guard lines stop a CPU that
-prefetches lines in adjacent pairs from pulling a line a reader polls
-together with one the writer stores to, of the same worker or the next
-one in the array.
+release-stores after updating its own. `published_write_idx` is its
+private record of the last write position it published, the start of
+the unpublished batch, and `evict_idx` is the record boundary its
+eviction walk has reached ahead of the next eviction. The guard lines
+stop a CPU that prefetches lines in adjacent pairs from pulling a line a
+reader polls together with one the writer stores to, of the same worker
+or the next one in the array.
 
 ## Ordering contract
 
 The writer (`common/ring.h`) is the sole mutator of both indices and
-uses no lock and no read-modify-write:
+uses no lock and no read-modify-write. Per record:
 
-1. Read its private `write_idx` and `readable_idx` with plain loads.
-2. If the record does not fit, walk whole oldest records locally (to
-   `write_idx` on a corrupt length), update the private `readable_idx`
-   and publish the final boundary with one release store of the
-   published `readable_idx`.
+1. Read its private `write_idx` and `readable_idx` with plain loads. If
+   the record fits, walk the eviction cursor over at most one more
+   published record's frame (reads only) and skip to step 4.
+2. Otherwise continue the walk over whole oldest published records
+   locally until a chunk is free (to the batch start on a corrupt
+   length), update the private `readable_idx` and publish the final
+   boundary with one release store of the published `readable_idx`.
 3. Issue a release fence before touching any evicted byte. Steps 2 and 3
-   run only when something was evicted.
+   run only when something was evicted: once per chunk, not per record.
 4. `memcpy` the frame and payload.
-5. Advance the private `write_idx` and publish the record with a release
-   store of the published `write_idx`.
+5. Advance the private `write_idx` (commit).
 
-`readable_idx` moves once per eviction, not once per evicted record: it
-is not an eviction counter.
+Per batch:
+
+6. Publish every committed record with one release store of the
+   published `write_idx`, skipped when nothing was committed.
+
+`readable_idx` moves once per eviction chunk, not once per evicted
+record: it is not an eviction counter.
 
 The reader (`objects/ring/bindings/go/cring`) acquire-loads both
-published indices, copies into a private buffer, advances its cursor with
-`atomic.Add`, acquire-reloads `readable_idx` and drops the prefix that
-the recheck shows was invalidated before parsing. The add and the reload
-must stay atomic and in this order.
+published indices, copies into a private buffer up to the published
+`write_idx` less its distance, advances its cursor with `atomic.Add`,
+acquire-reloads `readable_idx` and drops the prefix that the recheck
+shows was invalidated before parsing. The add and the reload must stay
+atomic and in this order.
 
-**Why it is correct.** If the reader copied any overwritten byte, its
-recheck must see the eviction that covers it. arm64: the writer's fence
-orders the published `readable_idx` store before the data stores; on the reader
-side the release half of the add followed by the acquire reload keeps
-the copy's loads before the recheck (release→acquire is never
-reordered). x86-64: TSO keeps stores after earlier stores and loads
-after earlier loads, so no fence instruction is needed.
+**Why it is correct.** Publication: the release store of `write_idx`
+follows every frame and payload store of the batch (and of any earlier
+batch) in program order, so a reader whose acquire load sees it also
+sees every byte below it; the distance only shortens the range read.
+Unpublished records lie at or past the published `write_idx`, which no
+reader copies. Eviction: if the reader copied any overwritten byte, its
+recheck must see the eviction that covers it. One readable store and
+one fence cover a whole chunk, since all of the chunk's evicted bytes
+are overwritten only after them, and the walk stops at the batch start,
+so an overwrite inside the current batch only ever lands on bytes a
+published eviction already invalidated. arm64: the writer's fence
+orders the published `readable_idx` store before the data stores; on
+the reader side the release half of the add followed by the acquire
+reload keeps the copy's loads before the recheck (release→acquire is
+never reordered). x86-64: TSO keeps stores after earlier stores and
+loads after earlier loads, so no fence instruction is needed.
 
 | Writer | Reader | x86-64 | arm64 |
 |---|---|---|---|
-| Release store of published `readable_idx` | Acquire recheck | `mov` / `mov` | `stlr` / `ldar` |
-| Release fence | Release half of cursor add | none / `lock xadd` | `dmb ish` (or `dmb ishld` + `dmb ishst`) / `ldaddal` or `ldaxr`+`stlxr` |
-| `memcpy` | `copy` | plain | plain |
-| Release store of published `write_idx` | Acquire snapshot | `mov` / `mov` | `stlr` / `ldar` |
+| Release store of published `readable_idx`, once per chunk | Acquire recheck | `mov` / `mov` | `stlr` / `ldar` |
+| Release fence, once per chunk | Release half of cursor add | none / `lock xadd` | `dmb ish` (or `dmb ishld` + `dmb ishst`) / `ldaddal` or `ldaxr`+`stlxr` |
+| `memcpy` of every record of the batch | `copy` | plain | plain |
+| Release store of published `write_idx`, once per batch | Acquire snapshot | `mov` / `mov` | `stlr` / `ldar` |
 
 **Compiler dependency.** GCC and clang treat `atomic_thread_fence` as a
 full compiler barrier, so the `memcpy` stores are not hoisted above it

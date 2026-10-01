@@ -1,10 +1,13 @@
 /*
- * Tests for the ring writer's on-wire behavior: wrap, eviction, invalid
- * sizes, sequence-counter wraparound and multi-worker isolation.
+ * Tests for the ring writer's on-wire behavior: wrap, batch publication,
+ * chunked eviction, invalid sizes, sequence-counter wraparound and
+ * multi-worker isolation.
  *
- * A full ring evicts whole records at a record boundary, a corrupt length
- * drops the backlog instead of walking it, and an invalid record size never
- * touches the ring or its sequence counter.
+ * Committed records stay invisible until published, a full ring evicts
+ * whole published records in chunks at a record boundary, never the
+ * unpublished batch, a corrupt length drops the backlog instead of walking
+ * it, and an invalid record size never touches the ring or its sequence
+ * counter.
  */
 
 #include "common/test_assert.h"
@@ -23,10 +26,9 @@
 // frees; the data area is NULL when its allocation fails.
 static struct ring_worker
 init_test_ring(uint32_t size, uint8_t **data) {
-	struct ring_worker ring = {0};
+	struct ring_worker ring;
+	ring_worker_init(&ring, size);
 	*data = calloc(1, size);
-	ring.local.size = size;
-	ring.local.mask = size - 1;
 	return ring;
 }
 
@@ -87,6 +89,7 @@ run_ring_wrap_roundtrip_test() {
 		&ring, data, RING_RECORD_FRAME_SIZE, payload, sizeof(payload)
 	);
 	ring_worker_commit(&ring, data, total_len);
+	ring_worker_publish(&ring);
 
 	uint8_t roundtrip[8];
 	for (size_t i = 0; i < sizeof(payload); ++i) {
@@ -104,12 +107,12 @@ run_ring_wrap_roundtrip_test() {
 	return TEST_SUCCESS;
 }
 
-// Write one fixed-size record whose payload repeats one byte, so a later
-// read can tell which record occupies a slot.
+// Commit one fixed-size record whose payload repeats one byte, so a later
+// read can tell which record occupies a slot, without publishing it.
 //
 // Aborts if the record is refused, since every caller passes a valid size.
 static void
-write_fixed_record(
+commit_fixed_record(
 	struct ring_worker *ring,
 	uint8_t *data,
 	uint8_t fill,
@@ -127,6 +130,19 @@ write_fixed_record(
 		ring, data, RING_RECORD_FRAME_SIZE, payload, payload_len
 	);
 	ring_worker_commit(ring, data, total_len);
+}
+
+// Commit and publish one fixed-size record, as a producer publishing every
+// record does.
+static void
+write_fixed_record(
+	struct ring_worker *ring,
+	uint8_t *data,
+	uint8_t fill,
+	uint32_t total_len
+) {
+	commit_fixed_record(ring, data, fill, total_len);
+	ring_worker_publish(ring);
 }
 
 // A full ring evicts whole oldest records, landing the readable position on
@@ -319,18 +335,35 @@ run_ring_prepare_rejects_undersize_test() {
 	return TEST_SUCCESS;
 }
 
-// A length above the ring's capacity is rejected as oversize, including one
-// whose 4-byte alignment wraps u32 to a small value: the raw value is
-// checked before alignment.
+// A length above the batch limit (the capacity minus the eviction chunk)
+// is rejected as oversize, including one whose 4-byte alignment wraps u32
+// to a small value: the raw value is checked before alignment.
 static int
 run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
-	const uint32_t ring_size = 32;
+	const uint32_t ring_size = 64;
 	uint8_t *data;
 	struct ring_worker ring = init_test_ring(ring_size, &data);
 	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+	uint32_t batch_max = ring_worker_batch_max(&ring);
+	TEST_ASSERT_EQUAL(
+		(long)batch_max,
+		(long)(ring_size - ring_size / RING_EVICT_CHUNK_SHARE),
+		"a small ring's batch limit must leave one chunk free"
+	);
+	TEST_ASSERT_EQUAL(
+		ring_worker_prepare(&ring, data, batch_max),
+		0,
+		"a record of exactly the batch limit must be accepted"
+	);
 
 	uint32_t oversize_values[] = {
-		ring_size + 1, ring_size + 4, 0xFFFFFFFD, 0xFFFFFFFE, 0xFFFFFFFF
+		batch_max + 1,
+		ring_size,
+		ring_size + 1,
+		ring_size + 4,
+		0xFFFFFFFD,
+		0xFFFFFFFE,
+		0xFFFFFFFF
 	};
 	for (size_t i = 0;
 	     i < sizeof(oversize_values) / sizeof(oversize_values[0]);
@@ -364,6 +397,261 @@ run_ring_prepare_rejects_oversize_alignment_wraparound_test() {
 			0L,
 			"total_len %u must not touch next_seqno",
 			total_len
+		);
+	}
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// A committed record stays invisible to readers until the batch is
+// published, one publication covers the whole batch, and sequence numbers
+// run on across publications without a gap.
+static int
+run_ring_publish_makes_batch_visible_test() {
+	const uint32_t ring_size = 256;
+	const uint32_t record_len = 16;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	uint32_t first_seqno = ring.local.next_seqno;
+	for (uint8_t i = 0; i < 3; ++i) {
+		commit_fixed_record(&ring, data, i, record_len);
+		TEST_ASSERT_EQUAL(
+			(long)atomic_load(&ring.published.write_idx),
+			0L,
+			"commit %u must not publish the write position",
+			i
+		);
+	}
+	ring_worker_publish(&ring);
+	TEST_ASSERT_EQUAL(
+		published_write(&ring),
+		(long)(3 * record_len),
+		"one publication must cover the whole batch"
+	);
+
+	commit_fixed_record(&ring, data, 3, record_len);
+	TEST_ASSERT_EQUAL(
+		(long)atomic_load(&ring.published.write_idx),
+		(long)(3 * record_len),
+		"the next batch must stay invisible until published"
+	);
+	ring_worker_publish(&ring);
+	TEST_ASSERT_EQUAL(
+		published_write(&ring),
+		(long)(4 * record_len),
+		"the second publication must cover the second batch"
+	);
+
+	// Frames in the ring carry contiguous sequence numbers across both
+	// batches.
+	for (uint32_t i = 0; i < 4; ++i) {
+		struct ring_record_frame frame;
+		memcpy(&frame, data + i * record_len, sizeof(frame));
+		TEST_ASSERT_EQUAL(
+			(long)frame.seqno,
+			(long)(first_seqno + i),
+			"record %u must carry the next sequence number",
+			i
+		);
+	}
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// A publication with nothing committed since the last one leaves the
+// published line untouched, so an idle producer never stores to it.
+static int
+run_ring_publish_without_commit_is_noop_test() {
+	const uint32_t ring_size = 64;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	write_fixed_record(&ring, data, 0xD0, 16);
+
+	// A sentinel no publication would store reveals any store.
+	const uint64_t sentinel = 0xDEAD;
+	atomic_store(&ring.published.write_idx, sentinel);
+	ring_worker_publish(&ring);
+	TEST_ASSERT_EQUAL(
+		(long)atomic_load(&ring.published.write_idx),
+		(long)sentinel,
+		"a publication with nothing new must not store"
+	);
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// The batch room shrinks by each committed record's aligned length and is
+// restored by a publication.
+static int
+run_ring_batch_room_tracks_unpublished_bytes_test() {
+	const uint32_t ring_size = 1024;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+
+	uint64_t room = ring_worker_batch_room(&ring);
+	TEST_ASSERT_EQUAL(
+		(long)room,
+		(long)ring_worker_batch_max(&ring),
+		"an empty batch must have the whole limit as room"
+	);
+	commit_fixed_record(&ring, data, 0xE0, 13);
+	TEST_ASSERT_EQUAL(
+		(long)ring_worker_batch_room(&ring),
+		(long)(room - ring_align4(13)),
+		"a commit must take its aligned length from the room"
+	);
+	ring_worker_publish(&ring);
+	TEST_ASSERT_EQUAL(
+		(long)ring_worker_batch_room(&ring),
+		(long)room,
+		"a publication must restore the whole room"
+	);
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// Overflow evicts a whole chunk of the oldest published records at once,
+// landing on the first record boundary a chunk past the readable position,
+// and the records that fit in the freed space then write without moving
+// the readable position.
+static int
+run_ring_eviction_frees_whole_chunk_test() {
+	const uint32_t ring_size = 4096;
+	const uint32_t record_len = 24;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+	uint32_t chunk = ring.local.evict_chunk;
+	TEST_ASSERT_EQUAL(
+		(long)chunk,
+		(long)(ring_size / RING_EVICT_CHUNK_SHARE),
+		"a 4 KiB ring must evict a sixteenth of itself at once"
+	);
+
+	// Fill the ring as far as whole records go, without evicting.
+	uint32_t fill = ring_size / record_len;
+	for (uint32_t i = 0; i < fill; ++i) {
+		write_fixed_record(&ring, data, (uint8_t)i, record_len);
+	}
+	TEST_ASSERT_EQUAL(
+		published_readable(&ring), 0L, "a full ring must not evict yet"
+	);
+
+	// The first record that does not fit evicts up to the first record
+	// boundary a whole chunk past the readable position, which also
+	// leaves at least a chunk free.
+	uint64_t free_before = ring_size - ring.local.write_idx;
+	write_fixed_record(&ring, data, 0xF0, record_len);
+	uint64_t expected = (chunk + record_len - 1) / record_len * record_len;
+	TEST_ASSERT_EQUAL(
+		published_readable(&ring),
+		(long)expected,
+		"eviction must stop on the first boundary a chunk ahead"
+	);
+
+	// The freed chunk takes further records with no eviction until it is
+	// used up.
+	uint32_t spare = (uint32_t)((expected + free_before) / record_len) - 1;
+	for (uint32_t i = 0; i < spare; ++i) {
+		write_fixed_record(&ring, data, 0xF1, record_len);
+		TEST_ASSERT_EQUAL(
+			published_readable(&ring),
+			(long)expected,
+			"record %u of the freed chunk must not evict",
+			i
+		);
+	}
+	write_fixed_record(&ring, data, 0xF2, record_len);
+	long free_before_record =
+		ring_size -
+		(published_write(&ring) - published_readable(&ring)) +
+		record_len;
+	TEST_ASSERT(
+		published_readable(&ring) > (long)expected &&
+			free_before_record >= (long)chunk,
+		"the next overflow must free another whole chunk"
+	);
+
+	free(data);
+	return TEST_SUCCESS;
+}
+
+// An unpublished batch within the batch limit evicts only published
+// records: every eviction advances by at least a chunk unless it reaches
+// the batch, lands on a record boundary, and never passes the batch start.
+static int
+run_ring_eviction_spares_unpublished_batch_test() {
+	const uint32_t ring_size = 1024;
+	const uint32_t record_len = 16;
+	uint8_t *data;
+	struct ring_worker ring = init_test_ring(ring_size, &data);
+	TEST_ASSERT_NOT_NULL(data, "failed to allocate ring data");
+	uint32_t chunk = ring.local.evict_chunk;
+
+	for (uint32_t i = 0; i < ring_size / record_len; ++i) {
+		write_fixed_record(&ring, data, (uint8_t)i, record_len);
+	}
+	uint64_t batch_start = ring.local.write_idx;
+	uint32_t first_seqno = ring.local.next_seqno;
+
+	// The largest batch the limit allows, committed without publishing.
+	uint32_t batch = ring_worker_batch_max(&ring) / record_len;
+	long readable = published_readable(&ring);
+	for (uint32_t i = 0; i < batch; ++i) {
+		commit_fixed_record(&ring, data, 0xB0, record_len);
+		long next = published_readable(&ring);
+		TEST_ASSERT(
+			next <= (long)batch_start,
+			"record %u of the batch must not evict the batch "
+			"itself",
+			i
+		);
+		TEST_ASSERT_EQUAL(
+			next % record_len,
+			0L,
+			"record %u: eviction must land on a record boundary",
+			i
+		);
+		// The space free before this record's commit.
+		long free_space = (long)ring_size -
+				  (long)(ring.local.write_idx - next) +
+				  record_len;
+		if (next != readable) {
+			TEST_ASSERT(
+				free_space >= (long)chunk ||
+					next == (long)batch_start,
+				"record %u: an eviction must free a whole "
+				"chunk",
+				i
+			);
+		}
+		readable = next;
+	}
+	TEST_ASSERT_EQUAL(
+		(long)atomic_load(&ring.published.write_idx),
+		(long)batch_start,
+		"the batch must stay unpublished while it evicts"
+	);
+
+	// Every record of the batch keeps its frame, numbered without a gap.
+	for (uint32_t i = 0; i < batch; ++i) {
+		struct ring_record_frame frame;
+		uint64_t pos = (batch_start + i * record_len) & ring.local.mask;
+		memcpy(&frame, data + pos, sizeof(frame));
+		TEST_ASSERT_EQUAL(
+			(long)frame.seqno,
+			(long)(first_seqno + i),
+			"batch record %u must survive with its sequence number",
+			i
 		);
 	}
 
@@ -471,6 +759,16 @@ main(void) {
 		 run_ring_prepare_rejects_undersize_test},
 		{"prepare_rejects_oversize_alignment_wraparound",
 		 run_ring_prepare_rejects_oversize_alignment_wraparound_test},
+		{"publish_makes_batch_visible",
+		 run_ring_publish_makes_batch_visible_test},
+		{"publish_without_commit_is_noop",
+		 run_ring_publish_without_commit_is_noop_test},
+		{"batch_room_tracks_unpublished_bytes",
+		 run_ring_batch_room_tracks_unpublished_bytes_test},
+		{"eviction_frees_whole_chunk",
+		 run_ring_eviction_frees_whole_chunk_test},
+		{"eviction_spares_unpublished_batch",
+		 run_ring_eviction_spares_unpublished_batch_test},
 		{"seqno_wrap", run_ring_seqno_wrap_test},
 		{"multi_worker_isolation", run_ring_multi_worker_isolation_test
 		},

@@ -166,12 +166,13 @@ func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 }
 
 // OpenReaders opens one independent reader per worker's ring, each starting
-// at that ring's current oldest readable record. The slice is indexed by
-// worker, and every record a reader returns carries its worker index.
+// at that ring's current oldest readable record and configured by the given
+// options. The slice is indexed by worker, and every record a reader
+// returns carries its worker index.
 //
 // Calling it again opens another set of readers; each keeps its own read
 // cursor and does not affect the others.
-func (m *Object) OpenReaders() ([]*Reader, error) {
+func (m *Object) OpenReaders(opts ...ReaderOption) ([]*Reader, error) {
 	sources, err := m.Sources()
 	if err != nil {
 		return nil, err
@@ -180,7 +181,7 @@ func (m *Object) OpenReaders() ([]*Reader, error) {
 	capacity := m.Capacity()
 	readers := make([]*Reader, 0, len(sources))
 	for idx, src := range sources {
-		reader, err := NewReader(uint16(idx), capacity, src)
+		reader, err := NewReader(uint16(idx), capacity, src, opts...)
 		if err != nil {
 			return nil, err
 		}

@@ -2,13 +2,15 @@
 # One-shot hardware check of the ring writer's eviction fence.
 #
 # Builds the tree, runs the ring unit tests, checks in the generated code
-# that an eviction is one release store plus a fence (which the test-only
-# knob removes) and that the Go reader uses acquire/release atomics,
-# stress-tests the Go reader against a full-speed C writer with and without
-# the fence, and benchmarks both writers alone, with a full or index-only
-# concurrent reader per worker, unpaced and paced to fixed record rates, and
-# the Go reader. Everything is logged to
-# arm64-check-<host>-<date>.txt in the repository root. See ARM64_CHECK.md.
+# that an eviction chunk is one release store plus a fence (which the
+# test-only knob removes), that a batch is published with one release store
+# and that the Go reader uses acquire/release atomics, stress-tests the Go
+# reader against a full-speed batching C writer with and without the fence,
+# and benchmarks both writers alone, with a full or index-only concurrent
+# reader per worker, unpaced and paced to fixed record rates, across
+# publication batches and reader distances, and the Go reader. Everything is
+# logged to arm64-check-<host>-<date>.txt in the repository root. See
+# ARM64_CHECK.md.
 
 set -euo pipefail
 
@@ -16,7 +18,7 @@ usage() {
 	cat <<'EOF'
 Usage: objects/ring/tests/arm64-check.sh [--quick]
 
-  --quick   short run (about 4 minutes after the build) instead of the
+  --quick   short run (about 5 minutes after the build) instead of the
             default one (about 12-18 minutes after the build)
 
 Environment overrides:
@@ -24,6 +26,7 @@ Environment overrides:
   RING_CHECK_RECORDS         records per stress run (skips calibration)
   RING_CHECK_REPS            stress repetitions per build and capacity
   RING_CHECK_CAPACITIES      space-separated ring capacities to stress
+  RING_CHECK_STRESS_BATCH    records per publication of the stress writer
   RING_CHECK_BENCH_REPS      benchmark repetitions per build
   RING_CHECK_BENCH_CPUS      benchmark CPUs as w0,r0[,w1,r1]: the writer and
                              reader CPU of worker 0, then of worker 1
@@ -63,7 +66,7 @@ if ((QUICK)); then
 	STRESS_SECONDS=${RING_CHECK_STRESS_SECONDS:-20}
 	REPS=${RING_CHECK_REPS:-1}
 	CAPACITIES=${RING_CHECK_CAPACITIES:-"4096 65536"}
-	BENCH_REPS=${RING_CHECK_BENCH_REPS:-3}
+	BENCH_REPS=${RING_CHECK_BENCH_REPS:-2}
 	GOBENCH_TIME=${RING_CHECK_GOBENCH_TIME:-0.5s}
 else
 	STRESS_SECONDS=${RING_CHECK_STRESS_SECONDS:-30}
@@ -72,6 +75,7 @@ else
 	BENCH_REPS=${RING_CHECK_BENCH_REPS:-5}
 	GOBENCH_TIME=${RING_CHECK_GOBENCH_TIME:-1s}
 fi
+STRESS_BATCH=${RING_CHECK_STRESS_BATCH:-8}
 
 exec > >(tee "$REPORT") 2>&1
 TEE_PID=$!
@@ -458,16 +462,82 @@ check_writer() {
 		fi
 	done
 }
-check_writer cring '^(ring_stress_run|ring_worker_prepare)' \
+check_writer cring '^(ring_stress_run|ring_worker_prepare|ring_worker_evict)' \
 	"$WORK/cring-fence.test" "$WORK/cring-nofence.test"
-check_writer bench '^(new_bench_thread|new_write_record|ring_worker_prepare)' \
+check_writer bench '^(new_bench_thread|new_write_record|ring_worker_prepare|ring_worker_evict)' \
 	"$WORK/ring_bench-fence" "$WORK/ring_bench-nofence"
+
+# A producer call committing a batch and publishing it once: on aarch64 it
+# must hold exactly two release stores, the batch's publication of the
+# write position and the eviction chunk's store of the readable position,
+# and exactly one fence, right after the latter.
+cat >"$WORK/batch-probe.c" <<'EOF'
+#include "common/ring.h"
+
+void
+ring_check_produce_batch(
+	struct ring_worker *ring,
+	uint8_t *data,
+	const uint8_t *payload,
+	uint32_t payload_len,
+	uint32_t count
+) {
+	uint32_t total_len = RING_RECORD_FRAME_SIZE + payload_len;
+	for (uint32_t i = 0; i < count; ++i) {
+		if (ring_worker_prepare(ring, data, total_len) != 0) {
+			break;
+		}
+		ring_worker_write(
+			ring, data, RING_RECORD_FRAME_SIZE, payload, payload_len
+		);
+		ring_worker_commit(ring, data, total_len);
+	}
+	ring_worker_publish(ring);
+}
+EOF
+{
+	printf '\nBatch probe (one producer call, whole object):\n'
+	printf '%-8s %s\n' build profile
+} >>"$WORK/codegen.txt"
+# The bench flags minus its source file compile the probe.
+probe_args=()
+for arg in "${BENCH_ARGS[@]}"; do
+	[[ $arg == *ring_bench.c ]] && continue
+	probe_args+=("$arg")
+done
+for variant in fence nofence; do
+	extra=()
+	[[ $variant == nofence ]] && extra=("$NOFENCE_DEFINE")
+	obj="$ROOT/$WORK/batch-probe-$variant.o"
+	if ! (cd "$BENCH_DIR" && "${probe_args[@]}" "${extra[@]}" -c "$ROOT/$WORK/batch-probe.c" -o "$obj"); then
+		codegen_fail+=("batch probe ($variant): build failed")
+		continue
+	fi
+	objdump -d --no-show-raw-insn "$obj" >"$WORK/batch-probe-$variant.asm"
+	profile=$(writer_profile "$WORK/batch-probe-$variant.asm")
+	stlr=$(grep -cE '[[:space:]]stlr[[:space:]]' "$WORK/batch-probe-$variant.asm" || true)
+	printf '%-8s %s stlr=%s\n' "$variant" "$profile" "$stlr" >>"$WORK/codegen.txt"
+	echo "--- batch probe ($variant): $profile stlr=$stlr"
+	grep -E -B3 -A2 '[[:space:]](dmb|stlr)[[:space:]]' "$WORK/batch-probe-$variant.asm" | head -40 || true
+	((IS_ARM64)) || continue
+	if ((stlr != 2)); then
+		codegen_fail+=("batch probe ($variant): $stlr stlr, expected one publication and one eviction store")
+	fi
+	if [[ $variant == fence ]]; then
+		if [[ $(field "$profile" fences) != 1 || $(field "$profile" after_stlr) != 1 ]]; then
+			codegen_fail+=("batch probe (fence): expected exactly one fence, right after the eviction stlr: $profile")
+		fi
+	elif [[ $(field "$profile" dmb) != 0 ]]; then
+		codegen_fail+=("batch probe (nofence): dmb left: $profile")
+	fi
+done
 
 # The Go reader: the index snapshot and recheck load through the shared
 # memory source, and the cursor add between the copy and the recheck.
 # Bracket expressions, not backslashes: awk -v would eat the escapes.
 READER_PKG='github[.]com/yanet-platform/yanet2/objects/ring/bindings/go/cring'
-READ_FUNC="^${READER_PKG}[.][(][*]Reader[)][.]Read\$"
+# Read and Drain share the unexported read, which holds the protocol.
+READ_FUNC="^${READER_PKG}[.][(][*]Reader[)][.]read\$"
 INDICES_FUNC="^${READER_PKG}[.][(][*]shmSource[)][.]Indices\$"
 disasm_funcs "$WORK/cring-fence.test" "$READ_FUNC" >"$WORK/reader-read.asm"
 disasm_funcs "$WORK/cring-fence.test" "$INDICES_FUNC" >"$WORK/reader-indices.asm"
@@ -484,7 +554,7 @@ count_ops() {
 	' "$1"
 }
 if [[ ! -s $WORK/reader-read.asm || ! -s $WORK/reader-indices.asm ]]; then
-	codegen_fail+=("reader: (*Reader).Read or (*shmSource).Indices not found in the cring test binary")
+	codegen_fail+=("reader: (*Reader).read or (*shmSource).Indices not found in the cring test binary")
 else
 	ldar=$(count_ops "$WORK/reader-indices.asm" '^ldar$')
 	ldaddal=$(count_ops "$WORK/reader-read.asm" '^ldaddal$')
@@ -494,10 +564,10 @@ else
 	{
 		printf '\nGo reader (cring fence build):\n'
 		printf '(*shmSource).Indices  ldar=%s\n' "$ldar"
-		printf '(*Reader).Read        ldaddal=%s ldaxr=%s stlxr=%s lock_xadd=%s\n' \
+		printf '(*Reader).read        ldaddal=%s ldaxr=%s stlxr=%s lock_xadd=%s\n' \
 			"$ldaddal" "$ldaxr" "$stlxr" "$xadd"
 	} >>"$WORK/codegen.txt"
-	echo "--- reader: atomics in (*Reader).Read and (*shmSource).Indices:"
+	echo "--- reader: atomics in (*Reader).read and (*shmSource).Indices:"
 	grep -hE '[[:space:]](ldar|ldaddal|ldaxr|stlxr|stlr|xadd|lock)[[:space:]]' \
 		"$WORK/reader-indices.asm" "$WORK/reader-read.asm" | head -20 || true
 	if ((IS_ARM64)); then
@@ -505,7 +575,7 @@ else
 			codegen_fail+=("reader: (*shmSource).Indices has $ldar ldar, expected acquire loads of both indices")
 		fi
 		if ((ldaddal == 0)) && ((ldaxr == 0 || stlxr == 0)); then
-			codegen_fail+=("reader: (*Reader).Read has no ldaddal or ldaxr/stlxr pair for the cursor add")
+			codegen_fail+=("reader: (*Reader).read has no ldaddal or ldaxr/stlxr pair for the cursor add")
 		fi
 	fi
 fi
@@ -514,7 +584,7 @@ cat "$WORK/codegen.txt"
 if ((${#codegen_fail[@]})); then
 	set_status codegen FAIL "$(printf '%s; ' "${codegen_fail[@]}")"
 elif ((IS_ARM64)); then
-	set_status codegen PASS "writer: stlr then one fence per eviction, no ldadd, knob drops the fence; reader: ldar + ldaddal/ldaxr-stlxr"
+	set_status codegen PASS "writer: stlr then one fence per eviction chunk, one stlr per batch, no ldadd, knob drops the fence; reader: ldar + ldaddal/ldaxr-stlxr"
 else
 	set_status codegen INFO "not aarch64: profiles reported only (x86-64 emits no fence)"
 fi
@@ -525,7 +595,7 @@ header "STRESS"
 GOMAXPROCS=${GOMAXPROCS:-$(nproc)}
 ((GOMAXPROCS < 2)) && GOMAXPROCS=2
 export GOMAXPROCS
-echo "GOMAXPROCS=$GOMAXPROCS; the writer runs on its own pthread, unpinned"
+echo "GOMAXPROCS=$GOMAXPROCS; the writer runs on its own pthread, unpinned, publishing every $STRESS_BATCH records; the reader keeps the default distance"
 
 STRESS_TSV="$WORK/stress.tsv"
 : >"$STRESS_TSV"
@@ -539,7 +609,7 @@ run_stress() {
 	local timeout=$((STRESS_SECONDS * 20 + 300))
 	local t0 t1 rc=0
 	t0=$(date +%s.%N)
-	(cd "$CRING_DIR" && RING_STRESS_RECORDS=$records RING_STRESS_CAPACITY=$capacity \
+	(cd "$CRING_DIR" && RING_STRESS_RECORDS=$records RING_STRESS_CAPACITY=$capacity RING_STRESS_BATCH=$STRESS_BATCH \
 		"$ROOT/$WORK/cring-$variant.test" -test.run "$STRESS_TEST" -test.v -test.count=1 \
 		-test.timeout "${timeout}s") >"$out" 2>&1 || rc=$?
 	t1=$(date +%s.%N)
@@ -660,8 +730,9 @@ echo "ring_bench CPUs (w0,r0[,w1,r1]): $BENCH_CPUS; $BENCH_REPS runs per build, 
 
 # Each run appends its cells' values as tab-separated rows: ring, size,
 # workers, rate, reader, side, writer ns/record, writer Mrec/s, reader
-# Mrec/s, lost %, backlog records, bad records, paced records per burst and
-# paced cost resolution in ns (1 and 0 unpaced).
+# Mrec/s, lost %, backlog records, bad records, paced records per burst,
+# paced cost resolution in ns (1 and 0 unpaced), records per publication
+# and reader distance in bytes.
 BENCH_TSV="$WORK/bench.tsv"
 : >"$BENCH_TSV"
 bench_fail=()
@@ -687,136 +758,161 @@ import statistics, sys
 from collections import defaultdict
 
 METRICS = ["writer_ns", "writer_mrps", "reader_mrps", "lost", "backlog", "bad"]
-MODES = ["none", "full", "index-only"]
 PACED_RATE_MET = 0.95
 # A paced fence change is reported only over a base of at least this many
 # resolution steps (one timer tick over the burst size).
 FENCE_MIN_STEPS = 4
 
+# Rows are (ring, size, workers, rate, reader); columns are (side, batch,
+# distance) configurations.
 vals = defaultdict(list)
-burst = {}
 resolution = {}
+rows = []
+configs = set()
 for line in open(sys.argv[1]):
     f = line.rstrip("\n").split("\t")
-    variant, ring, size, workers, rate, reader, side = (
-        f[0], f[2], int(f[3]), int(f[4]), float(f[5]), f[6], f[7])
-    for name, val in zip(METRICS, f[8:]):
-        vals[(ring, size, workers, rate, reader, side, variant, name)].append(float(val))
-    cell = (ring, size, workers, rate, reader)
-    burst[cell] = int(f[14])
-    resolution[cell] = max(resolution.get(cell, 0.0), float(f[15]))
+    variant = f[0]
+    row = (f[2], int(f[3]), int(f[4]), float(f[5]), f[6])
+    config = (f[7], int(f[16]), int(f[17]))
+    for name, val in zip(METRICS, f[8:14]):
+        vals[(row, config, variant, name)].append(float(val))
+    resolution[(row, config)] = max(resolution.get((row, config), 0.0), float(f[15]))
+    if row not in rows:
+        rows.append(row)
+    configs.add(config)
 
-def keys(pred):
-    seen = []
-    for k in vals:
-        cell = k[:5]
-        if pred(*cell) and cell not in seen:
-            seen.append(cell)
-    return seen
+batches = sorted({c[1] for c in configs if c[0] == "new"})
+distances = sorted({c[2] for c in configs if c[0] == "new"})
+OLD = ("old", 1, 0)
+NO_READER = [OLD] + [("new", b, 0) for b in batches]
+WITH_READER = [OLD] + [("new", b, d) for b in batches for d in distances]
+LEGEND = ("old = pdump writer and reader; bN = ring writer publishing every N records;\n"
+          "dX = ring reader staying X bytes behind the published position (0 = up to it).")
 
-def med(cell, side, variant, name):
-    xs = vals.get(cell + (side, variant, name))
+def label(config, columns):
+    if config[0] == "old":
+        return "old"
+    if columns is WITH_READER or columns == WITH_READER[1:]:
+        return f"b{config[1]} d{config[2]}"
+    return f"b{config[1]}"
+
+def med(row, config, variant, name):
+    xs = vals.get((row, config, variant, name))
     return statistics.median(xs) if xs else float("nan")
-
-def total(cell, side, variant, name):
-    return int(sum(vals.get(cell + (side, variant, name), [])))
 
 def pct(a, b):
     return (a - b) / b * 100 if b else float("nan")
 
-def cost(cell, side, variant="fence"):
-    ns = med(cell, side, variant, "writer_ns")
-    if ns != ns:
-        return f"{'-':>10} "
-    rate = cell[3]
-    missed = rate > 0 and med(cell, side, variant, "writer_mrps") < rate * PACED_RATE_MET
-    res = resolution.get(cell, 0.0)
-    val = f"<{res:.1f}" if rate > 0 and ns <= res else f"{ns:.1f}"
-    return f"{val:>10}{'*' if missed else ' '}"
+def metric_cell(variant, metric):
+    def render(row, config):
+        v = med(row, config, variant, metric)
+        if v != v:
+            return f"{'-':>9} "
+        if metric == "writer_ns":
+            rate = row[3]
+            missed = rate > 0 and med(row, config, variant, "writer_mrps") < rate * PACED_RATE_MET
+            res = resolution.get((row, config), 0.0)
+            txt = f"<{res:.1f}" if rate > 0 and v <= res else f"{v:.1f}"
+            return f"{txt:>9}{'*' if missed else ' '}"
+        if metric == "reader_mrps":
+            return f"{v:>9.2f} "
+        return f"{v:>9.1f} "
+    return render
 
-def fence_pct(cell):
-    f_, nf = med(cell, "new", "fence", "writer_ns"), med(cell, "new", "nofence", "writer_ns")
-    res = resolution.get(cell, 0.0)
-    if cell[3] > 0 and not nf >= FENCE_MIN_STEPS * res:
-        return f"{'n/r':>10}"
-    return f"{pct(f_, nf):+10.1f}"
+def fence_cell(row, config):
+    f_, nf = med(row, config, "fence", "writer_ns"), med(row, config, "nofence", "writer_ns")
+    if f_ != f_ or nf != nf:
+        return f"{'-':>9} "
+    res = resolution.get((row, config), 0.0)
+    if row[3] > 0 and not nf >= FENCE_MIN_STEPS * res:
+        return f"{'n/r':>9} "
+    return f"{pct(f_, nf):>+9.1f} "
 
-print("Writer cost, ns/record (lower is better) - unpaced, no reader")
-print(f"{'':<29}|{'old writer, ns/rec':^19}|{'new writer, ns/rec':^19}|{'change, %':^26}")
-print(f"{'size, B':>7}  {'ring':<11}  {'workers':>7}|{'fence':>9}{'no-fence':>9} |"
-      f"{'fence':>9}{'no-fence':>9} |{'fence':>8}{'new vs old':>11}{'noise':>7}")
-for cell in keys(lambda ring, size, w, rate, reader: rate == 0 and reader == "none"):
-    of, onf = med(cell, "old", "fence", "writer_ns"), med(cell, "old", "nofence", "writer_ns")
-    nf_, nnf = med(cell, "new", "fence", "writer_ns"), med(cell, "new", "nofence", "writer_ns")
-    print(f"{cell[1]:>7}  {cell[0]:<11}  {cell[2]:>7}|{of:9.2f}{onf:9.2f} |{nf_:9.2f}{nnf:9.2f} |"
-          f"{pct(nf_, nnf):+8.1f}{pct(nf_, of):+11.1f}{pct(of, onf):+7.1f}")
-print("fence = the new writer's fence build against its no-fence build; new vs old =")
-print("new against old, fence build; noise = old against old across builds, the same")
-print("code, so a fence change smaller than it is not measurable. ring: no-overflow =")
-print("indices reset before the ring fills; overflow = 64 KiB ring evicting on every")
-print("write; 1m-ring = 1 MiB ring evicting once full, the ring of the rows below.")
-
-def by_reader(title, key_header, cells, row_key):
+def table(title, key, keyfmt, pred, columns, render):
     print()
     print(title)
-    print(f"{'':<{len(key_header)}}|{'old writer, ns/record':^36}|{'new writer, ns/record':^36}|{'new + full reader':^23}")
-    print(f"{key_header}|{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
-          f"{'no reader':>11}{'full reader':>13}{'index-only':>12}|"
-          f"{'no-fence, ns':>13}{'fence, %':>10}")
-    for base in cells:
-        line = row_key(base) + "|"
-        for side in ("old", "new"):
-            for mode, width in zip(MODES, (11, 13, 12)):
-                line += f"{cost(base[:4] + (mode,), side):>{width}}"
-            line += "|"
-        full = base[:4] + ("full",)
-        line += f"{cost(full, 'new', 'nofence'):>13}{fence_pct(full)}"
-        print(line)
+    print(f"{key} |" + "".join(f"{label(c, columns):>9} " for c in columns))
+    for row in rows:
+        if pred(*row):
+            print(keyfmt(row) + " |" + "".join(render(row, c) for c in columns))
 
-unpaced = keys(lambda ring, size, w, rate, reader: ring == "1m-ring" and rate == 0 and reader == "full")
-if unpaced:
-    by_reader("Writer cost, ns/record (lower is better) - unpaced, 1 MiB ring, by reader per writer, fence build",
-              f"{'size, B   workers':<21}", unpaced, lambda c: f"{c[1]:>7}   {c[2]:>7}    ")
-    print("full reader = copy-then-recheck reader copying and parsing every record; index-only =")
-    print("the same index loads and cursor atomics, never touching the data area; fence, % =")
-    print("new writer with a full reader, fence build against no-fence build.")
+def alone_key(r):
+    return f"{r[1]:>7}  {r[0]:<11}  {r[2]:>7}"
 
-paced = keys(lambda ring, size, w, rate, reader: rate > 0 and reader == "none")
-if paced:
-    tick = resolution[paced[0]] * burst[paced[0]]
-    by_reader("Writer cost, ns/record (lower is better) - paced, 1 MiB ring, 1 worker, fence build; "
-              f"timer {tick:.3f} ns/tick",
-              "size, B  rate, Mrec/s  burst, rec", paced,
-              lambda c: f"{c[1]:>7}  {c[3]:>12g}  {burst[c]:>10}")
-    print("rate = target records/s per writer, in millions; burst = records written back to back")
-    print("and timed together, bursts spaced at the target rate; cost = time inside a burst over")
-    print("its records, timer overhead subtracted, pacing wait excluded; <x = at or below the")
-    print("timer's resolution of one tick per burst; * = the writer reached below "
-          f"{PACED_RATE_MET:.0%} of the")
-    print(f"target rate (bursts ran back to back); fence, % = n/r below {FENCE_MIN_STEPS} resolution steps.")
+def reader_key(r):
+    return f"{r[1]:>7}  {r[2]:>7}  {r[4]:<10}"
 
-readers = keys(lambda ring, size, w, rate, reader: reader == "full")
-readers.sort(key=lambda c: (c[3] > 0, c[1], c[3], c[2]))
-if readers:
-    print()
-    print("Reader throughput, Mrec/s, and loss, % - full reader, 1 MiB ring")
-    print(f"{'':<25}|{'writer, Mrec/s':^14}|{'reader, Mrec/s':^21}|{'lost, %':^21}|{'bad records':^20}")
-    print(f"{'size, B':>7}  {'workers':>7}  {'rate':<7}|{'old':>7}{'new':>7}|{'old':>7}{'new':>7}{'new nf':>7}|"
-          f"{'old':>7}{'new':>7}{'new nf':>7}|{'old':>6}{'new':>6}{'new nf':>8}")
-    for c in readers:
-        rate = "unpaced" if c[3] == 0 else f"{c[3]:g}"
-        print(f"{c[1]:>7}  {c[2]:>7}  {rate:<7}|"
-              f"{med(c, 'old', 'fence', 'writer_mrps'):7.2f}{med(c, 'new', 'fence', 'writer_mrps'):7.2f}|"
-              f"{med(c, 'old', 'fence', 'reader_mrps'):7.2f}{med(c, 'new', 'fence', 'reader_mrps'):7.2f}"
-              f"{med(c, 'new', 'nofence', 'reader_mrps'):7.2f}|"
-              f"{med(c, 'old', 'fence', 'lost'):7.1f}{med(c, 'new', 'fence', 'lost'):7.1f}"
-              f"{med(c, 'new', 'nofence', 'lost'):7.1f}|"
-              f"{total(c, 'old', 'fence', 'bad') + total(c, 'old', 'nofence', 'bad'):6d}"
-              f"{total(c, 'new', 'fence', 'bad'):6d}{total(c, 'new', 'nofence', 'bad'):8d}")
-    print("Fence build unless marked nf (no-fence build). rate = target writer rate, Mrec/s;")
-    print("writer = rate achieved; lost = committed records the reader never returned;")
-    print("bad = returned records with a wrong length, magic or sequence order, summed over")
-    print("runs: must be 0 for new in the fence build; old sums both builds (no fence in either).")
+def paced_key(r):
+    return f"{r[1]:>7}  {r[3]:>12g}  {r[4]:<10}"
+
+def rate_key(r):
+    rate = "unpaced" if r[3] == 0 else f"{r[3]:g}"
+    return f"{r[1]:>7}  {r[2]:>7}  {rate:>12}"
+
+ALONE = "size, B  ring         workers"
+READER = "size, B  workers  reader    "
+PACED = "size, B  rate, Mrec/s  reader    "
+RATE = "size, B  workers  rate, Mrec/s"
+
+table("Writer cost, ns/record (lower is better) - unpaced, no reader, fence build",
+      ALONE, alone_key, lambda ring, size, w, rate, reader: rate == 0 and reader == "none",
+      NO_READER, metric_cell("fence", "writer_ns"))
+print("old = pdump writer; bN = ring writer publishing every N records. ring: no-overflow =")
+print("indices reset before the ring fills; overflow = 64 KiB ring evicting once full;")
+print("1m-ring = 1 MiB ring evicting once full, the ring of every reader and paced row.")
+
+table("Fence cost, % of the no-fence build's writer cost - unpaced, no reader",
+      ALONE, alone_key,
+      lambda ring, size, w, rate, reader: rate == 0 and reader == "none" and ring != "no-overflow",
+      NO_READER[1:], fence_cell)
+print("Ring writer, fence build against no-fence build (the old writer has no fence).")
+
+table("Writer cost, ns/record (lower is better) - unpaced, 1 MiB ring, a reader per writer, fence build",
+      READER, reader_key, lambda ring, size, w, rate, reader: rate == 0 and reader != "none",
+      WITH_READER, metric_cell("fence", "writer_ns"))
+print(LEGEND)
+print("full = copy-then-recheck reader copying and parsing every record; index-only = the")
+print("same index loads and cursor atomics, never touching the data area.")
+
+table("Fence cost, % of the no-fence build's writer cost - unpaced, 1 MiB ring, a reader per writer",
+      READER, reader_key, lambda ring, size, w, rate, reader: rate == 0 and reader != "none",
+      WITH_READER[1:], fence_cell)
+print(LEGEND)
+
+if any(r[3] > 0 for r in rows):
+    table("Writer cost, ns/record (lower is better) - paced, 1 MiB ring, 1 worker, fence build",
+          PACED, paced_key, lambda ring, size, w, rate, reader: rate > 0,
+          WITH_READER, metric_cell("fence", "writer_ns"))
+    print(LEGEND)
+    print("rate = target records/s per writer, in millions; records are written in bursts spaced")
+    print("at the target rate (whole batches for bN); cost = time inside a burst over its records,")
+    print("timer overhead subtracted, pacing wait excluded; <x = at or below the timer's resolution")
+    print(f"of one tick per burst; * = the writer reached below {PACED_RATE_MET:.0%} of the target rate.")
+
+    table("Fence cost, % of the no-fence build's writer cost - paced, 1 MiB ring, 1 worker",
+          PACED, paced_key, lambda ring, size, w, rate, reader: rate > 0,
+          WITH_READER[1:], fence_cell)
+    print(f"{LEGEND}\nn/r = the no-fence cost is below {FENCE_MIN_STEPS} timer resolution steps.")
+
+table("Reader throughput, Mrec/s (higher is better) - full reader, 1 MiB ring, fence build",
+      RATE, rate_key, lambda ring, size, w, rate, reader: reader == "full",
+      WITH_READER, metric_cell("fence", "reader_mrps"))
+print(LEGEND)
+
+table("Lost records, % (lower is better) - full reader, 1 MiB ring, fence build",
+      RATE, rate_key, lambda ring, size, w, rate, reader: reader == "full",
+      WITH_READER, metric_cell("fence", "lost"))
+print(LEGEND)
+print("lost = committed records the reader never returned, overwritten before it got there.")
+
+bad = defaultdict(int)
+for (row, config, variant, name), xs in vals.items():
+    if name == "bad":
+        bad[(config[0], variant)] += int(sum(xs))
+print()
+print("Bad records, all cells and runs (wrong length, magic or sequence order):")
+print(f"  new fence {bad[('new', 'fence')]} (must be 0), new no-fence {bad[('new', 'nofence')]}, "
+      f"old {bad[('old', 'fence')] + bad[('old', 'nofence')]} (no fence in either build)")
 EOF
 cat "$WORK/bench-summary.txt"
 

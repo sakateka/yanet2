@@ -120,7 +120,8 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	require.NoError(t, err)
 	reader, err := cring.NewReader(0, writer.Capacity(), src)
 	require.NoError(t, err)
-	records := reader.Read(1024)
+	// The writer is idle, so the reader drains past its distance.
+	records := reader.Drain(1024)
 	require.Len(t, records, 1)
 	require.Equal(t, seqno, records[0].Seqno)
 	require.Equal(t, payload, records[0].Bytes)

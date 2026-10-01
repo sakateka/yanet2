@@ -106,7 +106,7 @@ func (m *Writer) SetIndices(write, readable uint64) {
 }
 
 // WriteIdx returns the writer's own write position: the logical offset the
-// next committed record will start at.
+// next committed record will start at, published or not.
 func (m *Writer) WriteIdx() uint64 {
 	return uint64(m.worker.local.write_idx)
 }
@@ -124,12 +124,28 @@ func (m *Writer) CorruptTotalLen(logicalOffset uint64, totalLen uint32) {
 	}
 }
 
-// WriteRecord prepares, writes and commits one opaque record in a single
-// call, returning the seqno it was stamped with.
+// WriteRecord commits one opaque record and publishes it in a single call,
+// returning the seqno it was stamped with.
 //
 // Reports an error without writing anything when the record does not fit
 // the ring, matching the C writer's contract.
 func (m *Writer) WriteRecord(payload []byte) (uint32, error) {
+	seqno, err := m.CommitRecord(payload)
+	if err != nil {
+		return 0, err
+	}
+	m.Publish()
+	return seqno, nil
+}
+
+// CommitRecord prepares, writes and commits one opaque record into the
+// unpublished batch, returning the seqno it was stamped with; readers see
+// it only after the next Publish.
+//
+// Reports an error without writing anything when the record does not fit
+// the ring, matching the C writer's contract. The caller keeps the batch
+// within BatchRoom, as a producer must.
+func (m *Writer) CommitRecord(payload []byte) (uint32, error) {
 	totalLen := uint32(C.RING_RECORD_FRAME_SIZE) + uint32(len(payload))
 
 	if rc, errno := C.ring_worker_prepare(m.worker, m.data, C.uint32_t(totalLen)); rc != 0 {
@@ -148,4 +164,16 @@ func (m *Writer) WriteRecord(payload []byte) (uint32, error) {
 
 	seqno := C.ring_worker_commit(m.worker, m.data, C.uint32_t(totalLen))
 	return uint32(seqno), nil
+}
+
+// Publish makes every record committed since the last publication visible
+// to readers.
+func (m *Writer) Publish() {
+	C.ring_worker_publish(m.worker)
+}
+
+// BatchRoom reports how many more bytes, in aligned record lengths, the
+// unpublished batch may grow by.
+func (m *Writer) BatchRoom() uint64 {
+	return uint64(C.ring_worker_batch_room(m.worker))
 }

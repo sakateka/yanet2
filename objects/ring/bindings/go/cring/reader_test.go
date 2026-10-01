@@ -54,11 +54,13 @@ func source(t testing.TB, object *cring.Object, workerIdx uint16) cring.RecordSo
 	return sources[workerIdx]
 }
 
-// openReader opens a fresh reader over one worker's ring.
-func openReader(t testing.TB, object *cring.Object, workerIdx uint16) *cring.Reader {
+// openReader opens a fresh reader over one worker's ring that reads right
+// up to the published write position, as the protocol tests expect; the
+// given options apply on top.
+func openReader(t testing.TB, object *cring.Object, workerIdx uint16, opts ...cring.ReaderOption) *cring.Reader {
 	t.Helper()
 
-	readers, err := object.OpenReaders()
+	readers, err := object.OpenReaders(append([]cring.ReaderOption{cring.WithDistance(0)}, opts...)...)
 	require.NoError(t, err)
 	require.Less(t, int(workerIdx), len(readers))
 	return readers[workerIdx]
@@ -115,7 +117,7 @@ func Test_Reader_Read_RoundTripAcrossWorkers(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	readers, err := object.OpenReaders()
+	readers, err := object.OpenReaders(cring.WithDistance(0))
 	require.NoError(t, err)
 	require.Len(t, readers, workerCount)
 
@@ -245,6 +247,112 @@ func Test_Reader_Read_TwoIndependentReadersSeeSameStream(t *testing.T) {
 	require.Equal(t, []byte("record-b"), recordsTwo[0].Bytes)
 }
 
+// Test_Reader_Read_SeesNothingUntilPublish verifies that committed records
+// stay invisible until the writer publishes, and that sequence numbers run
+// on contiguously across publications.
+func Test_Reader_Read_SeesNothingUntilPublish(t *testing.T) {
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "publish", 256)
+	writer := newWriter(t, object, 0)
+	reader := openReader(t, object, 0)
+
+	first, err := writer.CommitRecord([]byte("one"))
+	require.NoError(t, err)
+	_, err = writer.CommitRecord([]byte("two"))
+	require.NoError(t, err)
+	require.False(t, reader.HasMore(), "a committed batch must stay invisible")
+	require.Empty(t, reader.Read(1024))
+
+	writer.Publish()
+	records := reader.Read(1024)
+	require.Len(t, records, 2)
+	require.Equal(t, first, records[0].Seqno)
+	require.Equal(t, first+1, records[1].Seqno)
+
+	_, err = writer.CommitRecord([]byte("three"))
+	require.NoError(t, err)
+	require.Empty(t, reader.Read(1024))
+	writer.Publish()
+	records = reader.Read(1024)
+	require.Len(t, records, 1)
+	require.Equal(t, first+2, records[0].Seqno, "sequence numbers must continue across publications")
+	require.Equal(t, []byte("three"), records[0].Bytes)
+}
+
+// lineCheckingSource wraps a real RecordSource and records the highest
+// logical end any copy reached.
+type lineCheckingSource struct {
+	real   cring.RecordSource
+	maxEnd uint64
+}
+
+func (m *lineCheckingSource) Indices() (uint64, uint64) {
+	return m.real.Indices()
+}
+
+func (m *lineCheckingSource) CopyRange(dst []byte, start, size uint64) {
+	m.maxEnd = max(m.maxEnd, start+size)
+	m.real.CopyRange(dst, start, size)
+}
+
+// Test_Reader_Read_DistanceHoldsBackWriterLine verifies that a reader with
+// the default distance never copies the cache line holding the published
+// write position, returns the records there only once the writer publishes
+// past them, and that Drain returns the held-back tail.
+func Test_Reader_Read_DistanceHoldsBackWriterLine(t *testing.T) {
+	const recordLen = 24
+	const capacity = 4096
+
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "distance", capacity)
+	writer := newWriter(t, object, 0)
+
+	src := &lineCheckingSource{real: source(t, object, 0)}
+	reader, err := cring.NewReader(0, capacity, src)
+	require.NoError(t, err)
+
+	payload := make([]byte, recordLen-cring.RecordFrameSize)
+	line := cring.CacheLineSize
+	distance := uint64(cring.DefaultDistance)
+	// Whole records below the read limit for a published write position.
+	visible := func(write uint64) int {
+		return int(((write - distance) &^ (line - 1)) / recordLen)
+	}
+
+	// A batch reaching a few lines in, ending mid-line.
+	batch := int((4*line + recordLen/2) / recordLen)
+	for range batch {
+		_, err := writer.CommitRecord(payload)
+		require.NoError(t, err)
+	}
+	writer.Publish()
+	write := writer.WriteIdx()
+	require.NotZero(t, write%line, "the batch must end inside a cache line")
+
+	records := reader.Read(capacity)
+	require.Len(t, records, visible(write))
+	require.LessOrEqual(t, src.maxEnd, write&^(line-1), "the line holding the write position must not be copied")
+	require.False(t, reader.HasMore(), "nothing short of the distance may be left")
+	returned := len(records)
+
+	// The next batch moves the limit past the held-back records.
+	for range batch {
+		_, err := writer.CommitRecord(payload)
+		require.NoError(t, err)
+	}
+	writer.Publish()
+	write = writer.WriteIdx()
+	records = reader.Read(capacity)
+	require.Len(t, records, visible(write)-returned)
+	require.LessOrEqual(t, src.maxEnd, write&^(line-1), "the line holding the write position must not be copied")
+	returned += len(records)
+
+	records = reader.Drain(capacity)
+	require.Len(t, records, 2*batch-returned, "Drain must return the held-back tail")
+	require.Equal(t, uint32(2*batch-1), records[len(records)-1].Seqno)
+	require.Equal(t, write, src.maxEnd, "Drain must read up to the write position")
+}
+
 // hookedSource wraps a real RecordSource and runs injected actions at chosen
 // points of the read protocol.
 //
@@ -327,7 +435,7 @@ func Test_Reader_Read_DeterministicOverwrite(t *testing.T) {
 			hooked := &hookedSource{real: real}
 			tc.arm(hooked, evict)
 
-			reader, err := cring.NewReader(0, object.Capacity(), hooked)
+			reader, err := cring.NewReader(0, object.Capacity(), hooked, cring.WithDistance(0))
 			require.NoError(t, err)
 			records := reader.Read(1024)
 			require.Empty(t, records, "an invalidated record must never be returned")
@@ -369,7 +477,7 @@ func Test_Reader_Read_PartialPrefixDropKeepsSurvivingRecord(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked, cring.WithDistance(0))
 	require.NoError(t, err)
 	records := reader.Read(1024)
 	require.Len(t, records, 1, "only the invalidated prefix must be dropped")
@@ -405,7 +513,7 @@ func Test_Reader_Read_InvalidatesCarriedPartialRecord(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked, cring.WithDistance(0))
 	require.NoError(t, err)
 
 	// Captures only the frame and the first payload word (12 of the 24
@@ -453,7 +561,7 @@ func Test_Reader_Read_DropExceedsBufferDiscardsEverything(t *testing.T) {
 		require.NoError(t, evictErr)
 	}
 
-	reader, err := cring.NewReader(0, object.Capacity(), hooked)
+	reader, err := cring.NewReader(0, object.Capacity(), hooked, cring.WithDistance(0))
 	require.NoError(t, err)
 	records := reader.Read(10)
 	require.Empty(t, records, "a drop past the copied range must clear the whole buffer, not slice past it")
@@ -568,26 +676,31 @@ func Test_Reader_NewReader_RejectsCapacityBelowFrame(t *testing.T) {
 // never returns a torn record while the C writer overwrites at full speed.
 //
 // Opt-in: set RING_STRESS_RECORDS (records per run); RING_STRESS_CAPACITY
-// sets the ring size (default 4096, so almost every write evicts).
+// sets the ring size (default 4096, so almost every write evicts) and
+// RING_STRESS_BATCH the records per publication (default 8). The reader
+// keeps the default distance from the writer and drains the tail at the
+// end.
 func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
 	records := envUint(t, "RING_STRESS_RECORDS", 0)
 	if records == 0 {
 		t.Skip("set RING_STRESS_RECORDS to run the concurrent stress")
 	}
 	capacity := uint32(envUint(t, "RING_STRESS_CAPACITY", 4096))
+	batch := uint32(envUint(t, "RING_STRESS_BATCH", 8))
 
 	agent := newTestAgent(t, 1)
 	object := newRingObject(t, agent, "stress", capacity)
 	writer := newWriter(t, object, 0)
-	reader := openReader(t, object, 0)
+	readers, err := object.OpenReaders()
+	require.NoError(t, err)
+	reader := readers[0]
 
-	stress, err := writer.StartStress(records)
+	stress, err := writer.StartStress(records, batch)
 	require.NoError(t, err)
 
 	var returned, torn uint64
-	for {
-		done := stress.Done()
-		for _, rec := range reader.Read(capacity) {
+	check := func(records []cring.Record) {
+		for _, rec := range records {
 			returned++
 			if !ringtest.StressRecordValid(rec.Seqno, rec.Bytes) {
 				torn++
@@ -596,7 +709,12 @@ func Test_Reader_Stress_ConcurrentWriterNeverTears(t *testing.T) {
 				}
 			}
 		}
+	}
+	for {
+		done := stress.Done()
+		check(reader.Read(capacity))
 		if done && !reader.HasMore() {
+			check(reader.Drain(capacity))
 			break
 		}
 	}
@@ -700,43 +818,57 @@ func Benchmark_Reader_Read_Prefilled(b *testing.B) {
 	}
 }
 
+// benchBatch is the records per publication of the benchmarked writer:
+// pdump's receive burst.
+const benchBatch = 32
+
 // Benchmark_Reader_Read_ConcurrentWriter measures the reader against the C
-// writer committing records at full speed on its own thread, the
-// overwriting steady state of a live capture.
+// writer committing records at full speed on its own thread, publishing
+// every batch, the overwriting steady state of a live capture; the reader
+// reads right up to the published position or keeps the default distance.
 //
 // The writer commits the benchmark's iteration count of records; the reader
-// reads until the writer finishes and the ring is drained. The metrics are
+// reads until the writer finishes and then drains the ring. The metrics are
 // the reader's returned records over the whole run, and lost is the share
 // of committed records overwritten before the reader reached them.
 func Benchmark_Reader_Read_ConcurrentWriter(b *testing.B) {
 	for _, size := range benchRecordSizes {
-		b.Run(fmt.Sprintf("size=%d", size), func(b *testing.B) {
-			agent := newTestAgent(b, 1)
-			object := newRingObject(b, agent, "bench", benchRingCapacity)
-			writer := newWriter(b, object, 0)
-			reader := openReader(b, object, 0)
-
-			var stats readerBenchStats
-			b.ResetTimer()
-			stress, err := writer.StartStressFixed(uint64(b.N), size-cring.RecordFrameSize)
-			if err != nil {
-				b.Fatal(err)
-			}
-			for {
-				done := stress.Done()
-				stats.add(reader.Read(benchReadBudget))
-				if done && !reader.HasMore() {
-					break
-				}
-			}
-			b.StopTimer()
-			written := stress.Written()
-			stress.Wait()
-			if written != uint64(b.N) {
-				b.Fatalf("the writer committed %d of %d records", written, b.N)
-			}
-			stats.report(b)
-			b.ReportMetric(100*(1-float64(stats.records)/float64(written)), "lost%")
-		})
+		for _, distance := range []uint32{0, cring.DefaultDistance} {
+			b.Run(fmt.Sprintf("size=%d/distance=%d", size, distance), func(b *testing.B) {
+				benchReaderConcurrentWriter(b, size, distance)
+			})
+		}
 	}
+}
+
+// benchReaderConcurrentWriter is one Benchmark_Reader_Read_ConcurrentWriter
+// case: records of the given declared size, a reader at the given distance.
+func benchReaderConcurrentWriter(b *testing.B, size uint32, distance uint32) {
+	agent := newTestAgent(b, 1)
+	object := newRingObject(b, agent, "bench", benchRingCapacity)
+	writer := newWriter(b, object, 0)
+	reader := openReader(b, object, 0, cring.WithDistance(distance))
+
+	var stats readerBenchStats
+	b.ResetTimer()
+	stress, err := writer.StartStressFixed(uint64(b.N), benchBatch, size-cring.RecordFrameSize)
+	if err != nil {
+		b.Fatal(err)
+	}
+	for {
+		done := stress.Done()
+		stats.add(reader.Read(benchReadBudget))
+		if done && !reader.HasMore() {
+			stats.add(reader.Drain(benchReadBudget))
+			break
+		}
+	}
+	b.StopTimer()
+	written := stress.Written()
+	stress.Wait()
+	if written != uint64(b.N) {
+		b.Fatalf("the writer committed %d of %d records", written, b.N)
+	}
+	stats.report(b)
+	b.ReportMetric(100*(1-float64(stats.records)/float64(written)), "lost%")
 }
