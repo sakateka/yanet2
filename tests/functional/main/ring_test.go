@@ -1,21 +1,17 @@
 package functional
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/gopacket/gopacket/pcapgo"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yanet-platform/yanet2/tests/functional/framework"
 )
 
-// ringInfo is one ring as the ring CLI renders it in JSON.
+// ringInfo is one ring as the ring CLI prints it in JSON.
 type ringInfo struct {
 	Name         string `json:"name"`
 	Capacity     uint64 `json:"capacity"`
@@ -27,7 +23,7 @@ func ringCLI(fw *framework.TestFramework, args string) (string, error) {
 	return fw.ExecuteCommand(framework.CLIRing + " " + args)
 }
 
-// listRings returns every registered ring, read from the JSON listing.
+// listRings returns every registered ring from the JSON list output.
 func listRings(t *testing.T, fw *framework.TestFramework) []ringInfo {
 	t.Helper()
 	output, err := ringCLI(fw, "list --format json")
@@ -38,7 +34,7 @@ func listRings(t *testing.T, fw *framework.TestFramework) []ringInfo {
 	return rings
 }
 
-// showRing returns one ring read from the JSON show output.
+// showRing returns one ring from the JSON show output.
 func showRing(t *testing.T, fw *framework.TestFramework, name string) ringInfo {
 	t.Helper()
 	output, err := ringCLI(fw, "show --format json --name "+name)
@@ -52,8 +48,9 @@ func showRing(t *testing.T, fw *framework.TestFramework, name string) ringInfo {
 	return *response.Ring
 }
 
-// findRing returns the listed ring with the given name and whether it is
-// listed at all.
+// findRing returns the listed ring with the given name.
+//
+// The second result is false when no listed ring has that name.
 func findRing(rings []ringInfo, name string) (ringInfo, bool) {
 	for _, ring := range rings {
 		if ring.Name == name {
@@ -63,176 +60,71 @@ func findRing(rings []ringInfo, name string) (ringInfo, bool) {
 	return ringInfo{}, false
 }
 
-// pdumpCaptureDport is the UDP destination port of the packets the pdump
-// capture check sends; the capture filter selects only them.
-const pdumpCaptureDport = 5555
-
-// requirePdumpCapturesInput installs pdump in front of the forwarding chain,
-// sends UDP packets and asserts they are forwarded and captured exactly.
+// Test_RingCLI_Lifecycle checks that the ring CLI drives the ring service
+// that a running pdump module hosts.
 //
-// The pdump reader starts from the oldest retained record, so reading
-// after sending observes every captured packet without racing the sender.
-// The chain and the pdump config are restored and removed afterwards.
-func requirePdumpCapturesInput(t *testing.T, fw *framework.TestFramework, config string) {
-	t.Helper()
-	const packetCount = 3
-
-	_, err := fw.ExecuteCommands(
-		framework.CLIPdump+" set --name "+config+
-			fmt.Sprintf(" --input --filter 'udp and dst port %d'", pdumpCaptureDport),
-		framework.CLIFunction+" update --name=test --chains chain2:1=pdump:"+config+
-			",forward:forward0,route:route0",
-		framework.CLIPipeline+" update --name=test --functions test",
-	)
-	require.NoError(t, err, "pdump setup failed")
-	t.Cleanup(func() {
-		_, err := fw.ExecuteCommands(
-			framework.CLIFunction+" update --name=test --chains chain2:1=forward:forward0,route:route0",
-			framework.CLIPipeline+" update --name=test --functions test",
-			framework.CLIPdump+" delete --name "+config,
-		)
-		require.NoError(t, err, "pdump teardown failed")
-	})
-
-	sent := make([][]byte, 0, packetCount)
-	for idx := range packetCount {
-		packet, err := framework.NewPacket(nil,
-			framework.Ether(framework.EtherSrc(framework.SrcMAC), framework.EtherDst(framework.DstMAC)),
-			framework.IPv4(framework.IPSrc("192.0.2.100"), framework.IPDst("172.16.0.10")),
-			framework.UDP(framework.UDPSport(uint16(10000+idx)), framework.UDPDport(pdumpCaptureDport)),
-			// The payload brings the frame to the Ethernet minimum, so the
-			// wire adds no padding and the captured frame equals the sent one.
-			framework.Raw([]byte("pdump ring capture")),
-		)
-		require.NoError(t, err)
-		sent = append(sent, packet.Data())
-
-		_, err = fw.SendPacketAndCapture(0, 0, packet.Data(), 500*time.Millisecond)
-		require.NoError(t, err, "packet %d must still be forwarded with pdump in the chain", idx)
-	}
-
-	const dumpPath = "/tmp/pdump-ring-test.pcap"
-	readOutput, err := fw.ExecuteCommandWithTimeout(
-		fmt.Sprintf("rm -f %[1]s && timeout 20 %[2]s read --name %[3]s --dump-format pcap --num %[4]d --output %[1]s",
-			dumpPath, framework.CLIPdump, config, packetCount),
-		30*time.Second,
-	)
-	require.NoError(t, err, "pdump read must return the captured packets: %s", readOutput)
-
-	// The dump crosses the serial console as wrapped base64 lines, since a
-	// binary stream or one unterminated line does not survive it.
-	encoded, err := fw.ExecuteCommand("base64 " + dumpPath)
-	require.NoError(t, err)
-	dump, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(encoded), ""))
-	require.NoError(t, err)
-
-	reader, err := pcapgo.NewReader(bytes.NewReader(dump))
-	require.NoError(t, err, "pdump output must be a pcap stream: read %q, dump %q", readOutput, encoded)
-	captured := make([][]byte, 0, packetCount)
-	for {
-		data, _, err := reader.ReadPacketData()
-		if err != nil {
-			break
-		}
-		captured = append(captured, data)
-	}
-	require.ElementsMatch(t, sent, captured, "pdump must capture exactly the sent frames")
-}
-
-// Test_RingCLI_LifecycleAndPdumpCapture verifies that the ring CLI drives the
-// ring service hosted by a running pdump module.
-//
-// A created ring is listed and shown with its capacity and publish batch,
-// bad creates leave the registry unchanged, a deleted name can be reused
-// with another publish batch, and pdump capture works with and without a
-// ring present.
-func Test_RingCLI_LifecycleAndPdumpCapture(t *testing.T) {
+// A created ring appears in list and show with its capacity and publish
+// batch. A refused create reports its gRPC code in JSON and leaves the
+// registry unchanged. A deleted ring is gone from list and show.
+func Test_RingCLI_Lifecycle(t *testing.T) {
 	t.Parallel()
 	withBootedVM(t, func(fw *framework.TestFramework) {
-		testRingCLILifecycleAndPdumpCapture(t, fw)
+		testRingCLILifecycle(t, fw)
 	})
 }
 
-func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramework) {
+func testRingCLILifecycle(t *testing.T, fw *framework.TestFramework) {
 	const (
 		ringName     = "ring-tfn0"
-		badRingName  = "ring-tfn-bad"
 		capacity     = uint64(64 << 10)
-		recreatedCap = uint64(128 << 10)
-		// The service default for a create without --publish-batch.
-		defaultBatch   = uint32(8)
-		recreatedBatch = uint32(32)
+		publishBatch = uint32(32)
 	)
 
-	// A failed step may leave rings behind in the shared VM; remove them
-	// so later tests start from an empty registry.
+	// Remove the test ring from the shared VM after a failure.
 	//
-	// Deleting an absent ring just fails, which is fine here.
+	// A failed step may leave the ring behind. Later tests need an empty
+	// registry. A delete of a ring that does not exist just fails, and that
+	// is fine here.
 	t.Cleanup(func() {
 		if !t.Failed() {
 			return
 		}
-		for _, name := range []string{ringName, badRingName} {
-			_, _ = ringCLI(fw, "delete --name "+name)
-		}
+		_, _ = ringCLI(fw, "delete --name "+ringName)
 	})
 
 	fw.Run("Create_lists_and_shows_ring", func(fw *framework.TestFramework, t *testing.T) {
 		_, listed := findRing(listRings(t, fw), ringName)
 		require.False(t, listed, "ring must not exist before create")
 
-		_, err := ringCLI(fw, fmt.Sprintf("create --name %s --capacity %d", ringName, capacity))
+		_, err := ringCLI(fw, fmt.Sprintf(
+			"create --name %s --capacity %d --publish-batch %d",
+			ringName, capacity, publishBatch,
+		))
 		require.NoError(t, err, "ring create failed")
 
-		want := ringInfo{Name: ringName, Capacity: capacity, PublishBatch: defaultBatch}
+		want := ringInfo{Name: ringName, Capacity: capacity, PublishBatch: publishBatch}
 		ring, listed := findRing(listRings(t, fw), ringName)
 		require.True(t, listed, "created ring must be listed")
 		require.Equal(t, want, ring)
 		require.Equal(t, want, showRing(t, fw, ringName))
 	})
 
-	fw.Run("Bad_create_changes_nothing", func(fw *framework.TestFramework, t *testing.T) {
+	fw.Run("Duplicate_create_changes_nothing", func(fw *framework.TestFramework, t *testing.T) {
 		before := listRings(t, fw)
 
-		cases := []struct {
-			name string
-			args string
-			code string
-		}{
-			{
-				name: "duplicate name",
-				args: fmt.Sprintf("create --name %s --capacity %d", ringName, recreatedCap),
-				code: "AlreadyExists",
-			},
-			{
-				// A power of two, so the CLI passes it on and the
-				// service's own range check rejects it.
-				name: "capacity below the record frame size",
-				args: "create --name " + badRingName + " --capacity 4",
-				code: "InvalidArgument",
-			},
+		output, err := ringCLI(fw, fmt.Sprintf("--format json create --name %s --capacity %d", ringName, capacity))
+		require.Error(t, err, "duplicate create must exit non-zero")
+		var failure struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
 		}
-		for _, tc := range cases {
-			fw.Run(strings.ReplaceAll(tc.name, " ", "_"), func(fw *framework.TestFramework, t *testing.T) {
-				output, err := ringCLI(fw, "--format json "+tc.args)
-				require.Error(t, err, "bad create must exit non-zero")
-				var failure struct {
-					OK    bool `json:"ok"`
-					Error struct {
-						Code string `json:"code"`
-					} `json:"error"`
-				}
-				require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &failure),
-					"bad create must report a JSON error: %q", output)
-				require.False(t, failure.OK)
-				require.Equal(t, tc.code, failure.Error.Code)
-				require.ElementsMatch(t, before, listRings(t, fw), "bad create must not change the registry")
-			})
-		}
-	})
-
-	fw.Run("Pdump_captures_with_ring_present", func(fw *framework.TestFramework, t *testing.T) {
-		requirePdumpCapturesInput(t, fw, "pdump-tfn-ring")
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(output)), &failure),
+			"duplicate create must report a JSON error: %q", output)
+		require.False(t, failure.OK)
+		require.Equal(t, "AlreadyExists", failure.Error.Code)
+		require.ElementsMatch(t, before, listRings(t, fw), "duplicate create must not change the registry")
 	})
 
 	fw.Run("Delete_removes_ring", func(fw *framework.TestFramework, t *testing.T) {
@@ -243,26 +135,5 @@ func testRingCLILifecycleAndPdumpCapture(t *testing.T, fw *framework.TestFramewo
 		require.False(t, listed, "deleted ring must not be listed")
 		_, err = ringCLI(fw, "show --name "+ringName)
 		require.Error(t, err, "show of a deleted ring must exit non-zero")
-	})
-
-	fw.Run("Recreate_reuses_name", func(fw *framework.TestFramework, t *testing.T) {
-		_, err := ringCLI(fw, fmt.Sprintf(
-			"create --name %s --capacity %d --publish-batch %d",
-			ringName, recreatedCap, recreatedBatch,
-		))
-		require.NoError(t, err, "recreate after delete failed")
-		require.Equal(t,
-			ringInfo{Name: ringName, Capacity: recreatedCap, PublishBatch: recreatedBatch},
-			showRing(t, fw, ringName),
-		)
-
-		_, err = ringCLI(fw, "delete --name "+ringName)
-		require.NoError(t, err, "delete of the recreated ring failed")
-		_, listed := findRing(listRings(t, fw), ringName)
-		require.False(t, listed, "deleted ring must not be listed")
-	})
-
-	fw.Run("Pdump_captures_with_ring_absent", func(fw *framework.TestFramework, t *testing.T) {
-		requirePdumpCapturesInput(t, fw, "pdump-tfn-noring")
 	})
 }

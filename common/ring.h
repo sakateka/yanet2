@@ -1,22 +1,26 @@
 #pragma once
 
 /*
- * Per-worker ring buffer of opaque records: a lock-free single-producer log
- * that another process can read.
+ * Per-worker ring buffer of opaque records.
  *
- * A worker's metadata and its data area are two independent allocations.
- * The metadata keeps the writer's private state and the reader-visible
- * positions on separate cache lines, so a polling reader never contends
- * with the writer's per-record bookkeeping, and writers on adjacent workers
- * never share a line. The writer never blocks: a full ring evicts whole oldest
- * records instead of stalling. Records are committed one by one and
- * published in batches, so one store to the reader-visible line covers a
- * whole batch, and eviction frees space in chunks, so one store and one
- * fence cover many evicted records. A commit publishes on its own once the
- * ring's publish batch of records is pending; the producer still publishes
- * at the end of each call, so a slow producer's last records never wait
- * for a batch to fill. No producer writes to it yet; pdump capture keeps
- * its own rings.
+ * Each ring has one writer, the dataplane worker. Readers may live in
+ * another process. Nobody takes a lock. The writer never waits: when the
+ * ring is full, it drops the oldest whole records to make room.
+ *
+ * Each worker has two separate allocations: the metadata and the data area.
+ * The metadata puts the writer's private state and the positions readers
+ * poll on different cache lines. So a reader does not slow down the
+ * writer's per-record updates. Writers of neighbouring workers never share
+ * a line either.
+ *
+ * The writer commits records one by one but publishes them in batches.
+ * One store to the reader-visible line then covers a whole batch. In the
+ * same way, eviction frees space in chunks, so one store and one fence
+ * cover many dropped records. A commit publishes by itself when the batch
+ * is full. The producer also publishes at the end of each call, so the
+ * last records of a slow producer do not wait for a full batch.
+ *
+ * No producer uses this ring yet. Pdump capture still has its own rings.
  */
 
 #include <assert.h>
@@ -31,24 +35,27 @@
 #include "common/memory_address.h"
 #include "common/numutils.h"
 
-// Readers in other languages decode the record frame as little-endian.
+// Readers in other languages decode the record frame as little-endian, so
+// the writer must be little-endian too.
 _Static_assert(
 	__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 	"the ring wire format is little-endian"
 );
 
-// Round a record length up to the 4-byte boundary every record starts at.
+// Round a record length up to a multiple of 4.
+//
+// Every record starts on a 4-byte boundary.
 static inline uint32_t
 ring_align4(uint32_t val) {
 	return (uint32_t)next_divisible_pow2(val, 4);
 }
 
-// Frame preceding every record's opaque payload.
+// Header in front of every record's opaque payload.
 //
-// The length covers the frame and the payload combined; the worker-scoped
-// sequence number is stamped at commit. Records are only 4-byte aligned, so
-// a reader copies the frame out before reading the length instead of
-// dereferencing it in place.
+// The length counts the header and the payload together. The writer sets
+// the sequence number at commit. Each worker numbers its own records.
+// Records are only 4-byte aligned. So a reader must copy the header out
+// before it reads the length, and must not read it in place.
 struct ring_record_frame {
 	uint32_t total_len;
 	uint32_t seqno;
@@ -59,44 +66,49 @@ _Static_assert(
 	"ring record frame must be the 8-byte wire size"
 );
 
-// Smallest length a record may declare: the frame with an empty payload.
+// Smallest valid record length: the header with an empty payload.
 #define RING_RECORD_FRAME_SIZE (sizeof(struct ring_record_frame))
 
 // Largest eviction chunk, in bytes.
 //
-// An evicting write frees at least this much space (or its own length, if
-// larger), so in steady overflow one readable-position store and one fence
-// cover every record that fits in the chunk: tens of small records. A
-// larger chunk drops more history ahead of time and makes each eviction
-// walk read more record frames at once, lines a reader may hold.
+// When a write must evict, it frees at least one chunk, or its own length
+// if that is larger. So when the ring overflows all the time, one store of
+// the readable position and one fence cover a whole chunk: tens of small
+// records. A bigger chunk has two costs. It drops more history early. And
+// each eviction reads more record headers at once, from lines a reader
+// may hold.
 #define RING_EVICT_CHUNK_MAX 4096u
-// Eviction chunk of a small ring as a divisor of its capacity, so the
-// chunk never drops more than this share of the history ahead of time.
+// Divisor that limits the eviction chunk of a small ring.
+//
+// The chunk is at most this share of the ring capacity, so one eviction
+// never drops more than this share of the history early.
 #define RING_EVICT_CHUNK_SHARE 16u
 
-// Default publish batch: records a commit leaves pending before it
-// publishes them itself.
+// Default publish batch: how many committed records a commit collects
+// before it publishes them.
 //
-// It spreads the store to the reader-visible line, and the line transfer
-// that store causes while a reader polls the line, over a short burst of
-// records, while keeping a busy writer's records only a few behind what
-// readers see.
+// Each publication stores to the line that readers poll. If a reader is
+// polling, the store also moves that line between CPUs. A batch pays this
+// cost once for a short burst of records. A busy writer's records still
+// stay only a few behind what readers see.
 #define RING_PUBLISH_BATCH_DEFAULT 8u
-// Largest publish batch a ring accepts: beyond it the per-batch store is
-// already negligible and only the delay a reader sees keeps growing.
+// Largest publish batch a ring accepts.
+//
+// Above it, the cost of one store per batch is already very small. A
+// bigger batch only makes readers wait longer for new records.
 #define RING_PUBLISH_BATCH_MAX 1024u
 
 // Writer-private half of a worker's ring metadata.
 //
-// The positions are the writer's authoritative copies of the published
-// ones: no reader loads them, so the per-record stores here never pull the
-// line away from the writer's CPU. The last published write position marks
-// the start of the batch of committed records not yet published, the
-// eviction cursor is the record boundary the writer has walked to ahead of
-// the next eviction, and the batch record count is how many records that
-// batch holds. The size, mask, eviction chunk, publish batch and relative
-// data pointer are fixed at creation; a reader loads the size, mask and
-// data pointer once when it attaches.
+// The writer keeps the true positions here. Readers never load these
+// positions, so the writer's per-record stores never move this line to
+// another CPU. The last published write position is where the unpublished
+// batch starts. The eviction cursor is the record boundary the writer has
+// already walked to for the next eviction. It lies between the readable
+// position and the batch start. The record count tells how many
+// records the unpublished batch holds. The size, mask, eviction chunk,
+// publish batch and data pointer never change after creation. A reader
+// loads the size, mask and data pointer once, when it attaches.
 struct ring_worker_private {
 	uint64_t write_idx;
 	uint64_t readable_idx;
@@ -113,9 +125,9 @@ struct ring_worker_private {
 
 // Reader-visible half of a worker's ring metadata.
 //
-// The writer only release-stores these and never loads them, so a reader
-// polling the line costs the writer at most an ownership request per
-// publication or eviction, not one per record.
+// The writer only stores to these positions, with release order. It never
+// loads them. So a polling reader costs the writer at most one line
+// transfer per publication or eviction, not one per record.
 struct ring_worker_published {
 	_Atomic uint64_t write_idx;
 	_Atomic uint64_t readable_idx;
@@ -123,15 +135,16 @@ struct ring_worker_published {
 
 // Per-worker ring metadata, one per dataplane worker.
 //
-// The writer-private and the published halves sit on separate cache
-// lines, each followed by an unused guard line: a CPU that prefetches
-// lines in adjacent pairs then never pulls a half a reader polls together
-// with a half the writer stores to, of this worker or a neighbouring one,
-// whatever the array's alignment. The positions are logical, unmasked byte
-// offsets into the data area; the ring size minus one masks a logical
-// offset down to a physical one. The data area lives behind a
-// shared-memory relative pointer, resolved to an address in the reading
-// process's own mapping before use.
+// The private half and the published half sit on separate cache lines.
+// An unused guard line follows each half. Some CPUs prefetch lines in
+// pairs. The guard lines make sure such a pair never joins a line the
+// writer stores to with a line a reader polls. This holds for this worker
+// and its neighbours, for any alignment of the array.
+//
+// Positions are logical byte offsets into the data area and only grow.
+// The ring size minus one is the mask that turns a logical offset into a
+// physical one. The data pointer is relative to the shared memory. Each
+// process turns it into an address in its own mapping before use.
 struct ring_worker {
 	struct ring_worker_private local;
 	uint8_t local_guard[YANET_CACHE_LINE_SIZE];
@@ -156,8 +169,10 @@ _Static_assert(
 	"ring_worker must be aligned to exactly one cache line"
 );
 
-// Eviction chunk of a ring of the given power-of-two capacity: a share of
-// the capacity, capped, and a multiple of the record alignment.
+// Eviction chunk for a ring of the given power-of-two capacity.
+//
+// The chunk is a fixed share of the capacity, with an upper cap. It is
+// rounded down to a multiple of 4, the record alignment.
 static inline uint32_t
 ring_evict_chunk(uint32_t size) {
 	uint32_t chunk = size / RING_EVICT_CHUNK_SHARE;
@@ -167,11 +182,11 @@ ring_evict_chunk(uint32_t size) {
 	return chunk & ~3u;
 }
 
-// Set up an empty ring of the given power-of-two capacity and publish
-// batch, from 1 to RING_PUBLISH_BATCH_MAX records, leaving the data area
-// pointer to the caller.
+// Set up an empty ring with a power-of-two capacity and a publish batch.
 //
-// Only while neither the writer nor a reader runs.
+// The publish batch is from 1 to RING_PUBLISH_BATCH_MAX records. The caller
+// sets the data area pointer. Call it only when no writer and no reader
+// runs.
 static inline void
 ring_worker_init(
 	struct ring_worker *ring, uint32_t size, uint32_t publish_batch
@@ -183,10 +198,10 @@ ring_worker_init(
 	ring->local.publish_batch = publish_batch;
 }
 
-// Set every copy of the write and readable positions, leaving no
-// unpublished batch.
+// Set the write and readable positions in both halves.
 //
-// Only for setup and tests, while neither the writer nor a reader runs.
+// After the call there is no unpublished batch. Use it only for setup and
+// tests, when no writer and no reader runs.
 static inline void
 ring_worker_set_positions(
 	struct ring_worker *ring, uint64_t write_idx, uint64_t readable_idx
@@ -206,26 +221,25 @@ ring_worker_set_positions(
 	);
 }
 
-// Largest total, in bytes, of one batch: the aligned lengths of the
-// records committed between two publications, the one being prepared
-// included.
+// Largest size of one batch, in bytes.
 //
-// Within it, evicting every published record always frees a whole chunk
-// beyond the record, so a batch never has to evict its own records. A
-// record that would take the batch past it makes the writer publish the
-// batch first, however few records the batch holds. It is also the largest
-// record a ring accepts.
+// A batch is all records committed since the last publication, plus the
+// record being prepared. Sizes are aligned lengths. While a batch stays
+// within this limit, evicting all published records frees a full chunk
+// on top of the batch. So a batch never has to evict its own records. If
+// a new record would go over the limit, the writer first publishes the
+// batch, even a batch of few records. This is also the largest record
+// the ring accepts.
 static inline uint32_t
 ring_worker_batch_max(const struct ring_worker *ring) {
 	return ring->local.size - ring->local.evict_chunk;
 }
 
-// Bytes the unpublished batch may still grow by before the writer
-// publishes it on its own.
+// Bytes the unpublished batch can still grow before the writer publishes
+// it by itself.
 //
-// A producer may use it to size its batches; a record whose aligned length
-// exceeds it is still accepted, and the writer publishes the records
-// committed so far first.
+// A producer may use this to size its batches. A larger record is still
+// accepted: the writer first publishes the records committed so far.
 static inline uint64_t
 ring_worker_batch_room(const struct ring_worker *ring) {
 	uint64_t pending =
@@ -233,15 +247,14 @@ ring_worker_batch_room(const struct ring_worker *ring) {
 	return ring_worker_batch_max(ring) - pending;
 }
 
-// Publish every record committed since the last publication with one
-// release store of the write position; a no-op when there is none.
+// Publish all records committed since the last publication.
 //
-// A commit calls it once the publish batch is full, and a producer calls
-// it once at the end of each call or burst, so the records short of a full
-// batch reach readers without waiting for later traffic. This worker is
-// the ring's sole writer, so the update needs no read-modify-write, and the
-// writer compares against its private copy instead of loading the
-// published line.
+// One release store of the write position does it. With no new records,
+// the call does nothing. A commit calls it when the batch is full. A
+// producer calls it at the end of each call or burst, so a partial batch
+// reaches readers without waiting for more traffic. This worker is the
+// only writer, so a plain store is enough, with no read-modify-write. The
+// check uses the private copy and does not load the line readers poll.
 static inline void
 ring_worker_publish(struct ring_worker *ring) {
 	uint64_t write_idx = ring->local.write_idx;
@@ -255,17 +268,18 @@ ring_worker_publish(struct ring_worker *ring) {
 	);
 }
 
-// Make an eviction visible to readers before any byte of the evicted
-// records is overwritten.
+// Make an eviction visible to readers before the writer overwrites any
+// byte of the evicted records.
 //
-// A release store only orders the accesses before it, so a weakly ordered
-// CPU (arm64) may expose the new bytes ahead of the new readable position;
-// a reader copying them would then pass its post-copy recheck and accept a
-// torn record. Cost: one barrier on arm64 per eviction chunk (`dmb ish`,
-// or `dmb ishld` plus `dmb ishst` from newer GCC), which also waits for
-// the readable-position store to reach the published line, a round trip
-// when a reader holds that line; no instruction on x86-64, where it only
-// keeps the compiler from moving the data stores above it.
+// A release store orders only the accesses before it. On arm64 a reader
+// may see the new bytes before it sees the new readable position. It then
+// copies a mix of old and new bytes, its recheck after the copy passes,
+// and it accepts a broken record. This fence stops that. On arm64 it costs
+// one barrier per eviction chunk: `dmb ish`, or `dmb ishld` plus
+// `dmb ishst` with newer GCC. The barrier waits until the position store
+// reaches its line. That is a round trip if a reader holds the line. On
+// x86-64 it emits no instruction. It only stops the compiler from moving
+// the data stores above it.
 static inline void
 ring_evict_fence(void) {
 	// arm64 check branch only: build with -DRING_TEST_NO_EVICT_FENCE to
@@ -275,11 +289,12 @@ ring_evict_fence(void) {
 #endif
 }
 
-// Logical position just past the whole record at a readable position, or
-// the bound when the record's length is corrupt.
+// Logical position right after the record that starts at the given
+// position, or the bound if the record length is corrupt.
 //
-// Corrupt means below a frame, above the ring, or running past the bound;
-// the raw length is range-checked before alignment so it cannot wrap.
+// A length is corrupt if it is smaller than the header, larger than the
+// ring, or the record runs past the bound. The raw length is checked
+// before alignment, so the rounding cannot overflow.
 static inline uint64_t
 ring_evict_next(
 	const struct ring_worker *ring,
@@ -298,13 +313,14 @@ ring_evict_next(
 	return readable_idx + ring_align4(len);
 }
 
-// Walk the eviction cursor one published record further while it is less
+// Move the eviction cursor one published record forward, if it is less
 // than a chunk ahead of the readable position.
 //
-// Called on every write that needs no eviction, so in steady overflow the
-// cursor keeps pace with the writer one frame load at a time, overlapped
-// with the write, and the next eviction finds its chunk already walked
-// instead of stalling on a chain of dependent loads. It only reads frames.
+// The writer calls it on every write that needs no eviction. Each call
+// loads one record header, and the CPU overlaps that load with the write.
+// So when the ring overflows all the time, the cursor keeps up with the
+// writer. The next eviction finds its chunk already walked and does not
+// wait on a chain of dependent loads. It only reads headers.
 static inline void
 ring_worker_walk_ahead(struct ring_worker *ring, const uint8_t *data) {
 	uint64_t evict_idx = ring->local.evict_idx;
@@ -316,15 +332,16 @@ ring_worker_walk_ahead(struct ring_worker *ring, const uint8_t *data) {
 	}
 }
 
-// Evict whole oldest records until a chunk of space is free, then publish
-// the new readable position and fence it off from the overwrites, one
-// store and one fence for the whole chunk.
+// Drop whole oldest records until a chunk of space is free.
 //
-// The walk resumes from the eviction cursor. Only published records are
-// evicted, so the unpublished batch, which no reader has seen, never evicts
-// itself; a corrupt length drops every published record in one step. The
-// batch is already within its limit here, so evicting every published
-// record always leaves room for the new one.
+// Then the writer publishes the new readable position and fences it before
+// any overwrite: one store and one fence for the whole chunk. The walk
+// starts at the eviction cursor, which is never behind the readable
+// position. Each step ends on a record boundary no further than the batch
+// start, or jumps to the batch start on a corrupt length. The prepare step
+// keeps the batch plus the new record within the batch limit. So the batch
+// alone never exceeds the bytes to keep, and the walk stops at the batch
+// start at the latest, without dropping its own records.
 static inline void
 ring_worker_evict(
 	struct ring_worker *ring, const uint8_t *data, uint32_t aligned_len
@@ -332,17 +349,13 @@ ring_worker_evict(
 	uint64_t write_idx = ring->local.write_idx;
 	uint64_t batch_idx = ring->local.published_write_idx;
 	uint64_t readable_idx = ring->local.evict_idx;
-	if (readable_idx < ring->local.readable_idx) {
-		readable_idx = ring->local.readable_idx;
-	}
 
 	uint32_t free_target = ring->local.evict_chunk;
 	if (free_target < aligned_len) {
 		free_target = aligned_len;
 	}
 	uint64_t keep_limit = ring->local.size - free_target;
-	while (write_idx - readable_idx > keep_limit && readable_idx < batch_idx
-	) {
+	while (write_idx - readable_idx > keep_limit) {
 		readable_idx =
 			ring_evict_next(ring, data, readable_idx, batch_idx);
 	}
@@ -357,17 +370,17 @@ ring_worker_evict(
 	ring_evict_fence();
 }
 
-// Check that a record of the given length fits the ring, evicting a chunk
-// of whole oldest records when it does not, without writing any record
-// bytes; 0 on success, or -1 with errno EINVAL or E2BIG.
+// Make room for a record of the given length; 0 on success, -1 with errno
+// on error.
 //
-// EINVAL is a length below the frame size, E2BIG one above the batch
-// limit; a failure leaves every index untouched. A record that would take
-// the unpublished batch past the limit first publishes the records
-// committed so far with the store of an explicit publication, before any
-// eviction and before any byte of itself, so an overlong batch is never
-// refused and never evicts its own records. The data area arrives already
-// resolved, so repeated calls for one record do not each resolve it.
+// If the record does not fit, the writer drops a chunk of whole oldest
+// records. No record bytes are written here. EINVAL means the length is
+// smaller than the header. E2BIG means it is larger than the batch limit.
+// On error no position changes. If the record would push the unpublished
+// batch past the limit, the writer first publishes the batch. This happens
+// before any eviction and before any byte of the new record. So a long
+// batch is never refused and never drops its own records. The caller
+// passes the data area already resolved, so it is not resolved per call.
 static inline int
 ring_worker_prepare(
 	struct ring_worker *ring, uint8_t *data, uint32_t total_len
@@ -376,9 +389,10 @@ ring_worker_prepare(
 		errno = EINVAL;
 		return -1;
 	}
-	// The raw length is checked before alignment so it cannot wrap; the
-	// limit is a multiple of the alignment, so it bounds the aligned
-	// length too.
+	// Check the raw length before alignment, so the rounding cannot
+	// overflow.
+	//
+	// The limit is a multiple of 4, so it bounds the aligned length too.
 	if (unlikely(total_len > ring_worker_batch_max(ring))) {
 		errno = E2BIG;
 		return -1;
@@ -388,8 +402,8 @@ ring_worker_prepare(
 		ring_worker_publish(ring);
 	}
 
-	// The writer works from its private positions alone and never loads
-	// the published line a reader may be polling.
+	// Use only the private positions. Do not load the line a reader may be
+	// polling.
 	uint64_t occupied = ring->local.write_idx - ring->local.readable_idx;
 	if (likely(occupied <= ring->local.size - aligned_total_len)) {
 		ring_worker_walk_ahead(ring, data);
@@ -399,13 +413,12 @@ ring_worker_prepare(
 	return 0;
 }
 
-// Copy one chunk of a not yet committed record at the given offset from its
-// start, wrapping at the ring's physical end.
+// Copy a piece of an uncommitted record at the given offset from its start.
 //
-// A record may be assembled from several chunks at increasing offsets, for
-// instance a fixed private header followed by payload bytes with no
-// intermediate copy, as long as every chunk lands within the length the
-// preceding prepare reserved.
+// The copy wraps around at the physical end of the ring. A record may be
+// built from several pieces at growing offsets. For example, a fixed
+// header first and then the payload bytes, with no extra copy. Every
+// piece must stay within the length that the prepare step reserved.
 static inline void
 ring_worker_write(
 	struct ring_worker *ring,
@@ -431,12 +444,12 @@ ring_worker_write(
 	}
 }
 
-// Write the record frame, stamp it with the worker's next sequence number
-// and add the record to the unpublished batch, publishing the batch once it
-// holds the ring's publish batch of records.
+// Write the record header and add the record to the unpublished batch.
 //
-// Readers see nothing of it until the next publication. Returns the stamped
-// sequence number, which wraps from UINT32_MAX to 0.
+// The header gets the worker's next sequence number. When the batch
+// reaches the ring's publish batch size, the writer publishes it. Readers
+// see the record only after the next publication. Returns the sequence
+// number. It wraps from UINT32_MAX to 0.
 static inline uint32_t
 ring_worker_commit(
 	struct ring_worker *ring, uint8_t *data, uint32_t total_len

@@ -34,8 +34,8 @@ func WithLog(log *zap.Logger) Option {
 
 // PdumpModule is a control-plane component of a packet dump module.
 //
-// It also hosts the ring service, which owns the standalone named rings
-// created through this agent.
+// It also hosts the ring service. That service owns the standalone named
+// rings created through this agent.
 type PdumpModule struct {
 	cfg         *Config
 	attachment  *ffi.Attachment

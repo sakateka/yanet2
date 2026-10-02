@@ -6,11 +6,12 @@ import (
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
 )
 
-// ServiceName is the fully-qualified gRPC service name for the ring
-// management service, derived from the generated service descriptor.
+// ServiceName is the full gRPC name of the ring management service.
+//
+// It comes from the generated service descriptor.
 var ServiceName = ringpb.RingService_ServiceDesc.ServiceName
 
-// ServicesNames returns the gRPC service names this controlplane serves.
+// ServicesNames returns the gRPC service names that this service serves.
 func (m *RingService) ServicesNames() []string {
 	return []string{ServiceName}
 }

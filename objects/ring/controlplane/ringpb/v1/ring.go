@@ -6,24 +6,30 @@ import (
 	"strings"
 )
 
-// MaxRingNameLen is the C object-name buffer size, including the terminating
-// NUL; the longest accepted name is one byte shorter.
+// MaxRingNameLen is the size of the C object-name buffer.
+//
+// The size includes the terminating NUL. So the longest accepted name is
+// one byte shorter.
 const MaxRingNameLen = 80
 
-// MinRingCapacity is the smallest per-worker capacity a ring accepts, in
-// bytes: room for exactly one record frame.
+// MinRingCapacity is the smallest per-worker capacity of a ring, in bytes.
+//
+// It holds exactly one record header with an empty payload.
 const MinRingCapacity = 8
 
-// DefaultPublishBatch is the publish batch a ring gets when the request
-// leaves it unset: the records a writer commits before publishing them on
-// its own.
+// DefaultPublishBatch is the publish batch used when the request leaves it
+// unset.
+//
+// The publish batch is the number of records a writer commits before it
+// publishes them by itself.
 const DefaultPublishBatch = 8
 
 // MaxPublishBatch is the largest publish batch a ring accepts.
 const MaxPublishBatch = 1024
 
-// ValidateRingName validates a ring name against the C object-name
-// contract, reporting the given proto field on failure.
+// ValidateRingName checks a ring name against the C object-name rules.
+//
+// On failure, the error names the given proto field.
 func ValidateRingName(field, name string) error {
 	if name == "" {
 		return fmt.Errorf("%s is required", field)
@@ -38,12 +44,13 @@ func ValidateRingName(field, name string) error {
 }
 
 // Validate checks the ring name, the per-worker capacity and the publish
-// batch, which may be left unset for the default.
+// batch.
 //
-// The upper bound is the C layer's, which varies by build; the service maps
-// its rejection of an oversized capacity to InvalidArgument. A capacity
-// beyond 32 bits is rejected here, since truncating it for the C API would
-// silently create a ring far smaller than requested.
+// An unset publish batch means the default. The C layer sets the upper
+// limit of the capacity, and that limit depends on the build. The service
+// reports a capacity the C layer rejects as InvalidArgument. A capacity
+// that does not fit in 32 bits is rejected here. The C API takes 32 bits,
+// so a cut value would quietly create a much smaller ring.
 func (m *CreateRingRequest) Validate() error {
 	if err := ValidateRingName("name", m.GetName()); err != nil {
 		return err

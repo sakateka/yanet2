@@ -182,7 +182,7 @@ proto-go:
 		-o -name '*.proto' -print \
 		| sort); \
 		test -n "$$protos"; \
-		protoc -I . \
+		protoc --experimental_allow_proto3_optional -I . \
 			--go_out=paths=source_relative:. \
 			--go-grpc_out=paths=source_relative:. \
 			$$protos
@@ -362,7 +362,6 @@ test-asan-only:
 	fi
 	meson compile -C build
 	@set -eu; \
-	export GOFLAGS="$$(sh scripts/go-flags.sh yanet_asan)"; \
 	export CGO_CPPFLAGS="$(strip $(CGO_CPPFLAGS) $(YANET_CACHE_LINE_CPPFLAG))"; \
 	export CGO_CFLAGS="-fsanitize=address,undefined"; \
 	export CGO_LDFLAGS="-fsanitize=address,undefined"; \

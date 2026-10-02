@@ -14,8 +14,10 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/bindings/go/cring"
 )
 
-// LinkRing links a raw module config pointer to the named ring object, a
-// direct wrapper of the C module link call.
+// LinkRing links a module config, given as a raw pointer, to the named ring
+// object.
+//
+// It calls the C module link function directly.
 func LinkRing(moduleConfigPtr unsafe.Pointer, name string) error {
 	cpModule := (*C.struct_cp_module)(moduleConfigPtr)
 

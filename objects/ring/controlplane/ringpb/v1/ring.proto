@@ -6,67 +6,80 @@ option go_package = "github.com/yanet-platform/yanet2/objects/ring/controlplane/
 
 // RingService manages standalone named ring objects.
 //
-// A ring is a per-worker, cache-line-isolated buffer of opaque records with
-// a single writer per worker; a full buffer overwrites the oldest record
-// instead of blocking or failing the write. It has no dataplane module of
-// its own: a module config can link a ring by name.
+// A ring holds one buffer of opaque records per worker. Each buffer has one
+// writer, its worker. When a buffer is full, the writer drops the oldest
+// whole records. The write never blocks and never fails for lack of space.
+// A ring has no dataplane module of its own. A module config can link a
+// ring by name.
 service RingService {
   // CreateRing creates a new named ring with a fixed per-worker capacity.
   //
-  // Creation fails if a ring with the requested name already exists.
+  // It fails if a ring with the requested name already exists.
   rpc CreateRing(CreateRingRequest) returns (CreateRingResponse);
-  // ListRings returns every registered ring, sorted by name, with the same
-  // facts as ShowRing.
+  // ListRings returns every registered ring, sorted by name.
+  //
+  // Each ring has the same fields that ShowRing returns.
   rpc ListRings(ListRingsRequest) returns (ListRingsResponse);
-  // ShowRing returns the name, per-worker capacity and publish batch of one
-  // named ring.
+  // ShowRing returns one named ring: its name, per-worker capacity and
+  // publish batch.
   rpc ShowRing(ShowRingRequest) returns (ShowRingResponse);
   // DeleteRing removes a named ring.
   //
-  // Deletion fails while the ring is leased by a consumer or still linked
-  // into a published configuration generation.
+  // It fails while a consumer holds a lease on the ring. It also fails
+  // while a published configuration generation still links the ring.
   rpc DeleteRing(DeleteRingRequest) returns (DeleteRingResponse);
 }
 
-// RingInfo describes one registered ring: its name, capacity and publish
-// batch, all fixed at creation.
+// RingInfo describes one registered ring.
+//
+// The name, capacity and publish batch are all fixed at creation.
 message RingInfo {
   // name identifies the ring.
   string name = 1;
-  // capacity is the per-worker buffer size in bytes, fixed at creation as a
-  // power of two and never resized afterward.
+  // capacity is the per-worker buffer size in bytes.
+  //
+  // It is a power of two. It is set at creation and never changes.
   uint64 capacity = 2;
-  // publish_batch is the number of records a worker's writer commits
-  // before it makes them visible to readers on its own; a producer also
-  // publishes at the end of each call, so readers never wait for a batch
-  // to fill.
+  // publish_batch is the number of records a writer commits before it
+  // shows them to readers by itself.
+  //
+  // A producer also publishes at the end of each call. So readers never
+  // wait for a batch to fill.
   uint32 publish_batch = 3;
 }
 
-// CreateRingRequest names the ring to create, its fixed per-worker capacity
-// and its publish batch.
+// CreateRingRequest gives the name, per-worker capacity and publish batch
+// of the ring to create.
 message CreateRingRequest {
-  // name identifies the new ring; creation fails if a ring with this name
-  // already exists.
+  // name identifies the new ring.
+  //
+  // The create fails if a ring with this name already exists.
   string name = 1;
-  // capacity is the per-worker buffer size in bytes: a power of two holding
-  // at least one record frame, fixed for the life of the ring.
+  // capacity is the per-worker buffer size in bytes.
+  //
+  // It must be a power of two and hold at least one record header. It never
+  // changes during the life of the ring.
   uint64 capacity = 2;
-  // publish_batch is the number of records a worker's writer commits
-  // before it makes them visible to readers on its own, from 1 to 1024;
-  // 0 selects the default of 8.
+  // publish_batch is the number of records a writer commits before it
+  // shows them to readers by itself.
+  //
+  // The range is 1 to 1024. A value of 0 selects the default of 8.
   uint32 publish_batch = 3;
 }
 
-// CreateRingResponse is empty; a successful call publishes the new ring.
+// CreateRingResponse is empty.
+//
+// A successful call publishes the new ring.
 message CreateRingResponse {}
 
-// ListRingsRequest carries no fields; ListRings always returns every
-// registered ring.
+// ListRingsRequest has no fields.
+//
+// ListRings always returns every registered ring.
 message ListRingsRequest {}
 
-// ListRingsResponse lists every registered ring, sorted by name, with the
-// facts ShowRing returns for each.
+// ListRingsResponse lists every registered ring, sorted by name.
+//
+// Each ring has the same fields that ShowRing returns.
 message ListRingsResponse {
   repeated RingInfo rings = 1;
 }
@@ -77,17 +90,21 @@ message ShowRingRequest {
   string name = 1;
 }
 
-// ShowRingResponse carries the facts of one named ring.
+// ShowRingResponse describes one named ring.
 message ShowRingResponse {
   RingInfo ring = 1;
 }
 
 // DeleteRingRequest names the ring to remove.
 message DeleteRingRequest {
-  // name identifies the ring to remove; deletion fails while the ring is
-  // leased or still linked into a published configuration generation.
+  // name identifies the ring to remove.
+  //
+  // The delete fails while the ring has a lease. It also fails while a
+  // published configuration generation still links the ring.
   string name = 1;
 }
 
-// DeleteRingResponse is empty; a successful call unpublishes the ring.
+// DeleteRingResponse is empty.
+//
+// A successful call unpublishes the ring.
 message DeleteRingResponse {}

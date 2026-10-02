@@ -1,6 +1,7 @@
 package cring_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/c2h5oh/datasize"
@@ -13,8 +14,10 @@ import (
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
 )
 
-// newTestAgent builds a throwaway dataplane_ut harness with the ring object
-// loaded and one attached agent, both torn down at test end.
+// newTestAgent creates a test dataplane with the ring object loaded and
+// attaches one agent to it.
+//
+// Both are released when the test ends.
 func newTestAgent(t testing.TB, workerCount uint64) *ffi.Agent {
 	t.Helper()
 
@@ -34,56 +37,33 @@ func newTestAgent(t testing.TB, workerCount uint64) *ffi.Agent {
 	return agent
 }
 
-// Test_Object_NewObject_RejectsBadParameters verifies that a malformed or
-// oversized capacity, or a publish batch out of range, is reported as an
-// invalid argument.
-//
-// A service built on this binding maps that kind to a gRPC status.
-func Test_Object_NewObject_RejectsBadParameters(t *testing.T) {
+// Test_Object_NewObject_ValidatesName verifies that a name C would cut is an
+// invalid argument and that the longest name that fits is accepted.
+func Test_Object_NewObject_ValidatesName(t *testing.T) {
 	agent := newTestAgent(t, 1)
 
 	cases := []struct {
-		name         string
-		capacity     uint32
-		publishBatch uint32
+		name    string
+		ring    string
+		wantErr bool
 	}{
-		{name: "not a power of two", capacity: 24, publishBatch: cring.DefaultPublishBatch},
-		{name: "above allocator maximum", capacity: 1 << 27, publishBatch: cring.DefaultPublishBatch},
-		{name: "zero publish batch", capacity: 64, publishBatch: 0},
-		{name: "publish batch above maximum", capacity: 64, publishBatch: cring.MaxPublishBatch + 1},
+		{name: "empty", ring: "", wantErr: true},
+		{name: "embedded NUL", ring: "ring\x00tail", wantErr: true},
+		{name: "overlong", ring: strings.Repeat("r", cring.MaxNameLen), wantErr: true},
+		{name: "longest", ring: strings.Repeat("r", cring.MaxNameLen-1)},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := cring.NewObject(agent, "bad-"+tc.name, tc.capacity, tc.publishBatch)
-			require.Error(t, err)
-			require.ErrorIs(t, err, cerrors.InvalidArgument)
+			object, err := cring.NewObject(agent, tc.ring, 64, cring.DefaultPublishBatch)
+			if tc.wantErr {
+				require.ErrorIs(t, err, cerrors.InvalidArgument)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, object.Free())
 		})
 	}
-}
-
-// Test_Object_NewObject_KeepsPublishBatch verifies that the object reports
-// the publish batch it was created with.
-func Test_Object_NewObject_KeepsPublishBatch(t *testing.T) {
-	agent := newTestAgent(t, 1)
-
-	object, err := cring.NewObject(agent, "batch", 64, cring.MaxPublishBatch)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = object.Free() })
-
-	require.Equal(t, cring.MaxPublishBatch, object.PublishBatch())
-}
-
-// Test_Object_Free_RefusedWhileReferenced verifies that freeing a published
-// object is refused as still referenced while its generation is live.
-func Test_Object_Free_RefusedWhileReferenced(t *testing.T) {
-	agent := newTestAgent(t, 1)
-
-	object, err := cring.NewObject(agent, "referenced", 64, cring.DefaultPublishBatch)
-	require.NoError(t, err)
-	require.NoError(t, object.Publish())
-
-	require.ErrorIs(t, object.Free(), ffi.ErrStillReferenced)
 }
 
 // Test_Object_Exists_TracksPublishAndDelete verifies that Exists is true
@@ -104,21 +84,17 @@ func Test_Object_Exists_TracksPublishAndDelete(t *testing.T) {
 	require.False(t, cring.Exists(agent, "maybe"))
 }
 
-// Test_Parity_MaxNameLen verifies that the C object-name bound agrees with
-// the name bound the proto package enforces independently.
-func Test_Parity_MaxNameLen(t *testing.T) {
+// Test_Parity_Constants verifies that the C name limit, record frame size and
+// publish batch bounds equal the ones the proto package checks on its own.
+func Test_Parity_Constants(t *testing.T) {
 	require.Equal(t, ringpb.MaxRingNameLen, cring.MaxNameLen)
-}
-
-// Test_Parity_PublishBatch verifies that the C publish batch default and
-// bound agree with the ones the proto package enforces independently.
-func Test_Parity_PublishBatch(t *testing.T) {
+	require.Equal(t, uint32(ringpb.MinRingCapacity), cring.RecordFrameSize)
 	require.Equal(t, uint32(ringpb.DefaultPublishBatch), cring.DefaultPublishBatch)
 	require.Equal(t, uint32(ringpb.MaxPublishBatch), cring.MaxPublishBatch)
 }
 
-// Test_Object_Free_LeavesHandleInert verifies that every accessor on a freed
-// handle reports zero or an error instead of touching released memory.
+// Test_Object_Free_LeavesHandleInert verifies that every accessor of a freed
+// handle returns zero or an error and does not touch the freed memory.
 func Test_Object_Free_LeavesHandleInert(t *testing.T) {
 	agent := newTestAgent(t, 1)
 

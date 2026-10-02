@@ -46,7 +46,6 @@ const (
 	CLIDevicePlain = CLIBasePath + "/yanet-cli-device-plain"
 	CLIDecap       = CLIBasePath + "/yanet-cli-decap"
 	CLIForward     = CLIBasePath + "/yanet-cli-forward"
-	CLIPdump       = CLIBasePath + "/yanet-cli-pdump"
 	CLIRing        = CLIBasePath + "/yanet-cli-ring"
 	CLIGeneric     = CLIBasePath + "/yanet-cli"
 

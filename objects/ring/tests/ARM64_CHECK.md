@@ -37,8 +37,8 @@ git clone -b test/ring-arm64-check https://github.com/sakateka/yanet2.git yanet2
 
 Options:
 
-- `--quick` (passed to `arm64-check.sh`): a short smoke run, about 5
-  minutes after the build. The default run takes about 12-18 minutes after
+- `--quick` (passed to `arm64-check.sh`): a short smoke run, about 3
+  minutes after the build. The default run takes about 10 minutes after
   the build.
 - `--yes`: install Nix without asking (for unattended runs; without a
   terminal the script refuses to install unless `--yes` is given).
@@ -82,6 +82,41 @@ objects/ring/tests/arm64-check.sh [--quick]
 The script reuses an existing configured `build/` and never reconfigures
 it.
 
+## How the no-fence build is made
+
+The writer's fence lives in `ring_evict_fence()` in `common/ring.h`. On
+this branch only, `-DRING_TEST_NO_EVICT_FENCE` compiles it out to
+reproduce the pre-fence writer. The ring code reaches Go through two
+meson-built archives, `libring_objects.a` and `libringtest_writer.a` (the
+C writer of the Go tests), so the no-fence variant needs its own meson
+build:
+
+- `build-nofence/` (gitignored) is configured once with the options
+  `build/` was configured with (`build/meson-private/cmd_line.txt`) plus
+  the knob in `c_args`, by the same meson. Only `ring_objects`,
+  `ringtest_writer` and `ring_bench` are compiled there. The script then
+  checks in its `compile_commands.json` that their sources carry the knob
+  and the cache line size of `build/`; remove `build-nofence/` if it
+  refuses one left from another configuration.
+- The no-fence Go test binary is built with
+  `CGO_LDFLAGS=-L$PWD/build-nofence/objects/ring/tests -L$PWD/build-nofence/objects/ring/api`:
+  go puts `CGO_LDFLAGS` before the packages' own `#cgo LDFLAGS`, so these
+  archives win over the ones in `build/` (`libconfig_cp.a` still comes from
+  `build/`). `CGO_CFLAGS` gets the knob too, for the cgo preambles.
+- Each Go build's `CGO_CPPFLAGS` carries a hash of the ring headers and of
+  the two archives it links, so the Go build cache never serves a test
+  binary linked against another build's or an older archive.
+
+By hand, for example:
+
+```bash
+meson setup build-nofence -Dc_args=-DRING_TEST_NO_EVICT_FENCE
+meson compile -C build-nofence objects/ring/api/ring_objects objects/ring/tests/ringtest_writer tests/common/ring_bench
+CGO_CFLAGS="$(go env CGO_CFLAGS) -DRING_TEST_NO_EVICT_FENCE" \
+CGO_LDFLAGS="-L$PWD/build-nofence/objects/ring/tests -L$PWD/build-nofence/objects/ring/api" \
+	go test -count=1 -run 'Stress' ./objects/ring/bindings/go/cring
+```
+
 ## What it checks
 
 | Section | Verdict |
@@ -89,9 +124,9 @@ it.
 | preflight | Architecture, CPU model, tools. Fails if a tool is missing. |
 | build | Builds with meson, generates protobufs and prints DPDK's cache line size. Fails if the C build and DPDK disagree on it. Every Go build gets that size through `CGO_CPPFLAGS`, like the Makefile. |
 | correctness | `meson test ring ring_object pdump_ring` and `go test ./objects/ring/...`. |
-| codegen | Builds the Go stress binary and `ring_bench` twice, with and without `-DRING_TEST_NO_EVICT_FENCE`, and disassembles the writer and the Go reader. On aarch64 the writer must publish each eviction chunk with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. A probe of one producer call (commit records, publish at the end) must hold one to three publication `stlr` (explicit, full publish batch, full batch limit) plus the eviction's, and one fence right after the eviction's. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).Read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
-| stress | A C writer thread overwrites a small ring at full speed, the ring publishing every 8 records (its publish batch, `RING_CHECK_STRESS_BATCH`), while the production Go reader checks every record it returns. Runs cover both builds, several ring capacities and repetitions. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
-| performance | Runs `ring_bench` for both builds with every writer and reader thread pinned to its own CPU, and prints median ns/record of both writers alone and with one concurrent reader per worker, unpaced and paced to fixed record rates, with the ring's publish batch at 1, 8 or 32 records and its reader reading up to the published position (`--quick` runs a smaller size, rate and batch matrix). The full reader is the production read protocol transcribed to C; the index-only reader issues the same index loads and cursor atomics without touching the data area. The reader table gives each reader's rate, loss and bad records. Then runs the Go reader benchmarks from both cring test binaries: a prefilled ring with no writer, and a full-speed C writer. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
+| codegen | Builds the cring Go test binary and takes `ring_bench` from both builds, and disassembles the writer and the Go reader. The writer functions are `ringtest_stress_run`/`ringtest_commit_record` (cring) and `writer_thread`/`writer_write` (ring_bench), plus `ring_worker_prepare`/`ring_worker_evict` when not inlined. On every architecture, the stress writer of each cring binary must match its own build's `libringtest_writer.a` and not the other build's, which proves the no-fence binary linked the no-fence archive. On aarch64 the writer must publish each eviction chunk with one `stlr` of the readable position directly followed by one release fence (`dmb ish`, or `dmb ishld` + `dmb ishst` from newer GCC), with no `ldadd`; the no-fence build must have no `dmb`. A probe of one producer call (commit records, publish at the end) must hold one to three publication `stlr` (explicit, full publish batch, full batch limit) plus the eviction's, and one fence right after the eviction's. The reader's `(*shmSource).Indices` must use `ldar` for both indices, and `(*Reader).Read` must do the cursor add with `ldaddal` or an `ldaxr`/`stlxr` pair. On x86-64 everything is reported only. |
+| stress | `Test_Reader_Stress_ConcurrentWriterNeverTears`: a C writer thread overwrites a 4 KiB ring with the default publish batch at full speed while the production Go reader checks every record it returns; one iteration writes a fixed record count. The test has no knobs, so a run repeats it with `-test.count`, calibrated to `RING_CHECK_STRESS_SECONDS` (or `RING_CHECK_STRESS_COUNT`), for both builds and several runs. The fence build must return **zero torn records**. torn > 0 in the no-fence build reproduces the original bug. It is reported, but the run never fails because of it, since a reproduction is not guaranteed. |
+| performance | Runs `ring_bench` of both builds, alternating, one run per invocation, with every writer and reader thread pinned to its own CPU (`RING_CHECK_BENCH_CPUS`, passed as `RING_BENCH_CPUS`), parses its two tables and prints medians over the invocations: writer ns/record per publish batch (1, 8, 32) for a no-overflow ring, a 1 MiB evicting ring, and the 1 MiB ring with a full reader per writer, fence against no-fence; and the full reader's Mrec/s and lost % per batch. Then runs the Go reader benchmark (prefilled ring, no writer) from the fence build. Fails only if a benchmark fails or the fence build's reader returns a bad record. |
 
 The script exits non-zero only when there is a real failure (build, tests,
 codegen on aarch64, or a torn record in the fence build).
@@ -107,34 +142,28 @@ by the tables:
   release store of the readable position) and `L == 0` (no
   read-modify-write on it); the `nofence` rows need `D == 0`. `lock`
   counts x86-64 lock-prefixed instructions and is 0 there too.
+- Stress writer against the archives: each build reads `matches its own
+  build's archive`. `unverified` means the linker rewrote an instruction;
+  `matches the ... build's archive` is a harness failure.
 - Go reader: `(*shmSource).Indices` shows `ldar=2` on aarch64 (the
   acquire loads the snapshot and the recheck use). `(*Reader).read`
   shows `ldaddal >= 1`, or `ldaxr` and `stlxr` without LSE; Go builds
   for plain ARMv8.0 contain both and pick one at run time. On x86-64
   expect `lock_xadd=1` and zeros elsewhere.
-- Stress: `torn` is 0 for every `fence` row. `runs_torn` for the `nofence`
-  rows counts the runs that reproduced the bug.
-- Benchmark tables, one metric per table: columns are `old` (the pdump
-  writer and reader), then the ring writer with a publish batch of N
-  records (`bN`). Writer cost tables are the fence build;
-  each has a matching "fence cost, %" table, the fence build against the
-  no-fence build of the same cell (`n/r` when a paced base is too close
-  to the timer's resolution).
-- Writer cost by reader: when the index-only column is close to the
-  full-reader one, the cost comes from sharing the published index cache
-  line with the reader, not the data lines. A paced writer writes bursts
-  of records spaced at the target rate (whole batches for `bN`) and times
-  each burst with one pair of timer reads; the burst spans at least ~100
-  ticks of the coarse arm64 counter (~42 ns per tick). `<x` marks a cost
-  at or below one tick per burst, `*` a writer that could not reach the
-  rate.
-- Reader throughput and lost records: `lost` is the share of records
-  overwritten before the reader reached them. The bad-record line counts
-  returned records with a wrong length, magic or out-of-order sequence
-  number: it must be 0 for the ring in the fence build.
+- Stress: `torn` is 0 for the `fence` row. `iters_torn` for the
+  `nofence` row counts the test iterations that reproduced the bug.
+- Writer cost: per publish batch `bN`, the fence build, the no-fence build
+  and `fence %`, the fence build against the no-fence build of the same
+  cell. The `no-overflow` rows never evict, so their fence % is noise and
+  shows the measurement's spread; `1 MiB` is the eviction cost alone, and
+  `1 MiB+reader` adds a reader sharing the published index and data lines.
+- Reader: Mrec/s per reader and `lost %`, the share of committed records
+  overwritten before the reader reached them, for both builds. The
+  bad-record line counts returned records with a wrong length or
+  out-of-order sequence number and corrupt reads: it must be 0 in the
+  fence build.
 - Go reader: ns/record, Mrecords/s and MB/s of the production reader over
-  the real shared-memory ring, for each build; `lost%` only for the
-  concurrent-writer case, whose ring has the default publish batch.
+  a prefilled shared-memory ring.
 
 ## What to send back
 

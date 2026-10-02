@@ -92,6 +92,8 @@ buildclang/
 build/
 # Reports of objects/ring/tests/arm64-check.sh
 /arm64-check-*.txt
+# No-fence build directory of the same script
+/build-nofence/
 web/dist/
 
 # generated files

@@ -1,13 +1,6 @@
-// Package ringtest holds cgo test helpers for the ring object: they reach
-// into the C ring and the config registry in ways no production path does,
-// so tests can control timing and state precisely.
+// Package ringtest holds CGo test helpers for the ring object.
 //
-//   - Writer drives the C ring writer against one worker's ring, to control
-//     eviction and commit timing; Stress runs it on its own OS thread.
-//   - Hold places an artificial extra reference on a published ring, to
-//     reproduce a refused free without generation timing.
-//   - LinkRing links a module config to a named ring, to reproduce the
-//     refusal to delete a linked ring.
-//
-// Only tests import this package.
+// They drive the C ring writer, hold extra references and link module
+// configs to rings. Their C code is built by meson with the ring object
+// archive's cache line size. Only tests import this package.
 package ringtest

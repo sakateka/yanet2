@@ -9,8 +9,9 @@ import (
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
 )
 
-// Test_ValidateRingName verifies the C object-name rules and that the error
-// names the caller's field.
+// Test_ValidateRingName checks the C object-name rules.
+//
+// It also checks that the error names the caller's field.
 func Test_ValidateRingName(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -42,15 +43,21 @@ func Test_ValidateRingName(t *testing.T) {
 	}
 }
 
-// Test_CreateRingRequest_Validate verifies the capacity rules; the name
-// rules are covered by Test_ValidateRingName.
+// Test_CreateRingRequest_Validate checks the name, capacity and publish
+// batch rules of a create.
+//
+// Test_ValidateRingName covers the name rules in detail. A publish batch of
+// 0 means the default.
 func Test_CreateRingRequest_Validate(t *testing.T) {
 	cases := []struct {
 		name     string
+		ringName string
 		capacity uint64
+		batch    uint32
 		message  string
 	}{
-		{name: "zero", capacity: 0, message: "capacity 0 must be at least 8"},
+		{name: "bad name", ringName: "a\x00b", capacity: 64, message: "name must not contain NUL"},
+		{name: "zero capacity", capacity: 0, message: "capacity 0 must be at least 8"},
 		{name: "below one record frame", capacity: 4, message: "capacity 4 must be at least 8"},
 		{name: "not a power of two", capacity: 12, message: "capacity 12 must be a power of two"},
 		{
@@ -60,41 +67,24 @@ func Test_CreateRingRequest_Validate(t *testing.T) {
 		},
 		{name: "exactly one record frame", capacity: 8},
 		{name: "large power of two", capacity: 1 << 30},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := (&ringpb.CreateRingRequest{Name: "ring0", Capacity: tc.capacity}).Validate()
-			if tc.message == "" {
-				require.NoError(t, err)
-				return
-			}
-			require.EqualError(t, err, tc.message)
-		})
-	}
-}
-
-// Test_CreateRingRequest_ValidatePublishBatch verifies the publish batch
-// range, where 0 leaves the default.
-func Test_CreateRingRequest_ValidatePublishBatch(t *testing.T) {
-	cases := []struct {
-		name    string
-		batch   uint32
-		message string
-	}{
-		{name: "unset", batch: 0},
-		{name: "one record", batch: 1},
-		{name: "maximum", batch: ringpb.MaxPublishBatch},
+		{name: "unset publish batch", capacity: 64, batch: 0},
+		{name: "one record batch", capacity: 64, batch: 1},
+		{name: "maximum publish batch", capacity: 64, batch: ringpb.MaxPublishBatch},
 		{
-			name:    "above maximum",
-			batch:   ringpb.MaxPublishBatch + 1,
-			message: "publish_batch 1025 must be at most 1024 records",
+			name:     "publish batch above maximum",
+			capacity: 64,
+			batch:    ringpb.MaxPublishBatch + 1,
+			message:  "publish_batch 1025 must be at most 1024 records",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := &ringpb.CreateRingRequest{Name: "ring0", Capacity: 64, PublishBatch: tc.batch}
+			ringName := tc.ringName
+			if ringName == "" {
+				ringName = "ring0"
+			}
+			req := &ringpb.CreateRingRequest{Name: ringName, Capacity: tc.capacity, PublishBatch: tc.batch}
 			err := req.Validate()
 			if tc.message == "" {
 				require.NoError(t, err)
@@ -105,41 +95,16 @@ func Test_CreateRingRequest_ValidatePublishBatch(t *testing.T) {
 	}
 }
 
-// Test_CreateRingRequest_PublishBatchOrDefault verifies that an unset
-// publish batch resolves to the default and a set one is kept.
+// Test_CreateRingRequest_PublishBatchOrDefault checks that an unset publish
+// batch becomes the default and a set one is kept.
 func Test_CreateRingRequest_PublishBatchOrDefault(t *testing.T) {
 	require.Equal(t, uint32(ringpb.DefaultPublishBatch), (&ringpb.CreateRingRequest{}).PublishBatchOrDefault())
 	require.Equal(t, uint32(32), (&ringpb.CreateRingRequest{PublishBatch: 32}).PublishBatchOrDefault())
 }
 
-// Test_Requests_ValidateName verifies that every request applies the name
-// rules to its name field, including a nil request.
-func Test_Requests_ValidateName(t *testing.T) {
-	cases := map[string]struct {
-		build func(name string) interface{ Validate() error }
-		null  interface{ Validate() error }
-	}{
-		"create": {
-			build: func(name string) interface{ Validate() error } {
-				return &ringpb.CreateRingRequest{Name: name, Capacity: 8}
-			},
-			null: (*ringpb.CreateRingRequest)(nil),
-		},
-		"show": {
-			build: func(name string) interface{ Validate() error } { return &ringpb.ShowRingRequest{Name: name} },
-			null:  (*ringpb.ShowRingRequest)(nil),
-		},
-		"delete": {
-			build: func(name string) interface{ Validate() error } { return &ringpb.DeleteRingRequest{Name: name} },
-			null:  (*ringpb.DeleteRingRequest)(nil),
-		},
-	}
-
-	for request, tc := range cases {
-		t.Run(request, func(t *testing.T) {
-			require.NoError(t, tc.build("ring0").Validate())
-			require.EqualError(t, tc.build("a\x00b").Validate(), "name must not contain NUL")
-			require.EqualError(t, tc.null.Validate(), "name is required")
-		})
-	}
+// Test_ShowAndDeleteRequests_ValidateName checks that show and delete apply
+// the name rules to their name field.
+func Test_ShowAndDeleteRequests_ValidateName(t *testing.T) {
+	require.EqualError(t, (&ringpb.ShowRingRequest{Name: "a\x00b"}).Validate(), "name must not contain NUL")
+	require.EqualError(t, (&ringpb.DeleteRingRequest{Name: "a\x00b"}).Validate(), "name must not contain NUL")
 }

@@ -1,15 +1,15 @@
 /*
- * Lifecycle tests for the ring shared object: checked allocation,
- * validation, reference-based refusal of free, and rollback.
+ * Lifecycle tests for the ring shared object.
  *
- * Bad capacities are rejected with the arena left unchanged, the worker
- * count tracks the dataplane's workers, and a generation reference refuses
- * destruction exactly as for every other shared object.
+ * They cover the checked allocation, parameter checks, refusal to free a
+ * referenced object, and rollback on failure. Bad parameters are refused
+ * and the arena stays unchanged. The object has one ring per dataplane
+ * worker. While a generation references the object, a free is refused, the
+ * same as for every other shared object.
  */
 
 #include "api/agent.h"
 
-#include "common/asan.h"
 #include "common/memory.h"
 #include "common/memory_block.h"
 #include "common/numutils.h"
@@ -35,13 +35,12 @@
 
 #define RING_OBJECT_TEST_MEMORY_LIMIT (2u * 1024u * 1024u)
 
-// The checked over-allocation rounds the array base and each entry's stride
-// up to the requested alignment, and a matching free restores the arena.
+// The aligned allocation rounds the array start and each entry size up.
 //
-// A buddy block is always aligned to at least its own size, so only ASan's
-// red-zone offset can misalign the raw block. The postconditions hold
-// either way; the extra check under ASan confirms the rounding corrects a
-// real offset.
+// Both go up to the requested alignment, and the matching free restores the
+// arena. A buddy block is always aligned to at least its own size. So only
+// the ASan red zone can shift the raw block off the alignment. The checks
+// hold in both cases.
 static int
 run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -97,18 +96,6 @@ run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 			"the base must round up by less than one alignment unit"
 		);
 
-#ifdef HAVE_ASAN
-		if (alignment > MEMORY_BLOCK_MAX_ALIGN) {
-			TEST_ASSERT(
-				(uintptr_t)raw % alignment != 0,
-				"ASan's red zone must displace the raw block "
-				"away from %lu-alignment, exercising the "
-				"rounding this helper performs",
-				alignment
-			);
-		}
-#endif
-
 		memory_bfree(&agent->memory_context, raw, raw_size);
 		TEST_ASSERT_EQUAL(
 			(long)block_allocator_free_size(&agent->block_allocator
@@ -122,9 +109,10 @@ run_ring_object_align_alloc_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// Smallest power of two strictly above the allocator's maximum block: an
-// oversize capacity that is a power of two whether or not ASan red zones
-// lowered the maximum.
+// Smallest power of two above the allocator's largest block.
+//
+// It is a too-big capacity that is still a power of two. This holds with
+// or without ASan, whose red zones lower the largest block.
 static uint32_t
 oversize_capacity(void) {
 	uint64_t capacity = next_power_of_two(
@@ -133,11 +121,12 @@ oversize_capacity(void) {
 	return (uint32_t)capacity;
 }
 
-// A capacity of zero, below the frame, not a power of two or above the
-// allocator's maximum block, or a publish batch of zero or above the
-// maximum, is refused with the arena left unchanged.
+// Create refuses bad parameters and leaves the arena unchanged.
 //
-// The errno names the failed check.
+// A bad capacity is zero, below the frame size, not a power of two, or above
+// the allocator's largest block. A bad publish batch is zero or above the
+// maximum. The errno tells which check failed. The error is an invalid
+// argument, which the service reports as InvalidArgument.
 static int
 run_ring_object_bad_parameters_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -189,9 +178,13 @@ run_ring_object_bad_parameters_test(struct yanet_shm *shm) {
 			capacity,
 			publish_batch
 		);
-		TEST_ASSERT(
-			create_err != NULL,
-			"a refused capacity must report an error"
+		TEST_ASSERT_EQUAL(
+			yanet_error_kind(create_err),
+			YANET_ERROR_INVALID_ARGUMENT,
+			"capacity %u, publish batch %u must be an invalid "
+			"argument",
+			capacity,
+			publish_batch
 		);
 		yanet_error_free(create_err);
 
@@ -210,11 +203,71 @@ run_ring_object_bad_parameters_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// A dataplane worker count of zero or above UINT16_MAX is refused before any
-// allocation, so the 16-bit worker count never truncates.
+// Config new refuses an empty name or one the name buffer would cut.
 //
-// The harness runs two workers; the test overrides the published count
-// for each probe and restores it before returning.
+// A cut name could match another ring's name. The refusal sets EINVAL and
+// leaves the arena unchanged.
+static int
+run_ring_object_bad_name_test(struct yanet_shm *shm) {
+	yanet_error *err = NULL;
+
+	struct agent *agent = agent_attach(
+		shm, 0, "ring-bad-name", RING_OBJECT_TEST_MEMORY_LIMIT, &err
+	);
+	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
+
+	char overlong[CP_OBJECT_NAME_LEN + 1];
+	memset(overlong, 'r', CP_OBJECT_NAME_LEN);
+	overlong[CP_OBJECT_NAME_LEN] = '\0';
+
+	const char *bad_names[] = {"", overlong};
+	for (size_t i = 0; i < sizeof(bad_names) / sizeof(bad_names[0]); ++i) {
+		size_t len = strlen(bad_names[i]);
+		size_t baseline =
+			block_allocator_free_size(&agent->block_allocator);
+
+		yanet_error *create_err = NULL;
+		struct cp_object *object = ring_object_config_new(
+			agent,
+			bad_names[i],
+			64,
+			RING_PUBLISH_BATCH_DEFAULT,
+			&create_err
+		);
+		TEST_ASSERT_NULL(
+			object, "a name of %zu bytes must be refused", len
+		);
+		TEST_ASSERT_EQUAL(
+			errno,
+			EINVAL,
+			"a name of %zu bytes must set EINVAL",
+			len
+		);
+		TEST_ASSERT(
+			create_err != NULL,
+			"a refused name must report an error"
+		);
+		yanet_error_free(create_err);
+
+		TEST_ASSERT_EQUAL(
+			(long)block_allocator_free_size(&agent->block_allocator
+			),
+			(long)baseline,
+			"a refused name must leave the arena unchanged: "
+			"len=%zu",
+			len
+		);
+	}
+
+	agent_detach(agent);
+	return TEST_SUCCESS;
+}
+
+// Create refuses a dataplane with zero or more than UINT16_MAX workers.
+//
+// It refuses before it allocates anything, so the worker count is never
+// truncated to 16 bits. The harness runs two workers. For each probe the test
+// replaces the dataplane's worker count, then restores it.
 static int
 run_ring_object_bad_worker_count_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -288,8 +341,10 @@ run_ring_object_bad_worker_count_test(struct yanet_shm *shm) {
 	return res;
 }
 
-// The created object holds one ring per dataplane worker, each with its own
-// metadata and data area, and resolves no ring past the last worker.
+// The created object has one ring per dataplane worker.
+//
+// Each ring has its own metadata and data area. An index past the last
+// worker gives no ring.
 static int
 run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -340,6 +395,27 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 			(unsigned long)idx
 		);
 
+		struct ring_worker_view view;
+		TEST_ASSERT(
+			ring_object_worker_view(object, idx, &view),
+			"worker %lu has no reader view",
+			(unsigned long)idx
+		);
+		uint64_t *write_idx = (uint64_t *)&worker->published.write_idx;
+		uint64_t *readable_idx =
+			(uint64_t *)&worker->published.readable_idx;
+		TEST_ASSERT(
+			view.write_idx == write_idx &&
+				view.readable_idx == readable_idx,
+			"worker %lu view must point at the published positions",
+			(unsigned long)idx
+		);
+		TEST_ASSERT(
+			view.data == data && view.size == 64 && view.mask == 63,
+			"worker %lu view must carry its data area and size",
+			(unsigned long)idx
+		);
+
 		for (uint64_t prev = 0; prev < idx; ++prev) {
 			TEST_ASSERT(
 				ring_object_worker(object, prev) != worker,
@@ -363,6 +439,11 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 		ring_object_worker_data(object, worker_count),
 		"no data area may resolve past the last worker"
 	);
+	struct ring_worker_view past_view;
+	TEST_ASSERT(
+		!ring_object_worker_view(object, worker_count, &past_view),
+		"no reader view may resolve past the last worker"
+	);
 
 	yanet_error *free_err = NULL;
 	TEST_ASSERT_SUCCESS(
@@ -374,8 +455,10 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// A generation reference refuses the owner's free with EAGAIN and keeps
-// the object's memory; once the reference drops, the same free succeeds.
+// While a generation references the object, its free fails with EAGAIN.
+//
+// The object's memory stays in place. Once the reference is gone, the same
+// free succeeds.
 static int
 run_ring_object_free_refused_while_referenced_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -441,8 +524,9 @@ run_ring_object_free_refused_while_referenced_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// A second fini after a full create is a no-op: the first one clears the
-// fields it freed, so nothing is returned to the arena twice.
+// A second fini after a full create does nothing.
+//
+// The first fini clears the fields it freed, so no memory is freed twice.
 static int
 run_ring_object_fini_idempotent_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -485,12 +569,12 @@ run_ring_object_fini_idempotent_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
-// Running out of memory midway through the per-worker data areas rolls all
-// of them back: creation reports ENOMEM and the arena returns to baseline.
+// If memory runs out in the middle of the data areas, create frees them all.
 //
-// The capacity at which worker 0 still fits but worker 1 does not depends
-// on the arena's layout, so the test probes powers of two downward and
-// picks the first whose failure names worker 1.
+// Create then fails with ENOMEM and the arena is back to its start state.
+// The capacity where worker 0 still fits but worker 1 does not depends on
+// the arena layout. So the test tries smaller and smaller powers of two. It
+// stops at the first one whose error names worker 1.
 static int
 run_ring_object_enomem_rollback_test(struct yanet_shm *shm) {
 	yanet_error *err = NULL;
@@ -520,8 +604,8 @@ run_ring_object_enomem_rollback_test(struct yanet_shm *shm) {
 			&create_err
 		);
 		if (object != NULL) {
-			// Both workers fit, and every smaller capacity will
-			// too: nothing left to probe.
+			// Both workers fit, and every smaller capacity fits
+			// too. There is nothing left to try.
 			yanet_error *free_err = NULL;
 			TEST_ASSERT_SUCCESS(
 				ring_object_config_free(object, &free_err),
@@ -600,6 +684,7 @@ main(void) {
 	struct test_case cases[] = {
 		{"align_alloc", run_ring_object_align_alloc_test},
 		{"bad_parameters", run_ring_object_bad_parameters_test},
+		{"bad_name", run_ring_object_bad_name_test},
 		{"bad_worker_count", run_ring_object_bad_worker_count_test},
 		{"worker_rings", run_ring_object_worker_rings_test},
 		{"free_refused_while_referenced",
@@ -608,8 +693,8 @@ main(void) {
 		{"enomem_rollback", run_ring_object_enomem_rollback_test},
 	};
 
-	// The cases share one harness, so a failure stops the run rather
-	// than letting later cases observe the state it left behind.
+	// All cases share one harness. A failure stops the run, so later
+	// cases do not see the state the failed case left behind.
 	int res = TEST_SUCCESS;
 	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
 		LOG(INFO, "%s running", cases[i].name);

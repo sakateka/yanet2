@@ -10,39 +10,44 @@ import (
 	"sync/atomic"
 )
 
-// RecordFrameSize is the wire size of the frame preceding every record's
-// payload: the smallest declared record length a ring accepts.
+// RecordFrameSize is the size of the frame in front of every record's
+// payload.
+//
+// It is also the smallest record length a ring accepts.
 const RecordFrameSize = uint32(C.RING_RECORD_FRAME_SIZE)
 
-// Record is one payload parsed out of a worker's ring, tagged with its
-// worker and the sequence number the writer stamped at commit.
+// Record is one payload read from a worker's ring.
 //
-// The payload is owned by the returned records alone (the records of one
-// read share one allocation), so it stays unchanged across later reads. Its
-// capacity is capped to its length, so appending always allocates instead
-// of reaching into a neighbouring record.
+// It carries the worker index and the sequence number the writer stamped at
+// commit. The records of one read share one allocation, and nothing else
+// uses it. So a later read does not change the payload. The payload's
+// capacity equals its length, so an append allocates new memory and never
+// writes into the next record.
 type Record struct {
 	Worker uint16
 	Seqno  uint32
 	Bytes  []byte
 }
 
-// RecordSource supplies the raw primitives a Reader parses records from:
-// the shared index pair and a bounded copy of the ring's data area.
+// RecordSource gives a Reader raw access to one ring.
 //
-// A ring object provides the real shared-memory source; a substitute lets a
-// caller drive the read protocol against externally paced writer state.
+// It returns the two shared positions and copies bytes out of the data
+// area. A ring object provides the real source in shared memory. A caller
+// may pass its own source to run the read protocol against writer state
+// that the caller controls.
 type RecordSource interface {
-	// Indices returns the current write and readable logical positions, in
+	// Indices returns the current logical write and readable positions, in
 	// that order.
 	Indices() (write, readable uint64)
-	// CopyRange fills a destination of exactly the requested byte count
-	// from a logical offset of the data area, wrapping at its physical end.
+	// CopyRange copies the requested number of bytes from a logical offset
+	// of the data area.
+	//
+	// The destination is exactly as long as the request. The copy wraps at
+	// the physical end of the data area.
 	CopyRange(dst []byte, start, size uint64)
 }
 
-// shmSource is the RecordSource backed by one worker's real shared-memory
-// ring.
+// shmSource is the RecordSource of one worker's ring in shared memory.
 type shmSource struct {
 	writeIdx    *uint64
 	readableIdx *uint64
@@ -70,29 +75,30 @@ func (m *shmSource) CopyRange(dst []byte, start, size uint64) {
 	copy(dst[n:], m.data[:endPos])
 }
 
-// Reader parses published records out of one worker's ring, keeping a read
-// cursor independent of any other reader over the same worker.
+// Reader reads published records from one worker's ring.
 //
-// Read must not run concurrently with itself; HasMore may be polled from
-// another goroutine while it runs.
+// Each reader has its own read position. Other readers of the same worker
+// do not affect it. Only one goroutine may call Read at a time. Another
+// goroutine may call HasMore while Read runs.
 type Reader struct {
 	worker   uint16
 	capacity uint32
 	src      RecordSource
 
 	readIdx atomic.Uint64
-	// buf is scratch reused across calls and never handed to a caller.
+	// buf is a scratch buffer reused across calls. No caller ever gets it.
 	//
-	// Between calls it holds only the carried prefix of a record not yet
-	// fully copied, compacted to its front.
+	// Between calls it holds only the start of a record that is not yet
+	// fully copied. That start sits at the front of the buffer.
 	buf []byte
 }
 
-// NewReader builds a Reader that tags every parsed record with its worker
-// and bounds each declared record length by the ring's capacity.
+// NewReader creates a Reader for one worker's ring.
 //
-// Fails for a capacity below the frame size: no record fits such a ring,
-// and every declared length would be rejected as corruption.
+// The reader tags every record with the worker index. It treats a record
+// length above the ring capacity as corruption. NewReader fails for a
+// capacity below the frame size: no record fits such a ring, so every
+// length would look corrupt.
 func NewReader(worker uint16, capacity uint32, src RecordSource) (*Reader, error) {
 	if capacity < RecordFrameSize {
 		return nil, fmt.Errorf("ring capacity %d is below the record frame size %d", capacity, RecordFrameSize)
@@ -100,37 +106,36 @@ func NewReader(worker uint16, capacity uint32, src RecordSource) (*Reader, error
 	return &Reader{worker: worker, capacity: capacity, src: src}, nil
 }
 
-// HasMore reports whether Read would find data this Reader has not yet
-// consumed.
+// HasMore reports whether the ring has data this Reader has not read yet.
 func (m *Reader) HasMore() bool {
 	write, _ := m.src.Indices()
 	return write > m.readIdx.Load()
 }
 
-// Read copies up to the given byte budget of newly readable data and
-// parses the whole records it completes.
+// Read copies up to the given number of new bytes and returns the whole
+// records in them.
 //
-// After copying, the cursor advances and a recheck of the readable position
-// drops any prefix the writer invalidated mid-copy, so no caller sees a
-// trampled record. A declared length outside [frame size, capacity] is
-// corruption: the records parsed before it are returned, the rest of the
-// buffer is dropped, and the cursor resumes at the write position of this
-// call's snapshot. A steady-state call allocates only for the records it
-// returns: one slice and one payload block, none when none completed.
+// After the copy, Read moves its position forward and loads the readable
+// position again. If the writer evicted bytes during the copy, Read drops
+// them, so the caller never gets an overwritten record. A record length
+// outside [frame size, capacity] is corruption. Read then returns the
+// records before it, drops the rest of the buffer, and resumes at the write
+// position it loaded at the start. A normal call allocates one slice and
+// one payload block, and nothing when no record is complete.
 func (m *Reader) Read(maxBytes uint32) []Record {
 	write, readable := m.src.Indices()
 
 	if readable > m.readIdx.Load() {
-		// The writer evicted data this reader had not reached yet: any
-		// partial record buffered from a previous call is now stale.
+		// The writer evicted data this reader had not read yet. A partial
+		// record kept from the previous call is now invalid.
 		m.buf = m.buf[:0]
 		m.readIdx.Store(readable)
 	} else {
 		readable = m.readIdx.Load()
 	}
 
-	// Everything below the published write position is whole records,
-	// complete in memory.
+	// All bytes below the published write position belong to whole
+	// records that are fully written.
 	if write <= readable {
 		return nil
 	}
@@ -142,21 +147,22 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	m.buf = slices.Grow(m.buf, int(size))[:after]
 	m.src.CopyRange(m.buf[before:after], readable, size)
 
-	// Keep this add and the reload below atomic and in this order: on arm64
-	// they make the recheck see every eviction whose overwrite the copy saw.
+	// Keep this add and the reload below atomic and in this order.
 	//
-	// The writer advances the readable position before overwriting, so the
-	// copy's loads must finish before the position is reread. The release
-	// half of the add keeps them above it, and the acquire reload cannot
-	// move above a release. The add also publishes the cursor that the
-	// waker goroutine polls through HasMore.
+	// The writer moves the readable position forward before it overwrites
+	// bytes. So the copy's loads must finish before Read loads the position
+	// again. On arm64 the add is a release, so the copy stays above it. The
+	// reload is an acquire, so it cannot move above the add. The reload then
+	// sees every eviction whose new bytes the copy saw. The add also
+	// publishes the read position that HasMore checks from another goroutine.
 	m.readIdx.Add(size)
 
 	_, latest := m.src.Indices()
 	if latest > readable {
 		diff := latest - readable + uint64(before)
 		if diff > uint64(len(m.buf)) {
-			// Everything buffered was evicted: discard it, resume from latest.
+			// The writer evicted all buffered bytes. Drop them and resume at
+			// the new readable position.
 			m.buf = m.buf[:0]
 			m.readIdx.Store(latest)
 			return nil
@@ -164,8 +170,8 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 		m.dropPrefix(int(diff))
 	}
 
-	// First pass: count whole records and their payload bytes, so the
-	// second pass allocates exactly once for each.
+	// First pass: count whole records and their payload bytes. The second
+	// pass then allocates the slice and the payload block once each.
 	parsed := 0
 	count := 0
 	payloadBytes := 0
@@ -205,12 +211,12 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	}
 
 	if corrupt {
-		// Drop the untrusted remainder and resume at the snapshot's write
-		// position.
+		// Drop the rest of the buffer and resume at the write position loaded
+		// at the start.
 		//
-		// The writer advances that position only by whole committed
-		// records, so the next read starts at a real frame instead of
-		// parsing payload bytes as a header.
+		// The writer moves that position only by whole committed records. So
+		// the next read starts at a real frame and does not read payload bytes
+		// as a frame.
 		m.buf = m.buf[:0]
 		m.readIdx.Store(write)
 		return records
@@ -220,16 +226,18 @@ func (m *Reader) Read(maxBytes uint32) []Record {
 	return records
 }
 
-// dropPrefix discards a buffered prefix, compacting the rest to the front so
-// the capacity keeps being reused.
+// dropPrefix drops the given number of buffered bytes and moves the rest to the
+// front, so the buffer memory is reused.
 //
-// Safe because no returned record aliases the buffer.
+// This is safe because no returned record points into the buffer.
 func (m *Reader) dropPrefix(n int) {
 	m.buf = m.buf[:copy(m.buf, m.buf[n:])]
 }
 
 // align4 rounds a record length up to the 4-byte boundary every record
-// starts at, wrapping like the C writer's 32-bit arithmetic.
+// starts at.
+//
+// It wraps like the C writer's 32-bit arithmetic.
 func align4(totalLen uint32) uint32 {
 	return (totalLen + 3) &^ 3
 }

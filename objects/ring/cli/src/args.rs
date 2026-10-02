@@ -26,8 +26,8 @@ impl ModeCmd {
 
 /// Parses a per-worker capacity such as 1MiB or 4096 into bytes.
 ///
-/// Requires a power of two, which rules out decimal units such as 1MB; the
-/// service checks the range.
+/// The value must be a power of two. So decimal units such as 1MB are
+/// rejected. The service checks the range.
 pub(crate) fn parse_capacity(raw: &str) -> Result<u64, String> {
     let bytes = raw
         .parse::<bytesize::ByteSize>()
@@ -47,13 +47,13 @@ pub struct CreateCmd {
     #[arg(long = "name", short = 'n')]
     pub name: String,
 
-    /// Per-worker buffer size as a power of two in bytes or IEC units, such as
-    /// 64KiB or 1MiB.
+    /// Per-worker buffer size. A power of two in bytes or in IEC units, such
+    /// as 64KiB or 1MiB.
     #[arg(long, value_parser = parse_capacity)]
     pub capacity: u64,
 
-    /// Records a worker's writer commits before publishing them on its own,
-    /// from 1 to 1024; the service default when omitted.
+    /// Records a writer commits before it publishes them by itself. From 1 to
+    /// 1024. If omitted, the service uses its default.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=1024))]
     pub publish_batch: Option<u32>,
 }
@@ -70,4 +70,23 @@ pub struct DeleteCmd {
     /// Name of the ring to delete.
     #[arg(long = "name", short = 'n', add = ArgValueCandidates::new(crate::ring_candidates))]
     pub name: String,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_parse_capacity_accepts_powers_of_two() {
+        for (raw, bytes) in [("64", 64), ("4KiB", 4096), ("1MiB", 1 << 20)] {
+            assert_eq!(Ok(bytes), parse_capacity(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn test_parse_capacity_rejects_bad_values() {
+        for raw in ["lots", "1MB", "24", "0"] {
+            assert!(parse_capacity(raw).is_err(), "{raw}");
+        }
+    }
 }

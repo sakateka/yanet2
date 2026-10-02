@@ -1,11 +1,11 @@
 package ring
 
-// One internal lock covers every request that reads or changes the
-// registry, including admitting or dropping a lease, for its whole duration.
+// One lock covers each request that reads or changes the registry.
 //
-// A ring recreated under a name whose deletion is in progress, or a lease
-// admitted against a handle being deleted, could otherwise let a consumer
-// bind by handle to a ring the dataplane no longer has.
+// The request holds the lock from start to end. This includes taking and
+// releasing a lease. So a delete cannot overlap with a create of the same
+// name, or with a new lease on the same handle. Without this, a consumer
+// could bind by handle to a ring that the dataplane no longer has.
 
 import (
 	"context"
@@ -25,17 +25,18 @@ import (
 	ringpb "github.com/yanet-platform/yanet2/objects/ring/controlplane/ringpb/v1"
 )
 
-// Handle identifies one ring across its create-to-delete lifetime.
+// Handle identifies one ring from its create to its delete.
 //
-// A ring recreated under the same name after a delete gets a fresh handle,
-// so a lease acquired against the old handle never matches the new ring.
+// If a ring is deleted and then created again under the same name, the new
+// ring gets a new handle. A lease taken for the old handle never matches
+// the new ring.
 type Handle uint64
 
-// Lease pins one ring handle against deletion until Release.
+// Lease blocks the delete of one ring handle until Release.
 //
-// Acquired from RingService.Acquire; Release is the only way to drop the
-// pin, is idempotent, and only ever affects the handle it was acquired
-// for.
+// A lease comes from RingService.Acquire. Release is the only way to
+// remove the block. It is safe to call more than once. It only affects the
+// handle the lease was taken for.
 type Lease struct {
 	handle  Handle
 	once    sync.Once
@@ -47,16 +48,18 @@ func (m *Lease) Handle() Handle {
 	return m.handle
 }
 
-// Release drops this lease's pin. Safe to call more than once.
+// Release removes this lease's block on delete.
+//
+// It is safe to call more than once.
 func (m *Lease) Release() {
 	m.once.Do(m.release)
 }
 
-// ringEntry is one registered ring: owner data set once at create and never
-// mutated.
+// ringEntry is one registered ring.
 //
-// Only the service decides, under its lock, when an entry is replaced or
-// removed from the registry.
+// Its fields are set once at create and never change. Only the service,
+// while it holds its lock, replaces an entry or removes it from the
+// registry.
 type ringEntry struct {
 	Handle Handle
 	Name   string
@@ -83,30 +86,31 @@ func WithLog(log *zap.Logger) Option {
 	}
 }
 
-// RingService implements the gRPC service for standalone named rings and
-// owns every ring it creates.
+// RingService implements the gRPC service for standalone named rings.
 //
-// It is the only caller of a ring's free, and it hands out the leases a
-// consumer uses to bind to a ring by handle.
+// It owns every ring it creates. It is the only code that frees a ring. It
+// also gives out the leases that a consumer uses to bind to a ring by
+// handle.
 type RingService struct {
 	ringpb.UnimplementedRingServiceServer
 
 	mu    sync.Mutex
 	agent *ffi.Agent
 	rings map[string]*ringEntry
-	// leases counts active leases per handle and holds only positive
-	// counts: a missing key means zero.
+	// leases counts the active leases of each handle.
 	//
-	// Each lease decrements at most once, and a delete never removes a
-	// handle whose count is positive, so every decrement lands on a count
-	// a matching increment raised.
+	// It holds only positive counts. A missing key means zero. Each lease
+	// decrements its count at most once. A delete never removes a handle
+	// whose count is positive. So every decrement matches an earlier
+	// increment.
 	leases     map[Handle]int
 	nextHandle Handle
-	// deferred holds deleted entries whose free was refused because a live
-	// configuration generation still referenced them.
+	// deferred holds deleted entries that could not be freed yet.
 	//
-	// Nothing else remembers them; the service retries them on every delete
-	// and on explicit reclamation.
+	// The free was refused because a live configuration generation still
+	// referenced the ring. Nothing else keeps track of these entries. The
+	// service tries to free them again on every delete and on an explicit
+	// reclaim.
 	deferred []*ringEntry
 	log      *zap.Logger
 }
@@ -131,8 +135,11 @@ func (m *RingService) CreateRing(
 	ctx context.Context,
 	req *ringpb.CreateRingRequest,
 ) (*ringpb.CreateRingResponse, error) {
-	// Validated here as well as by the gateway, so an in-process caller
-	// cannot slip a capacity past the 32-bit truncation below.
+	// Validate here, not only in the gateway.
+	//
+	// The capacity is cut to 32 bits below. An in-process caller skips the
+	// gateway, so without this check it could pass a value that does not
+	// fit.
 	if err := req.Validate(); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -179,8 +186,8 @@ func (m *RingService) CreateRing(
 	return &ringpb.CreateRingResponse{}, nil
 }
 
-// ShowRing returns the name, per-worker capacity and publish batch of one
-// named ring.
+// ShowRing returns one named ring: its name, per-worker capacity and
+// publish batch.
 func (m *RingService) ShowRing(
 	ctx context.Context,
 	req *ringpb.ShowRingRequest,
@@ -200,8 +207,9 @@ func (m *RingService) ShowRing(
 	return &ringpb.ShowRingResponse{Ring: ringInfo(entry)}, nil
 }
 
-// ListRings returns every registered ring, sorted by name, with the same
-// facts ShowRing returns for each.
+// ListRings returns every registered ring, sorted by name.
+//
+// Each ring has the same fields that ShowRing returns.
 func (m *RingService) ListRings(
 	ctx context.Context,
 	req *ringpb.ListRingsRequest,
@@ -221,7 +229,7 @@ func (m *RingService) ListRings(
 	return response, nil
 }
 
-// ringInfo builds the proto facts for one registered ring.
+// ringInfo builds the proto description of one registered ring.
 func ringInfo(entry *ringEntry) *ringpb.RingInfo {
 	return &ringpb.RingInfo{
 		Name:         entry.Name,
@@ -232,10 +240,10 @@ func ringInfo(entry *ringEntry) *ringpb.RingInfo {
 
 // DeleteRing removes a named ring.
 //
-// Refused while a lease from Acquire pins the ring, or while a published
-// module config links it by name: either way the ring stays usable and
-// registered, and the caller releases the lease or updates the linking
-// module before retrying.
+// The delete is refused in two cases: a lease from Acquire holds the ring,
+// or a published module config links the ring by name. In both cases the
+// ring stays registered and usable. The caller must release the lease or
+// update the linking module, then retry.
 func (m *RingService) DeleteRing(
 	ctx context.Context,
 	req *ringpb.DeleteRingRequest,
@@ -272,20 +280,24 @@ func (m *RingService) DeleteRing(
 				name, err,
 			)
 		case errors.Is(err, ffi.ErrNotFound) || !cring.Exists(m.agent, name):
-			// Nothing is left to unpublish, and dropping the entry
-			// below is the only way it ever leaves the registry.
+			// The dataplane has nothing left to unpublish.
+			//
+			// Drop the entry below. Nothing else would ever remove it
+			// from the registry.
 			m.log.Warn("ring already absent from the dataplane; dropping it",
 				zap.String("ring", name), zap.Error(err))
 		default:
-			// Still published: keep the entry so a retry can finish
-			// the delete.
+			// The ring is still published. Keep the entry so that a
+			// retry can finish the delete.
 			m.log.Error("failed to delete ring", zap.String("ring", name), zap.Error(err))
 			return nil, status.Errorf(codes.Internal, "failed to delete ring %q: %v", name, err)
 		}
 	}
 
-	// The delete retired the generation holding the published object;
-	// retry the deferred ones, then retire this one.
+	// The delete published a generation without this ring.
+	//
+	// The old generation may still be live. First try again to free the
+	// deferred rings. Then free this one, or defer it too.
 	m.reclaimDeferred()
 	m.freeOrDefer(entry)
 	delete(m.rings, name)
@@ -295,8 +307,10 @@ func (m *RingService) DeleteRing(
 	return &ringpb.DeleteRingResponse{}, nil
 }
 
-// LookupHandle returns the handle registered under a name, letting a
-// consumer resolve a configured ring name to the handle it binds through.
+// LookupHandle returns the handle registered under a name.
+//
+// A consumer uses it to turn a configured ring name into the handle it
+// binds through.
 func (m *RingService) LookupHandle(name string) (Handle, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -308,11 +322,12 @@ func (m *RingService) LookupHandle(name string) (Handle, bool) {
 	return entry.Handle, true
 }
 
-// Acquire pins the named ring against deletion, provided it is still the
-// ring behind handle, and returns a lease releasing that pin.
+// Acquire blocks the delete of the named ring and returns a lease.
 //
-// Fails once that ring has been deleted, even if a new ring exists under the
-// same name: the new ring has its own handle from its own create.
+// It succeeds only if the name still maps to the given handle. Acquire
+// fails once that ring is deleted, even if a new ring exists under the
+// same name. The new ring got its own handle when it was created.
+// Releasing the lease removes the block.
 func (m *RingService) Acquire(name string, handle Handle) (*Lease, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -336,11 +351,12 @@ func (m *RingService) Acquire(name string, handle Handle) (*Lease, error) {
 	}, nil
 }
 
-// freeOrDefer frees an entry's object once nothing publishes it any more.
+// freeOrDefer frees the ring of an entry that is no longer published.
 //
-// A refusal while a live generation still references it defers the entry;
-// any other failure is logged and the memory leaked to avoid a double free.
-// The caller holds the service lock.
+// If a live generation still references the ring, the free is refused and
+// the entry is deferred. Any other failure is logged, and the memory is
+// leaked so that it is never freed twice. The caller holds the service
+// lock.
 func (m *RingService) freeOrDefer(entry *ringEntry) {
 	if err := entry.Object.Free(); err != nil {
 		if errors.Is(err, ffi.ErrStillReferenced) {
@@ -351,19 +367,20 @@ func (m *RingService) freeOrDefer(entry *ringEntry) {
 	}
 }
 
-// ReclaimDeferred retries every deferred ring, dropping the ones whose
-// generations have drained and keeping the rest.
+// ReclaimDeferred tries again to free every deferred ring.
 //
-// The service runs it on every delete; anything else may call it at any
-// time.
+// It keeps only the rings that a live generation still references. A ring
+// whose free fails for another reason is logged and dropped. The service
+// runs it on every delete. Other code may call it at any time.
 func (m *RingService) ReclaimDeferred() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reclaimDeferred()
 }
 
-// reclaimDeferred is ReclaimDeferred without the lock; the caller holds the
-// service lock.
+// reclaimDeferred is ReclaimDeferred without taking the lock.
+//
+// The caller holds the service lock.
 func (m *RingService) reclaimDeferred() {
 	kept := m.deferred[:0]
 	for _, entry := range m.deferred {

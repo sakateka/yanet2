@@ -18,9 +18,10 @@
 #include "lib/dataplane/config/zone.h"
 #include "lib/dataplane/object/object.h"
 
-// Tear the object down and return its storage to the agent arena.
+// Tear the object down and return its memory to the agent.
 //
-// Runs only on a dangling object, once the guarded destroy has claimed it.
+// It runs only on an object that no generation uses any more, after the
+// guarded destroy has claimed it.
 static void
 ring_object_destroy(struct cp_object *cp_object) {
 	struct ring_object *self =
@@ -61,8 +62,8 @@ ring_object_fini(struct ring_object *self) {
 
 	struct agent *agent = ADDR_OF(&self->cp_object.agent);
 	if (agent != NULL) {
-		// Runs before the common teardown zeroes the object's memory
-		// context, which the frees below must still charge.
+		// The frees below must run before the common teardown, because
+		// that teardown zeroes the memory context they free into.
 		struct memory_context *ctx = &self->cp_object.memory_context;
 		struct ring_worker *workers = ADDR_OF(&self->workers);
 		if (workers != NULL) {
@@ -76,7 +77,7 @@ ring_object_fini(struct ring_object *self) {
 			memory_bfree(ctx, raw, self->workers_raw_size);
 		}
 	}
-	// Forget the freed storage so a repeated fini frees nothing twice.
+	// Clear the freed pointers, so a second fini frees nothing again.
 	SET_OFFSET_OF(&self->workers, NULL);
 	SET_OFFSET_OF(&self->workers_raw, NULL);
 	self->workers_raw_size = 0;
@@ -100,6 +101,22 @@ ring_object_config_new(
 	uint32_t publish_batch,
 	yanet_error **err
 ) {
+	// Refuse a name the fixed header buffer would cut.
+	//
+	// Two cut names with the same prefix would share a registry key, and
+	// publishing the second would silently replace the first ring.
+	if (name == NULL || name[0] == '\0' ||
+	    strnlen(name, CP_OBJECT_NAME_LEN) >= CP_OBJECT_NAME_LEN) {
+		yanet_error_add_kind(
+			err,
+			YANET_ERROR_INVALID_ARGUMENT,
+			"ring name must be from 1 to %d bytes",
+			CP_OBJECT_NAME_LEN - 1
+		);
+		errno = EINVAL;
+		return NULL;
+	}
+
 	struct ring_object *self = ring_object_new(agent);
 	if (self == NULL) {
 		yanet_error_add(err, "failed to allocate ring object");
@@ -107,8 +124,8 @@ ring_object_config_new(
 		return NULL;
 	}
 
-	// The cleanup below may clobber errno; restore the failing step's
-	// value so the header's errno contract holds for the caller.
+	// The cleanup below may change errno. Restore the value of the step
+	// that failed, so the caller gets the errno the header promises.
 	if (ring_object_init(self, agent, name, err)) {
 		int saved_errno = errno;
 		yanet_error_add(err, "failed to init ring object");
@@ -148,8 +165,8 @@ ring_object_align_alloc(
 	void **raw,
 	uint64_t *raw_size
 ) {
-	// Every caller passes a compile-time power-of-two alignment; this is
-	// an internal invariant, never derived from external input.
+	// Every caller passes a constant power-of-two alignment. It never
+	// comes from external input, so an assert is enough.
 	assert(alignment != 0 && (alignment & (alignment - 1)) == 0);
 
 	if (stride > UINT64_MAX - (alignment - 1)) {
@@ -366,6 +383,29 @@ ring_object_worker_data(
 	}
 
 	return ADDR_OF(&worker->local.data);
+}
+
+bool
+ring_object_worker_view(
+	const struct cp_object *cp_object,
+	uint64_t worker_idx,
+	struct ring_worker_view *view
+) {
+	struct ring_worker *worker = ring_object_worker(cp_object, worker_idx);
+	if (worker == NULL) {
+		return false;
+	}
+
+	// The view drops the atomic qualifier for callers in other languages.
+	//
+	// Only the writer stores to the positions. Every reader load must still
+	// be atomic, with acquire order.
+	view->write_idx = (uint64_t *)&worker->published.write_idx;
+	view->readable_idx = (uint64_t *)&worker->published.readable_idx;
+	view->data = ADDR_OF(&worker->local.data);
+	view->size = worker->local.size;
+	view->mask = worker->local.mask;
+	return true;
 }
 
 bool

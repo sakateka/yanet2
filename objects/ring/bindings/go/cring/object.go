@@ -1,5 +1,8 @@
-// Package cring provides Go bindings for the standalone ring object: a
-// named, per-worker overwrite-oldest record buffer with no dataplane module.
+// Package cring provides Go bindings for the standalone ring object.
+//
+// A ring object is a named record buffer with one ring per worker. When a
+// ring is full, the writer drops the oldest records. No dataplane module
+// owns the object.
 package cring
 
 //#cgo CFLAGS: -I../../../../../
@@ -12,6 +15,7 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unsafe"
 
 	"github.com/yanet-platform/yanet2/bindings/go/cerrors"
@@ -21,36 +25,50 @@ import (
 // ObjectType is the registered shared-memory object type for a ring.
 const ObjectType = C.RING_OBJECT_TYPE
 
-// MaxNameLen is the C object-name buffer size, including the terminating
-// NUL. The longest accepted name is one byte shorter than this bound.
+// MaxNameLen is the size of the C object-name buffer, including the
+// terminating NUL.
+//
+// So the longest accepted name is one byte shorter than this value.
 const MaxNameLen = C.CP_OBJECT_NAME_LEN
 
-// DefaultPublishBatch is the publish batch a ring gets unless its creator
-// asks for another: the records a writer commits before publishing them on
-// its own.
+// DefaultPublishBatch is the publish batch a ring gets by default.
+//
+// The publish batch is the number of records the writer commits before it
+// makes them visible to readers on its own. A creator may ask for another
+// value.
 const DefaultPublishBatch = uint32(C.RING_PUBLISH_BATCH_DEFAULT)
 
 // MaxPublishBatch is the largest publish batch a ring accepts.
 const MaxPublishBatch = uint32(C.RING_PUBLISH_BATCH_MAX)
 
-// Object is an opaque handle to a standalone named ring object in shared
-// memory, owned by the control plane until it is freed.
+// Object is an opaque handle to a named ring object in shared memory.
+//
+// The control plane owns the object until it frees it.
 type Object struct {
 	ptr   ffi.ObjectConfig
 	agent *ffi.Agent
 }
 
-// NewObject creates a new ring with the given fixed per-worker capacity and
-// publish batch.
+// NewObject creates a ring with the given per-worker capacity and publish
+// batch. Both are fixed for the life of the ring.
 //
-// The returned handle is not yet published to the dataplane; call Publish.
-// A capacity the C layer rejects — not a power of two, below the record
-// frame size, or above the allocator's maximum block — or a publish batch
-// outside 1 to MaxPublishBatch is reported through the returned error,
-// distinguishable with errors.Is against cerrors.InvalidArgument. It does
-// not check the name against what is already published; a caller that
-// must reject a duplicate name does that check itself.
+// The dataplane does not see the new object until the caller calls Publish.
+// The name must be non-empty, shorter than MaxNameLen bytes and free of NUL
+// bytes, since C would cut any other and two names could become one ring.
+// The capacity must be a power of two from the record frame size up to the
+// allocator's biggest block, and the publish batch from 1 to
+// MaxPublishBatch. A violation returns an error that matches
+// cerrors.InvalidArgument with errors.Is. NewObject does not look for an
+// already published ring with the same name; a caller that must reject
+// duplicate names checks that itself.
 func NewObject(agent *ffi.Agent, name string, capacity uint32, publishBatch uint32) (*Object, error) {
+	if len(name) == 0 || len(name) >= MaxNameLen || strings.IndexByte(name, 0) >= 0 {
+		return nil, fmt.Errorf(
+			"failed to create ring object: name must be 1 to %d bytes without NUL: %w",
+			MaxNameLen-1, cerrors.InvalidArgument,
+		)
+	}
+
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 
@@ -68,8 +86,9 @@ func NewObject(agent *ffi.Agent, name string, capacity uint32, publishBatch uint
 	}, nil
 }
 
-// AsRawPtr returns the underlying C cp_object pointer as unsafe.Pointer,
-// for a sibling CGo package that needs to reach the object directly.
+// AsRawPtr returns the pointer to the underlying C object.
+//
+// Another CGo package uses it when it needs to reach the object directly.
 func (m *Object) AsRawPtr() unsafe.Pointer {
 	return m.ptr.AsRawPtr()
 }
@@ -78,21 +97,23 @@ func (m *Object) asRawPtr() *C.struct_cp_object {
 	return (*C.struct_cp_object)(m.ptr.AsRawPtr())
 }
 
-// errFreed reports a method call on a handle whose object Free destroyed.
+// errFreed is returned by a method called after Free destroyed the object.
 var errFreed = errors.New("ring object already freed")
 
-// Publish upserts the object into a new configuration generation. A module
-// linking it by name follows it from then on.
+// Publish adds or replaces the object in a new configuration generation.
+//
+// From then on, a module that links the ring by name uses this object.
 func (m *Object) Publish() error {
 	return m.agent.UpdateObjects([]ffi.ObjectConfig{m.ptr})
 }
 
-// Free destroys the object, or reports ffi.ErrStillReferenced while a live
-// generation still holds it; the handle then stays usable for a retry.
+// Free destroys the object.
 //
-// Safe to call multiple times. After a successful free the handle is inert:
-// its size accessors report 0, and opening a source or reader and
-// publishing are refused.
+// While a live generation still holds the object, Free returns
+// ffi.ErrStillReferenced. The handle then stays usable, so the caller can
+// retry. Free is safe to call more than once. After a successful free, the
+// size accessors return 0, and opening a source or a reader and publishing
+// are refused.
 func (m *Object) Free() error {
 	return m.ptr.Free(func(ptr unsafe.Pointer) (int, unsafe.Pointer, error) {
 		var cErr *C.yanet_error
@@ -112,14 +133,15 @@ func Exists(agent *ffi.Agent, name string) bool {
 
 // DeleteObject removes the named ring from the dataplane.
 //
-// Refused while a module config still links the ring, distinguishable with
-// errors.Is against ffi.ErrBusy.
+// It fails while a module config still links the ring. The error then
+// matches ffi.ErrBusy with errors.Is.
 func DeleteObject(agent *ffi.Agent, name string) error {
 	return agent.DeleteObject(ObjectType, name)
 }
 
-// Capacity reports the per-worker data area size in bytes, fixed at
-// creation.
+// Capacity returns the size of each worker's data area in bytes.
+//
+// The size is fixed when the ring is created.
 func (m *Object) Capacity() uint32 {
 	ptr := m.asRawPtr()
 	if ptr == nil {
@@ -128,8 +150,10 @@ func (m *Object) Capacity() uint32 {
 	return uint32(C.ring_object_capacity(ptr))
 }
 
-// PublishBatch reports the records a writer commits before publishing them
-// on its own, fixed at creation.
+// PublishBatch returns how many records the writer commits before it
+// publishes them on its own.
+//
+// The value is fixed when the ring is created.
 func (m *Object) PublishBatch() uint32 {
 	ptr := m.asRawPtr()
 	if ptr == nil {
@@ -138,44 +162,48 @@ func (m *Object) PublishBatch() uint32 {
 	return uint32(C.ring_object_publish_batch(ptr))
 }
 
-// Sources resolves the RecordSource of every worker's ring through the C
-// accessors, so no caller does stride arithmetic across shared memory. The
-// slice is indexed by worker.
+// Sources returns the RecordSource of each worker's ring, indexed by worker.
 //
-// OpenReaders is the usual entry point; Sources lets a caller wrap a real
-// source, for instance to drive the read protocol against externally paced
-// writer state.
+// Most callers use OpenReaders instead. Sources is for a caller that wraps
+// a real source, for example to run the read protocol against writer state
+// that the caller controls.
 func (m *Object) Sources() ([]RecordSource, error) {
 	return SourcesFromRaw(m.AsRawPtr())
 }
 
-// SourcesFromRaw is Sources for a raw ring object pointer, such as one a
-// sibling cgo package resolved from a published generation.
+// SourcesFromRaw is Sources for a raw ring object pointer.
+//
+// Another CGo package uses it with a pointer it found in a published
+// generation.
 func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 	if objPtr == nil {
 		return nil, errFreed
 	}
 	ptr := (*C.struct_cp_object)(objPtr)
 
-	// The C accessor resolves no ring past the last worker, which ends the
-	// walk without exposing the worker count. The count fits 16 bits, so
-	// the walk ends before the index could wrap.
+	// The C accessor returns no view after the last worker, so the loop
+	// needs no worker count.
+	//
+	// The count fits in 16 bits, so the loop ends before the index can
+	// wrap. Every address comes from the view, which the C archive fills.
+	// Go never reads a field of the metadata struct itself: the offset of
+	// the published positions depends on the cache line size that the
+	// archive was built with, and this package may be built with another.
 	var sources []RecordSource
 	for idx := uint16(0); ; idx++ {
-		worker := C.ring_object_worker(ptr, C.uint64_t(idx))
-		if worker == nil {
+		var view C.struct_ring_worker_view
+		if !C.ring_object_worker_view(ptr, C.uint64_t(idx), &view) {
 			break
 		}
-		data := C.ring_object_worker_data(ptr, C.uint64_t(idx))
-		if data == nil {
+		if view.data == nil {
 			return nil, fmt.Errorf("worker %d has no data area", idx)
 		}
 
 		sources = append(sources, &shmSource{
-			writeIdx:    (*uint64)(unsafe.Pointer(&worker.published.write_idx)),
-			readableIdx: (*uint64)(unsafe.Pointer(&worker.published.readable_idx)),
-			data:        unsafe.Slice((*byte)(unsafe.Pointer(data)), uint32(worker.local.size)),
-			mask:        uint64(worker.local.mask),
+			writeIdx:    (*uint64)(unsafe.Pointer(view.write_idx)),
+			readableIdx: (*uint64)(unsafe.Pointer(view.readable_idx)),
+			data:        unsafe.Slice((*byte)(unsafe.Pointer(view.data)), uint32(view.size)),
+			mask:        uint64(view.mask),
 		})
 	}
 	if len(sources) == 0 {
@@ -184,12 +212,12 @@ func SourcesFromRaw(objPtr unsafe.Pointer) ([]RecordSource, error) {
 	return sources, nil
 }
 
-// OpenReaders opens one independent reader per worker's ring, each starting
-// at that ring's current oldest readable record. The slice is indexed by
-// worker, and every record a reader returns carries its worker index.
+// OpenReaders opens one reader for each worker's ring, indexed by worker.
 //
-// Calling it again opens another set of readers; each keeps its own read
-// cursor and does not affect the others.
+// Each reader starts at the oldest readable record of its ring. Every record
+// a reader returns carries its worker index. A second call opens another
+// set of readers. Each reader keeps its own read position and does not
+// affect the others.
 func (m *Object) OpenReaders() ([]*Reader, error) {
 	sources, err := m.Sources()
 	if err != nil {

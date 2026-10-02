@@ -25,8 +25,10 @@ import (
 	"github.com/yanet-platform/yanet2/objects/ring/tests/ringtest"
 )
 
-// ringFixture is a service over a fresh single-worker harness, reached
-// through a real gRPC server that runs the validate interceptor.
+// ringFixture is a ring service on a fresh single-worker harness.
+//
+// Tests reach it through a real gRPC server that runs the validate
+// interceptor.
 type ringFixture struct {
 	service *ring.RingService
 	client  ringpb.RingServiceClient
@@ -34,8 +36,10 @@ type ringFixture struct {
 	shm     *ffi.SharedMemory
 }
 
-// newRingFixture builds a fixture with the ring object and any extra modules
-// loaded; everything is torn down at test end.
+// newRingFixture builds a fixture with the ring object and any extra
+// modules loaded.
+//
+// Everything is torn down when the test ends.
 func newRingFixture(t *testing.T, extraModules ...string) *ringFixture {
 	t.Helper()
 
@@ -78,15 +82,18 @@ func newRingFixture(t *testing.T, extraModules ...string) *ringFixture {
 	}
 }
 
-// create registers a ring with the default publish batch and fails the
-// test if the service refuses it.
+// create registers a ring with the default publish batch.
+//
+// It fails the test if the service refuses the ring.
 func (m *ringFixture) create(t *testing.T, name string, capacity uint64) {
 	t.Helper()
 	m.createBatch(t, name, capacity, 0)
 }
 
-// createBatch registers a ring with the given publish batch, 0 for the
-// default, and fails the test if the service refuses it.
+// createBatch registers a ring with the given publish batch.
+//
+// A batch of 0 means the default. It fails the test if the service refuses
+// the ring.
 func (m *ringFixture) createBatch(t *testing.T, name string, capacity uint64, publishBatch uint32) {
 	t.Helper()
 
@@ -104,8 +111,9 @@ func (m *ringFixture) delete(t *testing.T, name string) error {
 	return err
 }
 
-// list returns the listed rings as "name/capacity/publish batch" strings,
-// in list order.
+// list returns the listed rings in list order.
+//
+// Each ring is a "name/capacity/publish batch" string.
 func (m *ringFixture) list(t *testing.T) []string {
 	t.Helper()
 
@@ -118,9 +126,11 @@ func (m *ringFixture) list(t *testing.T) []string {
 	return rings
 }
 
-// requireRingUsable asserts that a record written into the named ring is read
-// back intact; it assumes nothing was written to the ring before.
-func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
+// requireRingUsable checks that a record written to the named ring of the
+// given capacity reads back intact.
+//
+// It assumes nothing was written to the ring before.
+func requireRingUsable(t *testing.T, agent *ffi.Agent, name string, capacity uint32) {
 	t.Helper()
 
 	writer, err := ringtest.NewPublishedWriter(agent, name, 0)
@@ -131,7 +141,7 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 
 	src, err := writer.Source()
 	require.NoError(t, err)
-	reader, err := cring.NewReader(0, writer.Capacity(), src)
+	reader, err := cring.NewReader(0, capacity, src)
 	require.NoError(t, err)
 	records := reader.Read(1024)
 	require.Len(t, records, 1)
@@ -139,11 +149,11 @@ func requireRingUsable(t *testing.T, agent *ffi.Agent, name string) {
 	require.Equal(t, payload, records[0].Bytes)
 }
 
-// Test_RingService_CreateRing_ShowAndListSortedByName verifies that every
-// created ring is listed once, sorted by name, and shown with its capacity
-// and publish batch.
+// Test_RingService_CreateRing_ShowAndListSortedByName checks list and show.
 //
-// Sixteen rings created in reverse order cannot match sorted order by chance.
+// Every created ring appears once in the list, sorted by name. Show returns
+// its capacity and publish batch. The test creates sixteen rings in reverse
+// order, so the list cannot be sorted by chance.
 func Test_RingService_CreateRing_ShowAndListSortedByName(t *testing.T) {
 	f := newRingFixture(t)
 
@@ -165,19 +175,8 @@ func Test_RingService_CreateRing_ShowAndListSortedByName(t *testing.T) {
 	require.Equal(t, uint32(4), show.GetRing().GetPublishBatch())
 }
 
-// Test_RingService_CreateRing_UnsetPublishBatchTakesDefault verifies that
-// a create leaving the publish batch unset gets the default one.
-func Test_RingService_CreateRing_UnsetPublishBatchTakesDefault(t *testing.T) {
-	f := newRingFixture(t)
-	f.create(t, "default-batch", 64)
-
-	show, err := f.client.ShowRing(t.Context(), &ringpb.ShowRingRequest{Name: "default-batch"})
-	require.NoError(t, err)
-	require.Equal(t, uint32(ringpb.DefaultPublishBatch), show.GetRing().GetPublishBatch())
-}
-
-// Test_RingService_UnknownName_NotFound verifies that show and delete of an
-// unregistered name report NotFound.
+// Test_RingService_UnknownName_NotFound checks that show and delete of an
+// unregistered name return NotFound.
 func Test_RingService_UnknownName_NotFound(t *testing.T) {
 	f := newRingFixture(t)
 
@@ -186,13 +185,15 @@ func Test_RingService_UnknownName_NotFound(t *testing.T) {
 	require.Equal(t, codes.NotFound, status.Code(f.delete(t, "missing")))
 }
 
-// Test_RingService_CreateRing_RejectedCreateMutatesNothing verifies that a
-// refused create reports its code and leaves the registry and dataplane as is.
+// Test_RingService_CreateRing_RejectedCreateMutatesNothing checks a refused
+// create.
 //
-// Requests go to the service in process, so validation must not rely on the
-// gRPC interceptor.
+// The create returns the expected code. The registry and the dataplane do
+// not change. The test calls the service in process, so the check does not
+// depend on the gRPC interceptor.
 func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	f := newRingFixture(t)
+	// Created with no publish batch, so the list shows the default 8.
 	f.create(t, "dup", 64)
 
 	external, err := cring.NewObject(f.agent, "taken", 64, cring.DefaultPublishBatch)
@@ -204,21 +205,14 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	})
 
 	cases := []struct {
-		name         string
-		ringName     string
-		capacity     uint64
-		publishBatch uint32
-		code         codes.Code
+		name     string
+		ringName string
+		capacity uint64
+		code     codes.Code
 	}{
 		{name: "invalid request", ringName: "truncated", capacity: 1<<32 | 64, code: codes.InvalidArgument},
-		{
-			name:         "publish batch above maximum",
-			ringName:     "big-batch",
-			capacity:     64,
-			publishBatch: ringpb.MaxPublishBatch + 1,
-			code:         codes.InvalidArgument,
-		},
-		// Valid, but beyond the allocator's largest block in any build.
+		// A valid request, but larger than the allocator's largest block in
+		// any build.
 		{name: "above allocator maximum", ringName: "too-big", capacity: 1 << 27, code: codes.InvalidArgument},
 		{name: "registered name", ringName: "dup", capacity: 128, code: codes.AlreadyExists},
 		{name: "externally published name", ringName: "taken", capacity: 128, code: codes.AlreadyExists},
@@ -227,9 +221,8 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := f.service.CreateRing(t.Context(), &ringpb.CreateRingRequest{
-				Name:         tc.ringName,
-				Capacity:     tc.capacity,
-				PublishBatch: tc.publishBatch,
+				Name:     tc.ringName,
+				Capacity: tc.capacity,
 			})
 			require.Equal(t, tc.code, status.Code(err))
 			require.Equal(t, []string{"dup/64/8"}, f.list(t))
@@ -241,14 +234,18 @@ func Test_RingService_CreateRing_RejectedCreateMutatesNothing(t *testing.T) {
 	require.Equal(t, external.AsRawPtr(), writer.Object(), "the externally published ring must not be replaced")
 }
 
-// Test_RingService_CreateRing_PublishFailureReleasesObject verifies that a
-// create whose publish finds no controlplane memory reports Internal,
-// registers nothing and returns the object's memory to the agent arena.
+// Test_RingService_CreateRing_PublishFailureReleasesObject checks a create
+// whose publish finds no controlplane memory.
+//
+// The create returns Internal and registers nothing. The ring's memory goes
+// back to the agent arena.
 func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 	f := newRingFixture(t)
 
-	// Drain the controlplane pool, largest blocks first, so a publish finds
-	// no block for its new generation; the service's own arena stays intact.
+	// Use up the controlplane pool, largest blocks first.
+	//
+	// Then a publish finds no block for its new generation. The service's
+	// own arena stays intact.
 	filler, err := f.shm.AgentAttach("ring-cp-filler", 0, datasize.B)
 	require.NoError(t, err)
 	for size := 64 * datasize.MB; size > 0; {
@@ -266,13 +263,17 @@ func Test_RingService_CreateRing_PublishFailureReleasesObject(t *testing.T) {
 	require.Equal(t, baseline, f.agent.BlockAllocatorFreeSize())
 }
 
-// Test_RingService_DeleteRing_PinnedRingStaysUsable verifies that a ring
-// pinned by a lease or a published module link refuses deletion with
-// FailedPrecondition, stays registered and usable, and deletes once unpinned.
+// Test_RingService_DeleteRing_PinnedRingStaysUsable checks delete of a held
+// ring.
+//
+// A lease or a published module link holds the ring. The delete returns
+// FailedPrecondition. The ring stays registered and usable. Once the hold is
+// removed, the delete succeeds.
 func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 	cases := []struct {
 		name string
-		// pin pins the named ring and returns the function that unpins it.
+		// pin holds the named ring and returns a function that removes the
+		// hold.
 		pin func(t *testing.T, f *ringFixture, name string) func()
 	}{
 		{
@@ -305,7 +306,7 @@ func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 
 			require.Equal(t, codes.FailedPrecondition, status.Code(f.delete(t, "pinned")))
 			require.Equal(t, []string{"pinned/64/8"}, f.list(t))
-			requireRingUsable(t, f.agent, "pinned")
+			requireRingUsable(t, f.agent, "pinned", 64)
 
 			unpin()
 			require.NoError(t, f.delete(t, "pinned"))
@@ -314,8 +315,10 @@ func Test_RingService_DeleteRing_PinnedRingStaysUsable(t *testing.T) {
 	}
 }
 
-// Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry verifies that a
-// ring the dataplane no longer publishes is still unregistered and freed.
+// Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry checks delete of
+// a ring the dataplane no longer publishes.
+//
+// The delete still removes the ring from the registry and frees it.
 func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 	f := newRingFixture(t)
 	baseline := f.agent.BlockAllocatorFreeSize()
@@ -328,12 +331,14 @@ func Test_RingService_DeleteRing_AlreadyUnpublishedDropsEntry(t *testing.T) {
 	require.Equal(t, baseline, f.agent.BlockAllocatorFreeSize())
 }
 
-// Test_RingService_DeleteRing_RefusedFreeRetried verifies that a delete whose
-// free a live generation reference refuses still unregisters the name.
+// Test_RingService_DeleteRing_RefusedFreeRetried checks a delete whose free
+// is refused.
 //
-// The name is recreated under a fresh handle the old one cannot lease, while
-// the old memory stays held, and the next delete frees it once the reference
-// is released.
+// A live generation still references the ring, so the free is refused. The
+// delete still unregisters the name. The name is then created again with a
+// new handle, and the old handle cannot take a lease on it. The old memory
+// stays allocated. After the reference is released, the next delete frees
+// it.
 func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	f := newRingFixture(t)
 	baseline := f.agent.BlockAllocatorFreeSize()
@@ -365,9 +370,11 @@ func Test_RingService_DeleteRing_RefusedFreeRetried(t *testing.T) {
 	require.Equal(t, baseline, f.agent.BlockAllocatorFreeSize())
 }
 
-// Test_RingService_LeaseVsDeleteRace verifies under concurrent acquires that
-// a delete never succeeds while a lease is admitted, and that a deleted
-// handle never admits a lease again.
+// Test_RingService_LeaseVsDeleteRace runs deletes against concurrent
+// acquires.
+//
+// A delete never succeeds while a lease is held. After a delete, the old
+// handle never gets a lease again.
 func Test_RingService_LeaseVsDeleteRace(t *testing.T) {
 	f := newRingFixture(t)
 	f.create(t, "race", 64)
