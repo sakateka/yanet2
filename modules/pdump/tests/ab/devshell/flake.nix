@@ -39,6 +39,10 @@
               gnumake
               go
               hostname
+              # DPDK's own build finds libpcap through pkg-config, not the
+              # vendored submodule; without it rte_bpf_convert is a stub
+              # and the half-filter rows cannot compile their filter.
+              libpcap
               libyaml
               meson
               ninja

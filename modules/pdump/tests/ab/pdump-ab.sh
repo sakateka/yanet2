@@ -135,6 +135,11 @@ R=${CPUS#*,}
 # discards and then reappends the meson.build block below; the reset is a
 # local, networkless operation, since the commit is already in this
 # clone's history.
+dpdk_has_libpcap() {
+	grep -q '^#define RTE_HAS_LIBPCAP' \
+		"$1/build-ab/subprojects/dpdk/rte_build_config.h" 2>/dev/null
+}
+
 setup_tree() {
 	local dir=$1 rev=$2 after=$3
 
@@ -180,6 +185,13 @@ executable(
 )
 EOF
 
+	# DPDK enables rte_bpf_convert only when it finds a system libpcap at
+	# setup time; a build configured without one is redone so a later
+	# libpcap install takes effect.
+	if [[ -f $dir/build-ab/build.ninja ]] && ! dpdk_has_libpcap "$dir"; then
+		echo "pdump-ab: $dir/build-ab was configured without libpcap; reconfiguring"
+		rm -rf "$dir/build-ab"
+	fi
 	# build.ninja, not just the directory, is the signal that a previous
 	# setup finished: meson creates the directory before it can fail.
 	if [[ ! -f $dir/build-ab/build.ninja ]]; then
@@ -189,6 +201,10 @@ EOF
 			>"$dir/setup.log" 2>&1; then
 			grep -iE 'error' -A5 "$dir/setup.log" | head -60 || true
 			echo "pdump-ab: meson setup failed for $dir; see $dir/setup.log" >&2
+			exit 1
+		fi
+		if ! dpdk_has_libpcap "$dir"; then
+			echo "pdump-ab: DPDK in $dir/build-ab was configured without libpcap, so rte_bpf_convert is a stub and the filter rows cannot run; install libpcap with its pkg-config file (libpcap-dev) and rerun" >&2
 			exit 1
 		fi
 	fi

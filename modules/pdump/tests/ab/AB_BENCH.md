@@ -24,7 +24,7 @@ git clone -b test/pdump-bench-arm64 https://github.com/sakateka/yanet2.git yanet
 sudo), enters the devShell pinned in `devshell/flake.nix` and
 `flake.lock` (gcc 13, meson 1.9.1, Go 1.25, cargo, protoc and its Go
 plugins, cmake, flex and bison for the vendored libpcap submodule,
-python3 with pyelftools, libyaml, numactl, rdma-core, util-linux), from
+libpcap itself for DPDK's `rte_bpf_convert`, python3 with pyelftools, libyaml, numactl, rdma-core, util-linux), from
 an empty environment so nothing on the host leaks into the build, and
 runs `pdump-ab.sh` there with the remaining arguments. `--yes` installs
 Nix without asking; `--dry-run` prints the commands instead of running
@@ -38,7 +38,9 @@ If you already have a checkout, fetch the branch from the fork instead:
 `pdump-ab.sh` also runs directly on a host that has gcc, meson, ninja,
 cmake, pkg-config, flex, bison, go, cargo/rustc, protoc with its Go
 plugins (only needed once, before `*.pb.go` is generated), libyaml
-(`libyaml-dev`; pkg-config must find `yaml-0.1`), python3, taskset
+(`libyaml-dev`; pkg-config must find `yaml-0.1`), libpcap (`libpcap-dev`;
+DPDK enables `rte_bpf_convert`, which the filter rows need, only when
+pkg-config finds `libpcap`), python3, taskset
 (util-linux) and git, with network access on the first run for the git
 submodules:
 
