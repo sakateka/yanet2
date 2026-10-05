@@ -585,6 +585,37 @@ func Test_Reader_NewReader_RejectsCapacityBelowFrame(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// Test_Reader_NewReaderFromTail_SkipsRecordsWrittenBeforeIt verifies that
+// a tail reader never sees a record committed before it was created, but
+// does see one committed after, while NewReader keeps seeing the whole
+// history.
+func Test_Reader_NewReaderFromTail_SkipsRecordsWrittenBeforeIt(t *testing.T) {
+	agent := newTestAgent(t, 1)
+	object := newRingObject(t, agent, "from-tail", 64)
+	writer := newWriter(t, object, 0)
+
+	before := []byte("before")
+	_, err := writer.WriteRecord(before)
+	require.NoError(t, err)
+
+	src := source(t, object, 0)
+	tailReader, err := cring.NewReaderFromTail(0, object.Capacity(), src)
+	require.NoError(t, err)
+	fromStartReader, err := cring.NewReader(0, object.Capacity(), src)
+	require.NoError(t, err)
+
+	require.Empty(t, tailReader.Read(1024), "a tail reader must not see a record written before it")
+	require.Len(t, fromStartReader.Read(1024), 1, "NewReader must still see the ring's history")
+
+	after := []byte("after")
+	_, err = writer.WriteRecord(after)
+	require.NoError(t, err)
+
+	records := tailReader.Read(1024)
+	require.Len(t, records, 1)
+	require.Equal(t, after, records[0].Bytes)
+}
+
 // Test_Reader_Stress_ConcurrentWriterNeverTears verifies that the reader
 // never returns a torn record while the C writer overwrites at full speed.
 //

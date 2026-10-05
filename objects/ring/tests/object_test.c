@@ -455,6 +455,72 @@ run_ring_object_worker_rings_test(struct yanet_shm *shm) {
 	return TEST_SUCCESS;
 }
 
+// ring_object_max_record_len must agree with what ring_worker_prepare
+// actually accepts: a record of exactly that length fits, and one byte
+// more is refused with E2BIG.
+static int
+run_ring_object_max_record_len_matches_prepare_test(struct yanet_shm *shm) {
+	yanet_error *err = NULL;
+
+	struct agent *agent = agent_attach(
+		shm,
+		0,
+		"ring-max-record-len",
+		RING_OBJECT_TEST_MEMORY_LIMIT,
+		&err
+	);
+	TEST_ASSERT_NOT_NULL(agent, "agent_attach failed");
+
+	struct cp_object *object = ring_object_config_new(
+		agent, "max-record-len", 64, RING_PUBLISH_BATCH_DEFAULT, &err
+	);
+	TEST_ASSERT_NOT_NULL(
+		object,
+		"ring_object_config_new failed: %s",
+		err ? yanet_error_message(err) : "?"
+	);
+
+	uint32_t max = ring_object_max_record_len(object);
+	TEST_ASSERT(
+		max > 0,
+		"a created ring must report a nonzero max record length"
+	);
+
+	struct ring_worker *worker = ring_object_worker(object, 0);
+	uint8_t *data = ring_object_worker_data(object, 0);
+	TEST_ASSERT_NOT_NULL(worker, "worker 0 has no ring");
+	TEST_ASSERT_NOT_NULL(data, "worker 0 has no data");
+
+	TEST_ASSERT_EQUAL(
+		(long)ring_worker_prepare(worker, data, max),
+		0L,
+		"a record of exactly the reported max length must be accepted"
+	);
+
+	errno = 0;
+	TEST_ASSERT_EQUAL(
+		(long)ring_worker_prepare(worker, data, max + 1),
+		-1L,
+		"a record one byte over the reported max length must be refused"
+	);
+	TEST_ASSERT_EQUAL(
+		(long)errno,
+		(long)E2BIG,
+		"the refusal must set E2BIG, matching ring_worker_prepare's "
+		"own "
+		"contract for a record over its batch limit"
+	);
+
+	yanet_error *free_err = NULL;
+	TEST_ASSERT_SUCCESS(
+		ring_object_config_free(object, &free_err),
+		"freeing a dangling ring object must succeed"
+	);
+
+	agent_detach(agent);
+	return TEST_SUCCESS;
+}
+
 // While a generation references the object, its free fails with EAGAIN.
 //
 // The object's memory stays in place. Once the reference is gone, the same
@@ -687,6 +753,8 @@ main(void) {
 		{"bad_name", run_ring_object_bad_name_test},
 		{"bad_worker_count", run_ring_object_bad_worker_count_test},
 		{"worker_rings", run_ring_object_worker_rings_test},
+		{"max_record_len_matches_prepare",
+		 run_ring_object_max_record_len_matches_prepare_test},
 		{"free_refused_while_referenced",
 		 run_ring_object_free_refused_while_referenced_test},
 		{"fini_idempotent", run_ring_object_fini_idempotent_test},

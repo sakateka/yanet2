@@ -5,12 +5,13 @@ use pdumppb::{
     DeleteConfigRequest, ListConfigsRequest, ReadDumpRequest, ShowConfigRequest, ShowConfigResponse,
     pdump_service_client::PdumpServiceClient, pdump_service_server::SERVICE_NAME,
 };
+use ringpb::{ListRingsRequest, ring_service_client::RingServiceClient};
 use tokio::{
     signal::{unix, unix::SignalKind},
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use tonic::{Status, codec::CompressionEncoding};
+use tonic::codec::CompressionEncoding;
 use ync::{
     GlobalArgs,
     client::{LayeredChannel, Service},
@@ -29,6 +30,11 @@ mod writer;
 #[allow(clippy::std_instead_of_core, non_snake_case)]
 pub mod pdumppb {
     tonic::include_proto!("modules.pdump.controlplane.pdumppb.v1");
+}
+
+#[allow(clippy::std_instead_of_core, non_snake_case)]
+pub mod ringpb {
+    tonic::include_proto!("objects.ring.controlplane.ringpb.v1");
 }
 
 /// Manages pdump module configs.
@@ -57,6 +63,14 @@ async fn run(cmd: Cmd) -> Result<(), Error> {
 
 fn client(channel: LayeredChannel) -> PdumpServiceClient<LayeredChannel> {
     PdumpServiceClient::new(channel)
+        .send_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Gzip)
+}
+
+/// Builds a client for the ring service served alongside the pdump service,
+/// used only to complete `--ring-name` against the registered ring objects.
+fn ring_client(channel: LayeredChannel) -> RingServiceClient<LayeredChannel> {
+    RingServiceClient::new(channel)
         .send_compressed(CompressionEncoding::Gzip)
         .accept_compressed(CompressionEncoding::Gzip)
 }
@@ -124,7 +138,7 @@ async fn set_config(service: &mut PdumpService, cmd: SetConfigCmd) -> Result<(),
             filter: cmd.filter,
             mode: cmd.mode.map(Into::into),
             snaplen: cmd.snaplen,
-            ring_size: cmd.ring_size.map(|ring_size| ring_size.get()),
+            ring_name: cmd.ring_name,
         }),
     };
     service
@@ -159,24 +173,17 @@ async fn read_dump(service: &mut PdumpService, cmd: ReadCmd) -> Result<(), Error
     let mut reader_set = JoinSet::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<pdumppb::Record>(16);
 
-    log::debug!("request current pdump configuration");
-    let config = get_config(service, &cmd.config_name, "read").await?;
-    let Some(config) = config.config else {
-        return Err(Error::from_status(
-            Status::not_found(format!("config '{}' not found", cmd.config_name)),
-            "read",
-            service.endpoint(),
-            SERVICE_NAME,
-        ));
-    };
-
     let request = ReadDumpRequest { name: cmd.config_name.clone() };
     log::trace!("read_data request: {request:?}");
+    // A rejected request (including an unknown config) fails this call
+    // before any `Record` is sent: the server returns a trailers-only
+    // response, which tonic surfaces as `Err` from this same `await`, just
+    // like a unary call.
     let stream = service
         .client()
         .read_dump(request)
         .await
-        .map_err(service.status("read"))?
+        .map_err(service.not_found("read", &format!("config '{}'", cmd.config_name)))?
         .into_inner();
     log::debug!("read_data successfully acquired data stream for {}", cmd.config_name,);
 
@@ -187,7 +194,7 @@ async fn read_dump(service: &mut PdumpService, cmd: ReadCmd) -> Result<(), Error
     // Opened once the capture is granted, so that a rejected request
     // leaves an existing file alone.
     let output = cmd.output.clone().unwrap_or_else(|| "-".to_owned());
-    let dump_writer = PdumpWriter::new(cmd.dump_format, &output, config.snaplen.unwrap_or_default())
+    let dump_writer = PdumpWriter::new(cmd.dump_format, &output)
         .map_err(|err| service.invalid("read", format!("cannot write to '{output}': {err}")))?;
 
     reader_set.spawn(writer::pdump_stream_reader(stream, tx.clone(), done.clone()));
@@ -254,7 +261,7 @@ fn config_block(config: &pdumppb::Config) -> display::KeyValue {
         .row("filter", config.filter.as_deref().unwrap_or_default())
         .row("mode", dump_mode::to_str(config.mode.unwrap_or_default()))
         .row("snaplen", config.snaplen.unwrap_or_default())
-        .row("ring size", config.ring_size.unwrap_or_default())
+        .row("ring name", config.ring_name.as_deref().unwrap_or_default())
 }
 
 fn main() -> std::process::ExitCode {
@@ -264,5 +271,18 @@ fn main() -> std::process::ExitCode {
 fn config_candidates() -> Vec<CompletionCandidate> {
     completion::candidates(Cmd::command, client, async move |mut client| {
         Ok(client.list_configs(ListConfigsRequest {}).await?.into_inner().configs)
+    })
+}
+
+fn ring_candidates() -> Vec<CompletionCandidate> {
+    completion::candidates(Cmd::command, ring_client, async move |mut client| {
+        Ok(client
+            .list_rings(ListRingsRequest {})
+            .await?
+            .into_inner()
+            .rings
+            .into_iter()
+            .map(|ring| ring.name)
+            .collect())
     })
 }

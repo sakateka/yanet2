@@ -180,6 +180,22 @@ func (m *Object) PublishBatch() uint32 {
 	return uint32(C.ring_object_publish_batch(ptr))
 }
 
+// MaxRecordLen returns the largest record, frame included, that a writer of
+// this ring may commit.
+//
+// It is the same for every worker and is fixed once the ring's storage is
+// created. A caller checks a candidate record's length against it before
+// linking the ring, so a record that would never fit is refused up front.
+// It returns 0 while the object has no storage, for example right after
+// Free.
+func (m *Object) MaxRecordLen() uint32 {
+	ptr := m.asRawPtr()
+	if ptr == nil {
+		return 0
+	}
+	return uint32(C.ring_object_max_record_len(ptr))
+}
+
 // Sources returns the RecordSource of each worker's ring, indexed by worker.
 //
 // Most callers use OpenReaders instead. Sources is for a caller that wraps

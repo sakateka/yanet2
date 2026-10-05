@@ -125,6 +125,16 @@ ring_object_capacity(const struct cp_object *cp_object);
 uint32_t
 ring_object_publish_batch(const struct cp_object *cp_object);
 
+// Largest record, frame included, that a writer of this ring may commit.
+//
+// It is ring_worker_batch_max of the object's per-worker rings, the same
+// for every worker, not the per-worker data area's capacity. A caller
+// checks a candidate record's length against it before linking the ring,
+// so a record that would never fit is refused up front. Returns 0 when
+// the object's storage is not created yet.
+uint32_t
+ring_object_max_record_len(const struct cp_object *cp_object);
+
 // Metadata of one worker's ring.
 //
 // It finds the entry in the aligned array, so the caller does not compute

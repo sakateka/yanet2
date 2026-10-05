@@ -100,7 +100,14 @@ modules:
   pdump:
     instance_id: 0
     memory_path: *memory_path
-    memory_requirements: 16MB
+    # Ring objects a pdump config links allocate in this agent's arena,
+    # with no separate reserve. Configs capture into a shared ring
+    # without multiplying its cost.
+    #
+    # One 8 MiB ring on a 16-worker dataplane is already about 128 MiB,
+    # so this default holds one such ring with headroom, or several
+    # smaller ones. Raise it to fit more or larger rings.
+    memory_requirements: 256MB
   acl:
     instance_id: 0
     memory_path: *memory_path

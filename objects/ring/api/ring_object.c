@@ -360,6 +360,15 @@ ring_object_publish_batch(const struct cp_object *cp_object) {
 	return self->publish_batch;
 }
 
+uint32_t
+ring_object_max_record_len(const struct cp_object *cp_object) {
+	struct ring_worker *worker = ring_object_worker(cp_object, 0);
+	if (worker == NULL) {
+		return 0;
+	}
+	return ring_worker_batch_max(worker);
+}
+
 struct ring_worker *
 ring_object_worker(const struct cp_object *cp_object, uint64_t worker_idx) {
 	const struct ring_object *self =

@@ -110,6 +110,18 @@ func Test_Parity_Constants(t *testing.T) {
 	require.Equal(t, uint32(ringpb.MaxPublishBatch), cring.MaxPublishBatch)
 }
 
+// Test_Object_MaxRecordLen_TracksEvictChunk verifies that a ring's largest
+// record is its capacity minus the writer's eviction chunk.
+func Test_Object_MaxRecordLen_TracksEvictChunk(t *testing.T) {
+	agent := newTestAgent(t, 1)
+
+	// Capacity 64 / RING_EVICT_CHUNK_SHARE (16) = 4, already 4-byte
+	// aligned and well below RING_EVICT_CHUNK_MAX, so the writer's
+	// eviction chunk is 4 and the largest record is 64 - 4 = 60.
+	object := newRingObject(t, agent, "max-record", 64)
+	require.Equal(t, uint32(60), object.MaxRecordLen())
+}
+
 // Test_Object_Free_LeavesHandleInert verifies that every accessor of a freed
 // handle returns zero or an error and does not touch the freed memory.
 func Test_Object_Free_LeavesHandleInert(t *testing.T) {
@@ -122,6 +134,7 @@ func Test_Object_Free_LeavesHandleInert(t *testing.T) {
 
 	require.Zero(t, object.Capacity())
 	require.Zero(t, object.PublishBatch())
+	require.Zero(t, object.MaxRecordLen())
 	_, err = object.Sources()
 	require.Error(t, err)
 	_, err = object.OpenReaders()
