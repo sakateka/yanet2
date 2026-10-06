@@ -26,6 +26,11 @@ Usage: modules/pdump/tests/ab/pdump-ab.sh [options]
   --reps N        timed repetitions per launch (default: 10)
   --quick         one launch, three repetitions, a smaller matrix
   --before REV    BEFORE revision (default: $BEFORE_REV_DEFAULT)
+  --evict-chunks LIST
+                  eviction chunk sweep instead of the handler matrix:
+                  BEFORE and AFTER at each comma-separated chunk size in
+                  bytes (e.g. "4096,16384,65536"), reader off/on, both
+                  ring sizes, "all" filter; skips the in-tree benchmark
   --out FILE      report path (default: pdump-ab-<host>-<date>.txt in the
                   repository root)
   -h, --help      this help
@@ -39,6 +44,7 @@ CPUS=
 LAUNCHES=5
 REPS=10
 QUICK=0
+EVICT_CHUNKS=
 BEFORE_REV=$BEFORE_REV_DEFAULT
 OUT=
 
@@ -58,6 +64,10 @@ while (($#)); do
 		;;
 	--quick)
 		QUICK=1
+		;;
+	--evict-chunks)
+		EVICT_CHUNKS=$2
+		shift
 		;;
 	--before)
 		BEFORE_REV=$2
@@ -281,9 +291,49 @@ run_matrix() {
 	done
 }
 
+# ---------------------------------------------------------------------------
+# Eviction chunk sweep: BEFORE once per case, AFTER at both publish
+# batches for every chunk, in the same interleaved order as the matrix.
+run_chunk_sweep() {
+	local out=$1
+	: >"$out"
+	local -a cases=() chunks=()
+	IFS=, read -r -a chunks <<<"$EVICT_CHUNKS"
+	local ring rd sz
+	for ring in 1048576 8388608; do
+		for rd in 0 1; do
+			for sz in 64 256 1500 9000; do
+				cases+=("$sz $ring all $rd")
+			done
+		done
+	done
+
+	local l c chunk batch
+	for ((l = 1; l <= LAUNCHES; l++)); do
+		for c in "${cases[@]}"; do
+			# shellcheck disable=SC2086
+			set -- $c
+			taskset -c "$W,$R" "$BEFORE_BIN" \
+				"$1" "$2" "$3" "$4" 8 "$REPS" 100 "$W" "$R" >>"$out"
+			for chunk in "${chunks[@]}"; do
+				for batch in 8 64; do
+					taskset -c "$W,$R" "$AFTER_BIN" \
+						"$1" "$2" "$3" "$4" "$batch" "$REPS" 100 \
+						"$W" "$R" "$chunk" >>"$out"
+				done
+			done
+		done
+	done
+}
+
 RAW="$WORK/raw.txt"
-echo "pdump-ab: running the handler matrix (launches=$LAUNCHES reps=$REPS cpus=$W,$R)"
-run_matrix "$RAW"
+if [[ -n $EVICT_CHUNKS ]]; then
+	echo "pdump-ab: running the eviction chunk sweep (chunks=$EVICT_CHUNKS launches=$LAUNCHES reps=$REPS cpus=$W,$R)"
+	run_chunk_sweep "$RAW"
+else
+	echo "pdump-ab: running the handler matrix (launches=$LAUNCHES reps=$REPS cpus=$W,$R)"
+	run_matrix "$RAW"
+fi
 
 # ---------------------------------------------------------------------------
 # Everything from here on goes to the terminal and to the report file.
@@ -293,9 +343,13 @@ echo "=== pdump A/B capture benchmark ==="
 echo "date:          $(date -Is)"
 echo "host:          $(hostname)"
 echo "uname -m:      $(uname -m)"
-if command -v lscpu >/dev/null; then
-	echo "cpu model:     $(lscpu | sed -n 's/^Model name:[[:space:]]*//p' | head -1)"
-fi
+# The model of each pinned CPU, not of CPU 0: big.LITTLE boards mix
+# core types, and lscpu's first "Model name" is the first cluster's.
+cpu_model() {
+	lscpu -e=CPU,MODELNAME 2>/dev/null |
+		awk -v cpu="$1" '$1 == cpu { $1 = ""; sub(/^ /, ""); print; exit }'
+}
+echo "cpu model:     writer $(cpu_model "$W"), reader $(cpu_model "$R")"
 echo "L1 line:       $(getconf LEVEL1_DCACHE_LINESIZE 2>/dev/null || echo unknown) bytes (getconf)"
 echo "build cache:   YANET_CACHE_LINE_SIZE=${AFTER_BUILD_CACHE_LINE:-unknown} (AFTER build)"
 echo "cpu pair:      writer=$W reader=$R"
@@ -305,6 +359,14 @@ if command -v "${CC:-cc}" >/dev/null; then
 	echo "compiler:      $("${CC:-cc}" --version | head -1)"
 fi
 echo
+
+if [[ -n $EVICT_CHUNKS ]]; then
+	echo "--- eviction chunk sweep: median of $LAUNCHES launch medians, AFTER vs BEFORE delta % per chunk and publish batch ---"
+	python3 "$AB_DIR/summarize.py" --chunks "$RAW"
+	echo
+	echo "report: $OUT"
+	exit 0
+fi
 
 echo "--- handler matrix: median of $LAUNCHES launch medians, [min..max] of launch medians, AFTER vs BEFORE delta % ---"
 python3 "$AB_DIR/summarize.py" "$RAW"

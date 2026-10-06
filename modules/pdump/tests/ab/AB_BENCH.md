@@ -58,6 +58,15 @@ modules/pdump/tests/ab/pdump-ab.sh [--cpus "W,R"] [--quick]
   checking the harness works, not for numbers to act on.
 - `--before REV` (default `a3c5fbdf389542781b6b80dd7c0dce0c9ae6043f`,
   the commit before this story): the BEFORE revision.
+- `--evict-chunks LIST`: instead of the handler matrix, sweep the AFTER
+  ring's eviction chunk over a comma-separated list of sizes in bytes,
+  e.g. `--evict-chunks "4096,16384,65536"`. Every chunk runs at both
+  publish batches against one BEFORE run per cell, over sizes
+  64/256/1500/9000, both ring sizes and reader off/on, with the "all"
+  filter; the in-tree benchmark is skipped. The chunk is set on the
+  bench's ring after `ring_worker_init`, so `common/ring.h` is not
+  rebuilt. Each chunk is one fence per eviction, so this shows what the
+  fence costs when the ring does not fit in cache.
 - `--out FILE`: report path (default `pdump-ab-<host>-<date>.txt` in the
   repository root).
 
@@ -93,7 +102,7 @@ build.
 
 Lands in `pdump-ab-<hostname>-<date>.txt` in the repository root (never
 committed; see `.gitignore`). It opens with the hostname, `uname -m`,
-the `lscpu` model name, the cache line size from both `getconf
+the `lscpu` model name of the writer and reader CPUs, the cache line size from both `getconf
 LEVEL1_DCACHE_LINESIZE` and the `YANET_CACHE_LINE_SIZE` the AFTER build
 actually used, the CPU pair and both revisions, then the handler matrix
 (median of launch medians, `[min..max]` of launch medians, AFTER's delta

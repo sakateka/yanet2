@@ -6,7 +6,7 @@
  *
  * usage: pdump_ab_bench <pkt_size> <ring_bytes> <all|half> <reader 0|1>
  *                       <publish_batch> <reps> <ms_per_rep> <writer_cpu>
- *                       <reader_cpu>
+ *                       <reader_cpu> [evict_chunk]
  *
  * Writer: calls the real pdump_handle_packets on a 32-packet input front,
  * filter "ip" (all IPv4, or every other packet non-IPv4), snaplen 16384.
@@ -16,6 +16,9 @@
  * readable/write acquire, copy <= 512 KiB, recheck readable, drop the
  * overwritten prefix, walk records). BEFORE validates magic, AFTER the
  * frame length, as the Go readers do.
+ * evict_chunk (AFTER only, bytes, multiple of 4) replaces the ring's
+ * eviction chunk after ring_worker_init, to measure how often the writer
+ * should pay the eviction fence; 0 or absent keeps the ring's default.
  */
 #include <pthread.h>
 #include <sched.h>
@@ -275,10 +278,10 @@ cmp_u64(const void *a, const void *b) {
 
 int
 main(int argc, char **argv) {
-	if (argc != 10) {
+	if (argc != 10 && argc != 11) {
 		fprintf(stderr,
 			"usage: %s size ring all|half reader batch reps ms "
-			"wcpu rcpu\n",
+			"wcpu rcpu [evict_chunk]\n",
 			argv[0]);
 		return 2;
 	}
@@ -291,7 +294,15 @@ main(int argc, char **argv) {
 	int ms = atoi(argv[7]);
 	int wcpu = atoi(argv[8]);
 	int rcpu = atoi(argv[9]);
+	uint32_t evict_chunk = argc == 11 ? (uint32_t)atoi(argv[10]) : 0;
 	(void)batch;
+	// The chunk must leave room for the largest record (frame, 32-byte
+	// metadata and SNAPLEN of payload) or the writer can never commit it.
+	if (evict_chunk % 4 != 0 ||
+	    (evict_chunk != 0 && evict_chunk > ring_size - (SNAPLEN + 64u))) {
+		fprintf(stderr, "bad evict_chunk %u\n", evict_chunk);
+		return 2;
+	}
 
 	char lcores[32];
 	snprintf(lcores, sizeof(lcores), "%d", wcpu);
@@ -361,6 +372,10 @@ main(int argc, char **argv) {
 	struct ring_object *obj = XNEW(struct ring_object, 4096);
 	struct ring_worker *rw = XNEW(struct ring_worker, sizeof(*rw) * 2);
 	ring_worker_init(rw, ring_size, batch);
+	if (evict_chunk != 0) {
+		rw->local.evict_chunk = evict_chunk;
+	}
+	evict_chunk = rw->local.evict_chunk;
 	SET_OFFSET_OF(&rw->local.data, data);
 	obj->worker_count = 1;
 	obj->capacity = ring_size;
@@ -436,7 +451,7 @@ main(int argc, char **argv) {
 	memcpy(sorted, res, sizeof(double) * reps);
 	qsort(sorted, reps, sizeof(double), cmp_u64);
 	printf("%s size=%u ring=%u filter=%s reader=%d batch=%u "
-	       "ns/pkt min=%.2f med=%.2f max=%.2f rd_records=%lu "
+	       "chunk=%u ns/pkt min=%.2f med=%.2f max=%.2f rd_records=%lu "
 	       "rd_resets=%lu\n",
 #ifdef PDUMP_BENCH_AFTER
 	       "AFTER ",
@@ -452,6 +467,7 @@ main(int argc, char **argv) {
 #else
 	       0u,
 #endif
+	       evict_chunk,
 	       sorted[0],
 	       sorted[reps / 2],
 	       sorted[reps - 1],
