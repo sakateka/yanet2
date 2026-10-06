@@ -1,0 +1,4 @@
+/cp_lock.bpf.o
+/collector
+/selftest/workload
+/selftest/cp_lock_overflow_test.bpf.o
