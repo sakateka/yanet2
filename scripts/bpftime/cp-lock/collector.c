@@ -5,8 +5,8 @@
 // periodically. Not part of the control plane — it changes no YANET
 // code and runs only when a developer opts in.
 
-#if !defined(__x86_64__)
-#error "this collector resolves a uprobe's caller via the x86-64 stack layout; build for x86-64"
+#if !defined(__x86_64__) && !defined(__aarch64__)
+#error "the uprobe program supports only x86-64 and arm64"
 #endif
 
 // For mkostemp(), used to create each snapshot's temp file.

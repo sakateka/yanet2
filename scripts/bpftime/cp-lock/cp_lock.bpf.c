@@ -3,12 +3,11 @@
 // Six probes (entry and return of each function) turn a call/return pair
 // into a wait and hold duration, keyed by the calling thread while the
 // call is in flight and folded into a per-call-site total at unlock
-// return. x86-64 only: the caller's return address is read off the top
-// of the stack at function entry, which only holds at the entry
-// instruction on this architecture.
+// return. x86-64 and arm64 only: the caller's return address is taken
+// at function entry, from the top of the stack or the link register.
 
-#if !defined(__TARGET_ARCH_x86)
-#error "cp_lock.bpf.c reads the return address off the x86-64 stack layout; build with -D__TARGET_ARCH_x86"
+#if !defined(__TARGET_ARCH_x86) && !defined(__TARGET_ARCH_arm64)
+#error "cp_lock.bpf.c supports only x86-64 and arm64; build with -D__TARGET_ARCH_x86 or -D__TARGET_ARCH_arm64"
 #endif
 
 #include <linux/bpf.h>
@@ -104,7 +103,10 @@ cp_lock_drops_ptr(void) {
 	return bpf_map_lookup_elem(&cp_lock_drops, &zero_key);
 }
 
-// Reads the caller's return address off the top of the stack.
+// Reads the caller's return address at function entry.
+//
+// On x86-64 the call instruction left it on the top of the stack; on
+// arm64 it is in the link register.
 //
 // Returns 1 and writes it on success, 0 if the read failed (the
 // stack page was not resident, or similar) — a zero address is never
@@ -112,9 +114,14 @@ cp_lock_drops_ptr(void) {
 // real call site.
 static __always_inline int
 cp_lock_read_ret_addr(struct pt_regs *ctx, __u64 *out) {
+#if defined(__TARGET_ARCH_arm64)
+	*out = PT_REGS_RET(ctx);
+	return *out != 0;
+#else
 	return bpf_probe_read_user(
 		       out, sizeof(*out), (void *)PT_REGS_SP(ctx)
 	       ) == 0;
+#endif
 }
 
 // Records tgid's load address on its first call to any probed

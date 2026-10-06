@@ -121,8 +121,9 @@ Measured attach pause:
 
 ## Limitations
 
-- x86-64 only: the caller's return address is read directly off the
-  stack at function entry.
+- x86-64 and arm64 only: the caller's return address is taken at
+  function entry, from the stack on x86-64 and the link register on
+  arm64.
 - `bpftime attach` briefly stops every thread in the target while
   patching it in memory; pause scales with thread count.
 - Go control-plane binaries link the lock through cgo; exercised in

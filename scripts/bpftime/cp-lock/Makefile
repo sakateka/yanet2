@@ -38,7 +38,8 @@ LIBBPF_LIBS := $(LIBBPF_STATIC) -lelf -lz
 endif
 
 CFLAGS ?= -O2 -g -Wall -Wextra
-BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_x86 -Wall -Wextra $(LIBBPF_CFLAGS)
+BPF_TARGET_ARCH := $(if $(filter aarch64,$(shell uname -m)),arm64,x86)
+BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_TARGET_ARCH) -Wall -Wextra $(LIBBPF_CFLAGS)
 
 # clang's -target bpf does not pick up the host's own multiarch header
 # path the way a native compile does; added only when that directory
